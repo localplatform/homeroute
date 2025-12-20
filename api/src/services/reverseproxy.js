@@ -620,18 +620,7 @@ function generateCaddyRoute(host, baseDomain) {
     }]
   };
 
-  // Splash screen handler for non-auth routes (uses cookie, shows once)
-  const splashHandler = {
-    handler: 'static_response',
-    status_code: 200,
-    headers: {
-      'Content-Type': ['text/html; charset=utf-8'],
-      'Cache-Control': ['no-cache, no-store, must-revalidate']
-    },
-    body: getSplashHtml(domain)
-  };
-
-  // Splash screen handler for auth routes (uses query param, shows every time)
+  // Splash screen handler for auth routes (short-lived cookie, shows every fresh visit)
   const authSplashHandler = {
     handler: 'static_response',
     status_code: 200,
@@ -684,14 +673,7 @@ function generateCaddyRoute(host, baseDomain) {
       }]
     });
   } else {
-    // For non-auth routes: splash shown once (using cookie)
-    // Route 1: No splash cookie -> show splash
-    routes.push({
-      match: [{ not: [{ header: { Cookie: ['*proxy_splash=1*'] } }] }],
-      handle: [splashHandler]
-    });
-
-    // Route 2: Splash seen -> proxy to target
+    // For non-auth routes: no splash, just proxy directly
     routes.push({
       handle: [reverseProxyHandler]
     });
