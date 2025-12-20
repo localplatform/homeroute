@@ -12,7 +12,8 @@ import {
   Lock,
   Server,
   Wifi,
-  Pencil
+  Pencil,
+  Shield
 } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
@@ -44,8 +45,8 @@ function ReverseProxy() {
 
   // Form states
   const [hostType, setHostType] = useState('subdomain');
-  const [newHost, setNewHost] = useState({ subdomain: '', customDomain: '', targetHost: 'localhost', targetPort: '' });
-  const [editForm, setEditForm] = useState({ targetHost: '', targetPort: '' });
+  const [newHost, setNewHost] = useState({ subdomain: '', customDomain: '', targetHost: 'localhost', targetPort: '', localOnly: false });
+  const [editForm, setEditForm] = useState({ targetHost: '', targetPort: '', localOnly: false });
   const [configForm, setConfigForm] = useState({ baseDomain: '' });
 
   // Action states
@@ -101,7 +102,8 @@ function ReverseProxy() {
     try {
       const payload = {
         targetHost: newHost.targetHost,
-        targetPort: parseInt(newHost.targetPort)
+        targetPort: parseInt(newHost.targetPort),
+        localOnly: newHost.localOnly
       };
       if (hostType === 'subdomain') {
         payload.subdomain = newHost.subdomain;
@@ -113,7 +115,7 @@ function ReverseProxy() {
       if (res.data.success) {
         setMessage({ type: 'success', text: 'Hôte ajouté' });
         setShowAddModal(false);
-        setNewHost({ subdomain: '', customDomain: '', targetHost: 'localhost', targetPort: '' });
+        setNewHost({ subdomain: '', customDomain: '', targetHost: 'localhost', targetPort: '', localOnly: false });
         fetchData();
       } else {
         setMessage({ type: 'error', text: res.data.error });
@@ -155,7 +157,7 @@ function ReverseProxy() {
 
   function openEditModal(host) {
     setEditingHost(host);
-    setEditForm({ targetHost: host.targetHost, targetPort: String(host.targetPort) });
+    setEditForm({ targetHost: host.targetHost, targetPort: String(host.targetPort), localOnly: !!host.localOnly });
     setShowEditModal(true);
   }
 
@@ -168,7 +170,8 @@ function ReverseProxy() {
     try {
       const res = await updateReverseProxyHost(editingHost.id, {
         targetHost: editForm.targetHost,
-        targetPort: parseInt(editForm.targetPort)
+        targetPort: parseInt(editForm.targetPort),
+        localOnly: editForm.localOnly
       });
       if (res.data.success) {
         setMessage({ type: 'success', text: 'Hôte modifié' });
@@ -378,6 +381,12 @@ function ReverseProxy() {
                         >
                           {host.customDomain || `${host.subdomain}.${config?.baseDomain}`}
                         </a>
+                        {host.localOnly && (
+                          <span className="flex items-center gap-1 text-xs text-yellow-400 bg-yellow-900/30 px-2 py-0.5 rounded" title="Réseau local uniquement">
+                            <Shield className="w-3 h-3" />
+                            Local
+                          </span>
+                        )}
                       </div>
                     </td>
                     <td className="py-3 font-mono text-sm text-gray-300">
@@ -522,6 +531,25 @@ function ReverseProxy() {
                 />
               </div>
 
+              {/* Local Only Toggle */}
+              <div
+                onClick={() => setNewHost({ ...newHost, localOnly: !newHost.localOnly })}
+                className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                  newHost.localOnly
+                    ? 'bg-yellow-900/30 border-yellow-600 text-yellow-400'
+                    : 'bg-gray-900/50 border-gray-700 text-gray-400 hover:border-gray-600'
+                }`}
+              >
+                <Shield className={`w-5 h-5 ${newHost.localOnly ? 'text-yellow-400' : 'text-gray-500'}`} />
+                <div className="flex-1">
+                  <div className="font-medium text-sm">Réseau local uniquement</div>
+                  <div className="text-xs opacity-75">Bloque l&apos;accès depuis Internet</div>
+                </div>
+                <div className={`w-10 h-6 rounded-full transition-colors ${newHost.localOnly ? 'bg-yellow-600' : 'bg-gray-600'}`}>
+                  <div className={`w-4 h-4 bg-white rounded-full mt-1 transition-transform ${newHost.localOnly ? 'translate-x-5' : 'translate-x-1'}`} />
+                </div>
+              </div>
+
               {/* Certificate Info */}
               <div className="text-xs text-gray-500 bg-gray-900/50 rounded p-3">
                 <p className="flex items-center gap-1">
@@ -644,6 +672,25 @@ function ReverseProxy() {
                   onChange={e => setEditForm({ ...editForm, targetPort: e.target.value })}
                   className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm focus:outline-none focus:border-blue-500"
                 />
+              </div>
+
+              {/* Local Only Toggle */}
+              <div
+                onClick={() => setEditForm({ ...editForm, localOnly: !editForm.localOnly })}
+                className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                  editForm.localOnly
+                    ? 'bg-yellow-900/30 border-yellow-600 text-yellow-400'
+                    : 'bg-gray-900/50 border-gray-700 text-gray-400 hover:border-gray-600'
+                }`}
+              >
+                <Shield className={`w-5 h-5 ${editForm.localOnly ? 'text-yellow-400' : 'text-gray-500'}`} />
+                <div className="flex-1">
+                  <div className="font-medium text-sm">Réseau local uniquement</div>
+                  <div className="text-xs opacity-75">Bloque l&apos;accès depuis Internet</div>
+                </div>
+                <div className={`w-10 h-6 rounded-full transition-colors ${editForm.localOnly ? 'bg-yellow-600' : 'bg-gray-600'}`}>
+                  <div className={`w-4 h-4 bg-white rounded-full mt-1 transition-transform ${editForm.localOnly ? 'translate-x-5' : 'translate-x-1'}`} />
+                </div>
               </div>
             </div>
 

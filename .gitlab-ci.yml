@@ -5,35 +5,43 @@ stages:
 
 image: node:22-alpine
 
-cache:
-  key: ${CI_COMMIT_REF_SLUG}
-  paths:
-    - node_modules/
-    - api/node_modules/
-    - web/node_modules/
-
 # Stage 1: Installation des dépendances
 install:
   stage: install
   script:
     - npm run install:all
-  artifacts:
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
     paths:
       - node_modules/
       - api/node_modules/
       - web/node_modules/
-    expire_in: 1 hour
+    policy: push
 
 # Stage 2: Lint (qualité du code)
 lint:frontend:
   stage: lint
   needs: [install]
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+      - api/node_modules/
+      - web/node_modules/
+    policy: pull
   script:
     - cd web && npm run lint
 
 lint:backend:
   stage: lint
   needs: [install]
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+      - api/node_modules/
+      - web/node_modules/
+    policy: pull
   script:
     - cd api && npm run lint
 
@@ -41,6 +49,13 @@ lint:backend:
 build:frontend:
   stage: build
   needs: [lint:frontend, lint:backend]
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+      - api/node_modules/
+      - web/node_modules/
+    policy: pull
   script:
     - cd web && npm run build
   artifacts:
@@ -51,5 +66,12 @@ build:frontend:
 build:backend:
   stage: build
   needs: [lint:frontend, lint:backend]
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+      - api/node_modules/
+      - web/node_modules/
+    policy: pull
   script:
     - cd api && node -e "import('./src/index.js')"

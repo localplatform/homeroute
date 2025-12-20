@@ -10,6 +10,14 @@ const getEnv = () => ({
   CADDY_API: process.env.CADDY_API_URL || 'http://localhost:2019'
 });
 
+// RFC 1918 private networks + localhost
+const LOCAL_NETWORKS = [
+  '192.168.0.0/16',
+  '10.0.0.0/8',
+  '172.16.0.0/12',
+  '127.0.0.0/8'
+];
+
 // Default config structure
 const getDefaultConfig = () => ({
   baseDomain: '',
@@ -201,6 +209,7 @@ export async function addHost(hostConfig) {
       customDomain: customDomain?.toLowerCase() || null,
       targetHost,
       targetPort: port,
+      localOnly: !!hostConfig.localOnly,
       enabled: true,
       createdAt: new Date().toISOString()
     };
@@ -226,7 +235,7 @@ export async function updateHost(hostId, updates) {
       return { success: false, error: 'Host not found' };
     }
 
-    const allowedUpdates = ['targetHost', 'targetPort', 'enabled'];
+    const allowedUpdates = ['targetHost', 'targetPort', 'enabled', 'localOnly'];
     for (const key of Object.keys(updates)) {
       if (allowedUpdates.includes(key)) {
         if (key === 'targetPort') {
@@ -282,15 +291,41 @@ export async function toggleHost(hostId, enabled) {
 function generateCaddyRoute(host, baseDomain) {
   const domain = host.customDomain || `${host.subdomain}.${baseDomain}`;
 
+  const reverseProxyHandler = {
+    handler: 'reverse_proxy',
+    upstreams: [{
+      dial: `${host.targetHost}:${host.targetPort}`
+    }]
+  };
+
+  // If localOnly, wrap in subroute with IP restriction
+  if (host.localOnly) {
+    return {
+      '@id': host.id,
+      match: [{ host: [domain] }],
+      handle: [{
+        handler: 'subroute',
+        routes: [
+          {
+            match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }],
+            handle: [reverseProxyHandler]
+          },
+          {
+            handle: [{
+              handler: 'error',
+              status_code: 403
+            }]
+          }
+        ]
+      }],
+      terminal: true
+    };
+  }
+
   return {
     '@id': host.id,
     match: [{ host: [domain] }],
-    handle: [{
-      handler: 'reverse_proxy',
-      upstreams: [{
-        dial: `${host.targetHost}:${host.targetPort}`
-      }]
-    }],
+    handle: [reverseProxyHandler],
     terminal: true
   };
 }
