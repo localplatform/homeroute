@@ -83,7 +83,11 @@
       "Bash(systemctl list-dependencies:*)",
       "Bash(who:*)",
       "Bash(w:*)",
-      "Bash(rm:*)"
+      "Bash(rm:*)",
+      "Bash(ping:*)",
+      "Bash(sudo mount:*)",
+      "Bash(ssh:*)",
+      "Bash(sshpass:*)"
     ]
   }
 }

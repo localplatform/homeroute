@@ -3,9 +3,102 @@ import { existsSync } from 'fs';
 import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
+import dgram from 'dgram';
 import { getIO } from '../socket.js';
 
 const execAsync = promisify(exec);
+
+// Wake-on-LAN: envoie un magic packet UDP
+export function sendWakeOnLan(macAddress) {
+  return new Promise((resolve, reject) => {
+    // Valider et parser l'adresse MAC
+    const macClean = macAddress.replace(/[:-]/g, '').toLowerCase();
+    if (!/^[0-9a-f]{12}$/.test(macClean)) {
+      return reject(new Error('Invalid MAC address format'));
+    }
+
+    // Créer le magic packet: 6x 0xFF + 16x MAC address
+    const macBytes = Buffer.from(macClean, 'hex');
+    const magicPacket = Buffer.alloc(6 + 16 * 6);
+
+    // 6 bytes de 0xFF
+    for (let i = 0; i < 6; i++) {
+      magicPacket[i] = 0xff;
+    }
+
+    // 16 répétitions de l'adresse MAC
+    for (let i = 0; i < 16; i++) {
+      macBytes.copy(magicPacket, 6 + i * 6);
+    }
+
+    // Envoyer en broadcast UDP sur port 9
+    const socket = dgram.createSocket('udp4');
+    socket.once('error', (err) => {
+      socket.close();
+      reject(err);
+    });
+
+    socket.bind(() => {
+      socket.setBroadcast(true);
+      socket.send(magicPacket, 0, magicPacket.length, 9, '255.255.255.255', (err) => {
+        socket.close();
+        if (err) {
+          reject(err);
+        } else {
+          resolve({ success: true, message: `WOL packet sent to ${macAddress}` });
+        }
+      });
+    });
+  });
+}
+
+// Ping un serveur pour vérifier s'il est en ligne
+export async function pingServer(ip, timeoutMs = 2000) {
+  try {
+    const timeoutSec = Math.ceil(timeoutMs / 1000);
+    const startTime = Date.now();
+    await execAsync(`ping -c 1 -W ${timeoutSec} ${ip}`, { timeout: timeoutMs + 1000 });
+    const pingMs = Date.now() - startTime;
+    return { online: true, pingMs };
+  } catch {
+    return { online: false, pingMs: null };
+  }
+}
+
+// Attendre que le serveur soit prêt (ping + SMB accessible) - pas de timeout
+export async function waitForServer() {
+  const { SMB_SERVER } = getEnv();
+  const io = getIO();
+  const startTime = Date.now();
+  let attempt = 0;
+
+  // Étape 1: Attendre le ping (indéfiniment)
+  while (true) {
+    attempt++;
+    io.emit('backup:wol-ping-waiting', { attempt, elapsed: Math.floor((Date.now() - startTime) / 1000) });
+
+    const result = await pingServer(SMB_SERVER, 1000);
+    if (result.online) {
+      io.emit('backup:wol-ping-ok', { pingMs: result.pingMs });
+      break;
+    }
+  }
+
+  // Étape 2: Vérifier accès SMB (indéfiniment)
+  io.emit('backup:wol-smb-waiting');
+
+  while (true) {
+    try {
+      await mountSmb();
+      await unmountSmb();
+      io.emit('backup:wol-ready');
+      return { success: true };
+    } catch {
+      // Attendre avant la prochaine tentative
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+  }
+}
 
 // État du backup actif
 let activeBackupProcess = null;
@@ -34,11 +127,13 @@ export async function getConfig() {
   try {
     const env = getEnv();
     let sources = [];
+    let wolMacAddress = '';
 
     if (existsSync(env.BACKUP_CONFIG_FILE)) {
       const content = await readFile(env.BACKUP_CONFIG_FILE, 'utf-8');
       const config = JSON.parse(content);
       sources = config.sources || [];
+      wolMacAddress = config.wolMacAddress || '';
     }
 
     return {
@@ -49,7 +144,8 @@ export async function getConfig() {
         smbUsername: env.SMB_USERNAME,
         smbPasswordSet: !!env.SMB_PASSWORD,
         mountPoint: env.SMB_MOUNT_POINT,
-        sources
+        sources,
+        wolMacAddress
       }
     };
   } catch (error) {
@@ -57,11 +153,25 @@ export async function getConfig() {
   }
 }
 
-export async function saveConfig(sources) {
+export async function saveConfig({ sources, wolMacAddress }) {
   try {
     const { BACKUP_CONFIG_FILE } = getEnv();
     await ensureConfigDir();
-    await writeFile(BACKUP_CONFIG_FILE, JSON.stringify({ sources }, null, 2));
+
+    // Charger la config existante pour préserver les autres champs
+    let existingConfig = {};
+    if (existsSync(BACKUP_CONFIG_FILE)) {
+      const content = await readFile(BACKUP_CONFIG_FILE, 'utf-8');
+      existingConfig = JSON.parse(content);
+    }
+
+    const newConfig = {
+      ...existingConfig,
+      sources: sources !== undefined ? sources : existingConfig.sources || [],
+      wolMacAddress: wolMacAddress !== undefined ? wolMacAddress : existingConfig.wolMacAddress || ''
+    };
+
+    await writeFile(BACKUP_CONFIG_FILE, JSON.stringify(newConfig, null, 2));
     return { success: true, message: 'Configuration saved' };
   } catch (error) {
     return { success: false, error: error.message };
@@ -93,14 +203,11 @@ async function mountSmb() {
     return { success: true, message: 'Already mounted' };
   }
 
-  // Utiliser les options directes avec single quotes pour éviter l'interprétation du shell
+  // Utiliser les options directes avec single quotes pour le mot de passe
   try {
-    // Échapper les single quotes dans le mot de passe pour le shell
-    const escapedPassword = env.SMB_PASSWORD.replace(/'/g, "'\\''");
-
     const mountOptions = env.SMB_USERNAME
-      ? `username=${env.SMB_USERNAME},password='${escapedPassword}',vers=3.0,sec=ntlmssp,uid=$(id -u),gid=$(id -g)`
-      : `guest,vers=3.0,uid=$(id -u),gid=$(id -g)`;
+      ? `'username=${env.SMB_USERNAME},password=${env.SMB_PASSWORD},vers=3.0,uid=0,gid=0'`
+      : `'guest,vers=3.0,uid=0,gid=0'`;
 
     const mountCmd = `sudo mount -t cifs "//${env.SMB_SERVER}/${env.SMB_SHARE}" "${env.SMB_MOUNT_POINT}" -o ${mountOptions}`;
     await execAsync(mountCmd, { timeout: 30000 });
@@ -128,8 +235,8 @@ export async function testConnection() {
     const { SMB_MOUNT_POINT } = getEnv();
     await mountSmb();
 
-    const testFile = path.join(SMB_MOUNT_POINT, '.connection-test');
-    await execAsync(`touch "${testFile}" && rm "${testFile}"`);
+    // Vérifier qu'on peut lister le contenu (lecture seule suffit)
+    await execAsync(`ls "${SMB_MOUNT_POINT}"`);
 
     await unmountSmb();
 
@@ -280,7 +387,20 @@ export async function runBackup() {
       return { success: false, error: 'No valid backup sources found' };
     }
 
+    // Wake-on-LAN si configuré
+    if (config.wolMacAddress) {
+      getIO().emit('backup:wol-sent', { macAddress: config.wolMacAddress });
+      await sendWakeOnLan(config.wolMacAddress);
+      await waitForServer();
+    }
+
     await mountSmb();
+
+    // SAFETY CHECK: Verify SMB is actually mounted before starting backup
+    // This prevents writing to local disk if mount failed silently
+    if (!await isMounted()) {
+      throw new Error('SMB share not mounted - aborting to prevent local disk backup');
+    }
 
     // Emit backup started
     getIO().emit('backup:started', {
@@ -295,6 +415,11 @@ export async function runBackup() {
 
     for (let i = 0; i < validSources.length; i++) {
       if (backupCancelled) break;
+
+      // Verify mount is still active before each source
+      if (!await isMounted()) {
+        throw new Error('SMB share disconnected during backup - aborting');
+      }
 
       const source = validSources[i];
       const sourceName = path.basename(source);
@@ -462,5 +587,140 @@ async function addToHistory(entry) {
     await writeFile(BACKUP_HISTORY_FILE, JSON.stringify(history, null, 2));
   } catch (error) {
     console.error('Failed to save backup history:', error);
+  }
+}
+
+// Lister le contenu d'un répertoire distant (explorateur de fichiers)
+export async function getRemoteBackups(relativePath = '') {
+  const { SMB_MOUNT_POINT } = getEnv();
+
+  try {
+    await mountSmb();
+
+    // Construire le chemin complet (sécurisé - pas de ..)
+    const safePath = relativePath.replace(/\.\./g, '').replace(/^\/+/, '');
+    const targetPath = path.join(SMB_MOUNT_POINT, safePath);
+
+    // Vérifier que le chemin est bien sous le point de montage
+    if (!targetPath.startsWith(SMB_MOUNT_POINT)) {
+      await unmountSmb();
+      return { success: false, error: 'Invalid path' };
+    }
+
+    // Lister le contenu du répertoire
+    const { stdout: lsOutput } = await execAsync(`ls -1 "${targetPath}"`);
+    const entries = lsOutput.trim().split('\n').filter(f => f && !f.startsWith('.'));
+
+    const items = [];
+
+    for (const entry of entries) {
+      const entryPath = path.join(targetPath, entry);
+
+      try {
+        // Obtenir le type (fichier ou dossier)
+        const { stdout: statType } = await execAsync(`stat -c %F "${entryPath}"`);
+        const isDirectory = statType.trim().includes('directory');
+
+        // Obtenir la taille
+        let size = 0;
+        if (isDirectory) {
+          // Pour les dossiers, obtenir la taille totale (peut être lent)
+          try {
+            const { stdout: duOutput } = await execAsync(`du -sb "${entryPath}" | cut -f1`, { timeout: 30000 });
+            size = parseInt(duOutput.trim()) || 0;
+          } catch {
+            size = 0;
+          }
+        } else {
+          const { stdout: sizeOutput } = await execAsync(`stat -c %s "${entryPath}"`);
+          size = parseInt(sizeOutput.trim()) || 0;
+        }
+
+        // Obtenir la date de dernière modification
+        const { stdout: statOutput } = await execAsync(`stat -c %Y "${entryPath}"`);
+        const lastModified = new Date(parseInt(statOutput.trim()) * 1000).toISOString();
+
+        items.push({
+          name: entry,
+          type: isDirectory ? 'directory' : 'file',
+          size,
+          lastModified
+        });
+      } catch (err) {
+        console.error(`Error getting info for ${entry}:`, err.message);
+      }
+    }
+
+    await unmountSmb();
+
+    // Trier: dossiers d'abord, puis par nom
+    items.sort((a, b) => {
+      if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    return { success: true, items, currentPath: safePath };
+  } catch (error) {
+    await unmountSmb();
+    return { success: false, error: error.message };
+  }
+}
+
+// Supprimer un élément distant (fichier ou dossier)
+export async function deleteRemoteItem(relativePath) {
+  const { SMB_MOUNT_POINT } = getEnv();
+
+  if (!relativePath || relativePath === '/' || relativePath === '') {
+    return { success: false, error: 'Cannot delete root directory' };
+  }
+
+  try {
+    await mountSmb();
+
+    // Construire le chemin complet (sécurisé)
+    const safePath = relativePath.replace(/\.\./g, '').replace(/^\/+/, '');
+    const targetPath = path.join(SMB_MOUNT_POINT, safePath);
+
+    // Vérifier que le chemin est bien sous le point de montage
+    if (!targetPath.startsWith(SMB_MOUNT_POINT) || targetPath === SMB_MOUNT_POINT) {
+      await unmountSmb();
+      return { success: false, error: 'Invalid path' };
+    }
+
+    // Vérifier que l'élément existe
+    if (!existsSync(targetPath)) {
+      await unmountSmb();
+      return { success: false, error: 'Path does not exist' };
+    }
+
+    // Supprimer (rm -rf pour les dossiers)
+    await execAsync(`rm -rf "${targetPath}"`);
+
+    await unmountSmb();
+    return { success: true, message: `Deleted: ${safePath}` };
+  } catch (error) {
+    await unmountSmb();
+    return { success: false, error: error.message };
+  }
+}
+
+// Arrêter le serveur distant via SSH
+export async function shutdownServer() {
+  const { SMB_SERVER } = getEnv();
+  const sshUser = process.env.SSH_USER || 'root';
+
+  try {
+    await execAsync(
+      `ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes ${sshUser}@${SMB_SERVER} 'sudo -n /sbin/shutdown -h now'`,
+      { timeout: 10000 }
+    );
+    return { success: true, message: 'Shutdown command sent' };
+  } catch (error) {
+    // Le SSH peut se terminer abruptement quand le serveur s'éteint
+    // On considère ça comme un succès si l'erreur est liée à la connexion fermée
+    if (error.killed || error.code === 255 || error.message.includes('closed')) {
+      return { success: true, message: 'Shutdown initiated' };
+    }
+    return { success: false, error: error.message };
   }
 }

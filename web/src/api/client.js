@@ -35,12 +35,17 @@ export const forceDdnsUpdate = () => api.post('/ddns/update');
 
 // Backup SMB
 export const getBackupConfig = () => api.get('/backup/config');
-export const saveBackupConfig = (sources) => api.post('/backup/config', { sources });
+export const saveBackupConfig = (config) => api.post('/backup/config', config);
 export const runBackup = () => api.post('/backup/run', {}, { timeout: 3600000 });
 export const getBackupHistory = () => api.get('/backup/history');
 export const testBackupConnection = () => api.post('/backup/test');
 export const cancelBackup = () => api.post('/backup/cancel');
 export const getBackupStatus = () => api.get('/backup/status');
+export const wakeBackupServer = () => api.post('/backup/wake');
+export const getBackupServerStatus = () => api.get('/backup/server-status');
+export const getRemoteBackups = (path = '') => api.get('/backup/remote', { params: { path } });
+export const deleteRemoteItem = (path) => api.delete('/backup/remote', { data: { path } });
+export const shutdownBackupServer = () => api.post('/backup/shutdown');
 
 // Reverse Proxy
 export const getReverseProxyConfig = () => api.get('/reverseproxy/config');

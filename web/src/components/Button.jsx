@@ -4,6 +4,7 @@ function Button({ children, onClick, variant = 'primary', disabled = false, load
     secondary: 'bg-gray-600 hover:bg-gray-700 text-white',
     danger: 'bg-red-600 hover:bg-red-700 text-white',
     success: 'bg-green-600 hover:bg-green-700 text-white',
+    warning: 'bg-yellow-600 hover:bg-yellow-700 text-white',
   };
 
   return (
