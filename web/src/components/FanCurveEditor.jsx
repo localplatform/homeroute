@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 
 const TEMP_MIN = 30;
-const TEMP_MAX = 90;
+const TEMP_MAX = 70;
 const PWM_MIN = 0;
 const PWM_MAX = 100;
 
@@ -37,14 +37,14 @@ function curvePath(points) {
   return svgPoints.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
 }
 
-function FanCurveEditor({ profiles, activeProfile, onCurveChange, onSave, saving }) {
+function FanCurveEditor({ profiles, activeProfile, onCurveChange, onDragEnd }) {
   const svgRef = useRef(null);
   const [dragging, setDragging] = useState(null); // { fan: 'fan1', pointIndex: 0 }
   const [hoveredPoint, setHoveredPoint] = useState(null);
 
   const profile = profiles?.find(p => p.name === activeProfile);
-  const fan1Curve = profile?.fans?.fan1?.curve || [[30, 30], [50, 50], [70, 70], [85, 100]];
-  const fan2Curve = profile?.fans?.fan2?.curve || [[30, 25], [50, 45], [70, 65], [85, 90]];
+  const fan1Curve = profile?.fans?.fan1?.curve || [[30, 35], [50, 55], [70, 100]];
+  const fan2Curve = profile?.fans?.fan2?.curve || [[30, 30], [50, 50], [70, 90]];
 
   const handleMouseDown = useCallback((e, fan, pointIndex) => {
     e.preventDefault();
@@ -82,8 +82,11 @@ function FanCurveEditor({ profiles, activeProfile, onCurveChange, onSave, saving
   }, [dragging, fan1Curve, fan2Curve, activeProfile, onCurveChange]);
 
   const handleMouseUp = useCallback(() => {
+    if (dragging && onDragEnd) {
+      onDragEnd(activeProfile);
+    }
     setDragging(null);
-  }, []);
+  }, [dragging, activeProfile, onDragEnd]);
 
   useEffect(() => {
     if (dragging) {
@@ -97,7 +100,7 @@ function FanCurveEditor({ profiles, activeProfile, onCurveChange, onSave, saving
   }, [dragging, handleMouseMove, handleMouseUp]);
 
   // Grid lines
-  const gridLinesX = [30, 40, 50, 60, 70, 80, 90];
+  const gridLinesX = [30, 40, 50, 60, 70];
   const gridLinesY = [0, 25, 50, 75, 100];
 
   return (
@@ -323,27 +326,6 @@ function FanCurveEditor({ profiles, activeProfile, onCurveChange, onSave, saving
           <div className="w-6 h-0.5 bg-purple-500" style={{ borderStyle: 'dashed', borderWidth: '1px 0 0 0' }}></div>
           <span className="text-gray-300">SYS_FAN</span>
         </div>
-      </div>
-
-      {/* Save button */}
-      <div className="flex justify-end">
-        <button
-          onClick={onSave}
-          disabled={saving}
-          className="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white rounded-lg font-medium transition-colors flex items-center gap-2"
-        >
-          {saving ? (
-            <>
-              <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-              </svg>
-              Enregistrement...
-            </>
-          ) : (
-            'Enregistrer les courbes'
-          )}
-        </button>
       </div>
     </div>
   );

@@ -13,7 +13,13 @@ import {
   applyMode,
   getCurrentMode,
   getEnergyModes,
-  ENERGY_MODES
+  getBenchmarkStatus,
+  startBenchmark,
+  stopBenchmark,
+  getAutoSelectConfig,
+  saveAutoSelectConfig,
+  getNetworkRps,
+  getAutoSelectStatus
 } from '../services/energy.js';
 
 const router = Router();
@@ -54,16 +60,8 @@ router.get('/fans', async (req, res) => {
   res.json(result);
 });
 
-// POST /api/energy/fans/:id - Modifier un ventilateur
-router.post('/fans/:id', async (req, res) => {
-  const { id } = req.params;
-  const { pwm, mode } = req.body;
-
-  const result = await setFanSpeed(id, pwm, mode);
-  res.json(result);
-});
-
 // ============ FAN PROFILES ============
+// NOTE: Ces routes doivent être AVANT /fans/:id pour éviter que :id matche "profiles"
 
 // GET /api/energy/fans/profiles - Liste des profils
 router.get('/fans/profiles', async (req, res) => {
@@ -90,6 +88,15 @@ router.post('/fans/profiles/:name/apply', async (req, res) => {
   res.json(result);
 });
 
+// POST /api/energy/fans/:id - Modifier un ventilateur (doit être APRÈS /fans/profiles)
+router.post('/fans/:id', async (req, res) => {
+  const { id } = req.params;
+  const { pwm, mode } = req.body;
+
+  const result = await setFanSpeed(id, pwm, mode);
+  res.json(result);
+});
+
 // ============ SCHEDULE ============
 
 // GET /api/energy/schedule - Config de programmation
@@ -102,6 +109,33 @@ router.get('/schedule', async (req, res) => {
 router.post('/schedule', async (req, res) => {
   const config = req.body;
   const result = await saveScheduleConfig(config);
+  res.json(result);
+});
+
+// ============ AUTO-SELECT ============
+
+// GET /api/energy/autoselect - Config de sélection automatique
+router.get('/autoselect', async (req, res) => {
+  const result = await getAutoSelectConfig();
+  res.json(result);
+});
+
+// POST /api/energy/autoselect - Sauvegarder la config auto-select
+router.post('/autoselect', async (req, res) => {
+  const config = req.body;
+  const result = await saveAutoSelectConfig(config);
+  res.json(result);
+});
+
+// GET /api/energy/autoselect/rps - Requêtes par seconde sur interface SFP
+router.get('/autoselect/rps', async (req, res) => {
+  const result = await getNetworkRps();
+  res.json(result);
+});
+
+// GET /api/energy/autoselect/status - Status de l'auto-select
+router.get('/autoselect/status', (req, res) => {
+  const result = getAutoSelectStatus();
   res.json(result);
 });
 
@@ -122,6 +156,27 @@ router.get('/mode', async (req, res) => {
 router.post('/mode/:mode', async (req, res) => {
   const { mode } = req.params;
   const result = await applyMode(mode);
+  res.json(result);
+});
+
+// ============ BENCHMARK ============
+
+// GET /api/energy/benchmark - Status du benchmark
+router.get('/benchmark', (req, res) => {
+  const result = getBenchmarkStatus();
+  res.json(result);
+});
+
+// POST /api/energy/benchmark/start - Démarrer le benchmark
+router.post('/benchmark/start', async (req, res) => {
+  const { duration = 60 } = req.body;
+  const result = await startBenchmark(Math.min(60, Math.max(10, duration)));
+  res.json(result);
+});
+
+// POST /api/energy/benchmark/stop - Arrêter le benchmark
+router.post('/benchmark/stop', (req, res) => {
+  const result = stopBenchmark();
   res.json(result);
 });
 

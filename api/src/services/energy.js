@@ -1,8 +1,9 @@
 import { readFile, writeFile, mkdir, readdir } from 'fs/promises';
 import { existsSync } from 'fs';
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
+import os from 'os';
 
 const execAsync = promisify(exec);
 
@@ -10,6 +11,7 @@ const execAsync = promisify(exec);
 const CONFIG_DIR = process.env.ENERGY_CONFIG_DIR || '/var/lib/server-dashboard';
 const SCHEDULE_CONFIG_FILE = path.join(CONFIG_DIR, 'energy-schedule.json');
 const FAN_PROFILES_FILE = path.join(CONFIG_DIR, 'fan-profiles.json');
+const AUTOSELECT_CONFIG_FILE = path.join(CONFIG_DIR, 'energy-autoselect.json');
 
 // Unified energy modes
 export const ENERGY_MODES = {
@@ -349,13 +351,13 @@ const DEFAULT_PROFILES = [
     fans: {
       fan1: {
         mode: 'manual',
-        pwm: 70,
-        curve: [[30, 20], [50, 30], [70, 50], [85, 100]]  // [temp°C, pwm%]
+        pwm: 70,   // ~27% - silencieux
+        curve: [[30, 20], [50, 35], [70, 100]]
       },
       fan2: {
         mode: 'manual',
-        pwm: 50,
-        curve: [[30, 15], [50, 25], [70, 40], [85, 80]]
+        pwm: 50,   // ~20%
+        curve: [[30, 15], [50, 30], [70, 80]]
       }
     }
   },
@@ -364,12 +366,14 @@ const DEFAULT_PROFILES = [
     label: 'Auto',
     fans: {
       fan1: {
-        mode: 'auto',
-        curve: [[30, 30], [50, 45], [70, 70], [85, 100]]
+        mode: 'manual',
+        pwm: 120,  // ~47% - équilibré
+        curve: [[30, 35], [50, 55], [70, 100]]
       },
       fan2: {
-        mode: 'auto',
-        curve: [[30, 25], [50, 40], [70, 60], [85, 90]]
+        mode: 'manual',
+        pwm: 100,  // ~39%
+        curve: [[30, 30], [50, 50], [70, 90]]
       }
     }
   },
@@ -379,13 +383,13 @@ const DEFAULT_PROFILES = [
     fans: {
       fan1: {
         mode: 'manual',
-        pwm: 180,
-        curve: [[30, 50], [50, 65], [70, 85], [85, 100]]
+        pwm: 200,  // ~78% - performance
+        curve: [[30, 50], [50, 75], [70, 100]]
       },
       fan2: {
         mode: 'manual',
-        pwm: 150,
-        curve: [[30, 40], [50, 55], [70, 75], [85, 100]]
+        pwm: 170,  // ~67%
+        curve: [[30, 45], [50, 70], [70, 100]]
       }
     }
   }
@@ -435,6 +439,33 @@ export async function saveFanProfile(profile) {
   }
 }
 
+// Interpolate PWM value from curve based on temperature
+function interpolateCurve(curve, temp) {
+  if (!curve || curve.length === 0) return 128; // Default 50%
+
+  // If temp is below first point, use first point's PWM
+  if (temp <= curve[0][0]) {
+    return Math.round((curve[0][1] / 100) * 255);
+  }
+
+  // If temp is above last point, use last point's PWM
+  if (temp >= curve[curve.length - 1][0]) {
+    return Math.round((curve[curve.length - 1][1] / 100) * 255);
+  }
+
+  // Find surrounding points and interpolate
+  for (let i = 0; i < curve.length - 1; i++) {
+    if (temp >= curve[i][0] && temp <= curve[i + 1][0]) {
+      const [t1, p1] = curve[i];
+      const [t2, p2] = curve[i + 1];
+      const pwmPercent = p1 + ((temp - t1) / (t2 - t1)) * (p2 - p1);
+      return Math.round((pwmPercent / 100) * 255);
+    }
+  }
+
+  return 128;
+}
+
 export async function applyFanProfile(profileName) {
   try {
     const { profiles } = await getFanProfiles();
@@ -444,12 +475,29 @@ export async function applyFanProfile(profileName) {
       return { success: false, error: `Profile ${profileName} not found` };
     }
 
-    // Apply each fan setting
+    // Get current CPU temperature for curve interpolation
+    const tempResult = await getCpuTemperature();
+    const currentTemp = tempResult.success ? tempResult.temperature : 40;
+
+    // Apply each fan setting using curve interpolation
     for (const [fanId, settings] of Object.entries(profile.fans)) {
-      await setFanSpeed(fanId, settings.pwm, settings.mode);
+      let pwmValue;
+
+      if (settings.curve && settings.curve.length > 0) {
+        // Use curve interpolation based on current temperature
+        pwmValue = interpolateCurve(settings.curve, currentTemp);
+      } else {
+        // Fallback to fixed PWM value
+        pwmValue = settings.pwm || 128;
+      }
+
+      await setFanSpeed(fanId, pwmValue, settings.mode);
     }
 
-    return { success: true, message: `Profile ${profileName} applied` };
+    // Start the continuous fan control loop for this profile
+    startFanControl(profileName);
+
+    return { success: true, message: `Profile ${profileName} applied`, temperature: currentTemp };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -486,6 +534,10 @@ export async function saveScheduleConfig(config) {
     await ensureConfigDir();
 
     const newConfig = { ...DEFAULT_SCHEDULE, ...config };
+
+    // Schedule and auto-select can work together
+    // Night mode forces economy, overriding auto-select
+
     await writeFile(SCHEDULE_CONFIG_FILE, JSON.stringify(newConfig, null, 2));
 
     // Sync cron jobs
@@ -565,4 +617,506 @@ export async function applyMode(mode) {
   } catch (error) {
     return { success: false, error: error.message };
   }
+}
+
+// ============ FAN CONTROL LOOP ============
+
+let activeFanProfile = null;
+let fanControlInterval = null;
+const FAN_CONTROL_INTERVAL_MS = 1000; // Check every 1 second
+
+// Update fan speeds based on current temperature and active profile
+async function updateFanSpeeds() {
+  if (!activeFanProfile) return;
+
+  try {
+    const { profiles } = await getFanProfiles();
+    const profile = profiles.find(p => p.name === activeFanProfile);
+
+    if (!profile) {
+      console.error(`Fan profile ${activeFanProfile} not found, stopping control loop`);
+      stopFanControl();
+      return;
+    }
+
+    // Get current CPU temperature
+    const tempResult = await getCpuTemperature();
+    if (!tempResult.success) return;
+
+    const currentTemp = tempResult.temperature;
+
+    // Apply interpolated PWM for each fan
+    for (const [fanId, settings] of Object.entries(profile.fans)) {
+      if (settings.curve && settings.curve.length > 0) {
+        const pwmValue = interpolateCurve(settings.curve, currentTemp);
+        // Only set PWM, don't change mode (already set to manual)
+        const it87Path = await getIt87Path();
+        if (it87Path) {
+          const fanNum = fanId.replace('fan', '');
+          const pwmPath = path.join(it87Path, `pwm${fanNum}`);
+          await writeSysfs(pwmPath, String(pwmValue));
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Fan control loop error:', error);
+  }
+}
+
+// Start the fan control loop
+function startFanControl(profileName) {
+  // Stop any existing loop
+  stopFanControl();
+
+  activeFanProfile = profileName;
+
+  // Start new control loop
+  fanControlInterval = setInterval(updateFanSpeeds, FAN_CONTROL_INTERVAL_MS);
+
+  // Also run immediately
+  updateFanSpeeds();
+
+  console.log(`Fan control loop started for profile: ${profileName}`);
+}
+
+// Stop the fan control loop
+function stopFanControl() {
+  if (fanControlInterval) {
+    clearInterval(fanControlInterval);
+    fanControlInterval = null;
+  }
+  activeFanProfile = null;
+}
+
+// Get current fan control status
+export function getFanControlStatus() {
+  return {
+    active: !!activeFanProfile,
+    profile: activeFanProfile,
+    intervalMs: FAN_CONTROL_INTERVAL_MS
+  };
+}
+
+// ============ AUTO-SELECT (based on network RPS) ============
+
+const DEFAULT_AUTOSELECT = {
+  enabled: false,
+  networkInterface: null,  // Auto-detected via IP 10.0.0.10
+  thresholds: {
+    low: 1000,    // Below this -> economy (req/s)
+    high: 10000   // Above this -> performance (req/s)
+  },
+  averagingTime: 3,      // Averaging window in seconds (replaces hysteresis)
+  sampleInterval: 1000   // Sampling interval (ms) - faster for smooth averaging
+};
+
+// Network stats tracking
+let prevNetworkStats = null;
+let prevNetworkStatsTime = null;
+let currentRps = 0;
+let rpsHistory = [];  // Array of { timestamp, rps } for averaging
+let averagedRps = 0;
+let autoSelectInterval = null;
+let currentAutoMode = null;  // Track current mode for progressive transitions
+
+// Find network interface by IP address
+async function findInterfaceByIp(targetIp) {
+  try {
+    const { stdout } = await execAsync('ip -j addr show');
+    const interfaces = JSON.parse(stdout);
+
+    for (const iface of interfaces) {
+      if (iface.addr_info) {
+        for (const addr of iface.addr_info) {
+          if (addr.local === targetIp) {
+            return iface.ifname;
+          }
+        }
+      }
+    }
+    return null;
+  } catch (error) {
+    console.error('Error finding interface by IP:', error);
+    return null;
+  }
+}
+
+// Read network packets from /proc/net/dev
+async function getNetworkPackets(interfaceName) {
+  try {
+    const content = await readFile('/proc/net/dev', 'utf-8');
+    const lines = content.split('\n');
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith(interfaceName + ':')) {
+        // Format: iface: rx_bytes rx_packets rx_errs ... tx_bytes tx_packets tx_errs ...
+        const parts = trimmed.split(/\s+/);
+        const rxPackets = parseInt(parts[2]) || 0;
+        const txPackets = parseInt(parts[10]) || 0;
+        return { success: true, rxPackets, txPackets, total: rxPackets + txPackets };
+      }
+    }
+
+    return { success: false, error: `Interface ${interfaceName} not found` };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// Calculate averaged RPS over the configured time window
+function calculateAveragedRps(averagingTime) {
+  const now = Date.now();
+  const windowStart = now - (averagingTime * 1000);
+
+  // Remove old samples outside the window
+  rpsHistory = rpsHistory.filter(s => s.timestamp >= windowStart);
+
+  if (rpsHistory.length === 0) {
+    return 0;
+  }
+
+  // Calculate average
+  const sum = rpsHistory.reduce((acc, s) => acc + s.rps, 0);
+  return Math.round(sum / rpsHistory.length);
+}
+
+// Get current RPS (requests per second) for the SFP interface
+export async function getNetworkRps() {
+  try {
+    const { config } = await getAutoSelectConfig();
+
+    // Find interface if not cached
+    let interfaceName = config.networkInterface;
+    if (!interfaceName) {
+      interfaceName = await findInterfaceByIp('10.0.0.10');
+      if (!interfaceName) {
+        return { success: false, error: 'SFP interface (10.0.0.10) not found', rps: 0, averagedRps: 0 };
+      }
+    }
+
+    const stats = await getNetworkPackets(interfaceName);
+    if (!stats.success) {
+      return { success: false, error: stats.error, rps: 0, averagedRps: 0 };
+    }
+
+    const now = Date.now();
+
+    if (!prevNetworkStats || !prevNetworkStatsTime) {
+      prevNetworkStats = stats.total;
+      prevNetworkStatsTime = now;
+      return { success: true, rps: 0, averagedRps: 0, interface: interfaceName };
+    }
+
+    const timeDiff = (now - prevNetworkStatsTime) / 1000; // seconds
+    if (timeDiff > 0) {
+      currentRps = Math.round((stats.total - prevNetworkStats) / timeDiff);
+
+      // Add to history for averaging
+      rpsHistory.push({ timestamp: now, rps: currentRps });
+    }
+
+    prevNetworkStats = stats.total;
+    prevNetworkStatsTime = now;
+
+    // Calculate averaged RPS
+    averagedRps = calculateAveragedRps(config.averagingTime || 3);
+
+    return { success: true, rps: currentRps, averagedRps, interface: interfaceName, appliedMode: currentAutoMode };
+  } catch (error) {
+    return { success: false, error: error.message, rps: 0, averagedRps: 0, appliedMode: null };
+  }
+}
+
+// Get auto-select configuration
+export async function getAutoSelectConfig() {
+  try {
+    await ensureConfigDir();
+
+    if (!existsSync(AUTOSELECT_CONFIG_FILE)) {
+      return { success: true, config: DEFAULT_AUTOSELECT };
+    }
+
+    const content = await readFile(AUTOSELECT_CONFIG_FILE, 'utf-8');
+    const config = JSON.parse(content);
+    return { success: true, config: { ...DEFAULT_AUTOSELECT, ...config } };
+  } catch (error) {
+    return { success: false, error: error.message, config: DEFAULT_AUTOSELECT };
+  }
+}
+
+// Save auto-select configuration
+export async function saveAutoSelectConfig(config) {
+  try {
+    await ensureConfigDir();
+
+    const newConfig = { ...DEFAULT_AUTOSELECT, ...config };
+
+    // Schedule and auto-select can now work together
+    // Night mode from schedule will force economy, overriding auto-select
+
+    await writeFile(AUTOSELECT_CONFIG_FILE, JSON.stringify(newConfig, null, 2));
+
+    // Start or stop auto-select loop
+    if (newConfig.enabled) {
+      startAutoSelect(newConfig);
+    } else {
+      stopAutoSelect();
+    }
+
+    return { success: true, message: 'Auto-select config saved' };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// Determine which mode should be active based on averaged RPS
+// Progressive transitions: economy ↔ auto ↔ performance (can't skip auto)
+function determineMode(avgRps, config) {
+  const { thresholds } = config;
+
+  // Determine target mode based on thresholds
+  let targetMode;
+  if (avgRps < thresholds.low) {
+    targetMode = 'economy';
+  } else if (avgRps >= thresholds.high) {
+    targetMode = 'performance';
+  } else {
+    targetMode = 'auto';
+  }
+
+  // If no current mode, set directly
+  if (!currentAutoMode) {
+    return targetMode;
+  }
+
+  // Progressive transitions - can only move one step at a time
+  const modeOrder = ['economy', 'auto', 'performance'];
+  const currentIndex = modeOrder.indexOf(currentAutoMode);
+  const targetIndex = modeOrder.indexOf(targetMode);
+
+  if (targetIndex > currentIndex) {
+    // Moving up: economy → auto → performance
+    return modeOrder[currentIndex + 1];
+  } else if (targetIndex < currentIndex) {
+    // Moving down: performance → auto → economy
+    return modeOrder[currentIndex - 1];
+  }
+
+  // Same mode, no change
+  return currentAutoMode;
+}
+
+// Check if current time is within night period (schedule)
+function isInNightPeriod(scheduleConfig) {
+  if (!scheduleConfig.enabled) return false;
+
+  const now = new Date();
+  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+
+  const [startH, startM] = scheduleConfig.nightStart.split(':').map(Number);
+  const [endH, endM] = scheduleConfig.nightEnd.split(':').map(Number);
+
+  const startMinutes = startH * 60 + startM;
+  const endMinutes = endH * 60 + endM;
+
+  // Handle overnight periods (e.g., 22:00 to 08:00)
+  if (startMinutes > endMinutes) {
+    return currentMinutes >= startMinutes || currentMinutes < endMinutes;
+  }
+
+  return currentMinutes >= startMinutes && currentMinutes < endMinutes;
+}
+
+// Auto-select update function
+async function updateAutoSelect() {
+  try {
+    const { config } = await getAutoSelectConfig();
+    if (!config.enabled) {
+      stopAutoSelect();
+      return;
+    }
+
+    // Check if schedule forces economy during night
+    const { config: scheduleConfig } = await getScheduleConfig();
+    if (isInNightPeriod(scheduleConfig)) {
+      // Night period: force economy mode
+      if (currentAutoMode !== 'economy') {
+        console.log('Auto-select: Night period active, forcing economy mode');
+        currentAutoMode = 'economy';
+        await applyMode('economy');
+      }
+      return;
+    }
+
+    // Get current RPS (this also updates the averaging buffer)
+    const rpsResult = await getNetworkRps();
+    if (!rpsResult.success) {
+      console.error('Auto-select: Failed to get RPS:', rpsResult.error);
+      return;
+    }
+
+    // Use averaged RPS for mode determination
+    const avgRps = rpsResult.averagedRps;
+    const targetMode = determineMode(avgRps, config);
+
+    // Only change mode if different
+    if (targetMode !== currentAutoMode) {
+      console.log(`Auto-select: avgRPS=${avgRps}, switching from ${currentAutoMode} to ${targetMode}`);
+      currentAutoMode = targetMode;
+      await applyMode(targetMode);
+    }
+  } catch (error) {
+    console.error('Auto-select update error:', error);
+  }
+}
+
+// Start auto-select loop
+function startAutoSelect(config) {
+  stopAutoSelect();
+
+  const interval = config.sampleInterval || 5000;
+  autoSelectInterval = setInterval(updateAutoSelect, interval);
+
+  // Run immediately
+  updateAutoSelect();
+
+  console.log(`Auto-select started (interval: ${interval}ms)`);
+}
+
+// Stop auto-select loop
+function stopAutoSelect() {
+  if (autoSelectInterval) {
+    clearInterval(autoSelectInterval);
+    autoSelectInterval = null;
+  }
+  currentAutoMode = null;
+  rpsHistory = [];
+  averagedRps = 0;
+}
+
+// Get auto-select status
+export function getAutoSelectStatus() {
+  return {
+    active: !!autoSelectInterval,
+    currentMode: currentAutoMode,
+    currentRps,
+    averagedRps
+  };
+}
+
+// Initialize auto-select on startup if enabled
+async function initAutoSelect() {
+  try {
+    const { config } = await getAutoSelectConfig();
+    if (config.enabled) {
+      startAutoSelect(config);
+    }
+  } catch (error) {
+    console.error('Failed to initialize auto-select:', error);
+  }
+}
+
+// Call init on module load
+initAutoSelect();
+
+// ============ BENCHMARK ============
+
+let benchmarkProcess = null;
+let benchmarkStartTime = null;
+let benchmarkTimeout = null;
+
+export function getBenchmarkStatus() {
+  if (!benchmarkProcess) {
+    return { success: true, running: false };
+  }
+
+  const elapsed = Date.now() - benchmarkStartTime;
+  return {
+    success: true,
+    running: true,
+    elapsed: Math.round(elapsed / 1000),
+    pid: benchmarkProcess.pid
+  };
+}
+
+export async function startBenchmark(duration = 60) {
+  if (benchmarkProcess) {
+    return { success: false, error: 'Benchmark already running' };
+  }
+
+  const cpuCount = os.cpus().length;
+
+  // Use stress-ng if available, fallback to yes command
+  try {
+    await execAsync('which stress-ng');
+    // stress-ng available - use CPU stress test
+    benchmarkProcess = spawn('stress-ng', ['--cpu', String(cpuCount), '--timeout', `${duration}s`], {
+      detached: false,
+      stdio: 'ignore'
+    });
+  } catch {
+    // Fallback: use multiple yes processes piped to /dev/null
+    benchmarkProcess = spawn('sh', ['-c', `for i in $(seq 1 ${cpuCount}); do yes > /dev/null & done; wait`], {
+      detached: true,
+      stdio: 'ignore'
+    });
+  }
+
+  benchmarkStartTime = Date.now();
+
+  // Auto-stop after duration
+  benchmarkTimeout = setTimeout(() => {
+    stopBenchmark();
+  }, duration * 1000);
+
+  benchmarkProcess.on('exit', () => {
+    benchmarkProcess = null;
+    benchmarkStartTime = null;
+    if (benchmarkTimeout) {
+      clearTimeout(benchmarkTimeout);
+      benchmarkTimeout = null;
+    }
+  });
+
+  return {
+    success: true,
+    message: `Benchmark started (${cpuCount} threads, ${duration}s)`,
+    pid: benchmarkProcess.pid
+  };
+}
+
+export function stopBenchmark() {
+  if (!benchmarkProcess) {
+    return { success: false, error: 'No benchmark running' };
+  }
+
+  try {
+    // Kill the process and all children
+    process.kill(-benchmarkProcess.pid, 'SIGTERM');
+  } catch {
+    try {
+      benchmarkProcess.kill('SIGTERM');
+    } catch {
+      // Process already dead
+    }
+  }
+
+  // Also kill any stray yes processes from fallback method
+  try {
+    exec('pkill -f "yes > /dev/null"');
+  } catch {
+    // Ignore
+  }
+
+  if (benchmarkTimeout) {
+    clearTimeout(benchmarkTimeout);
+    benchmarkTimeout = null;
+  }
+
+  const elapsed = benchmarkStartTime ? Math.round((Date.now() - benchmarkStartTime) / 1000) : 0;
+  benchmarkProcess = null;
+  benchmarkStartTime = null;
+
+  return { success: true, message: `Benchmark stopped after ${elapsed}s` };
 }

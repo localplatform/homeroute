@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Zap, Thermometer, Cpu, Fan, Clock, Moon, Rocket } from 'lucide-react';
+import { Zap, Thermometer, Cpu, Fan, Clock, Moon, Rocket, Play, Square, Activity } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
 import FanCurveEditor from '../components/FanCurveEditor';
+import MiniCurveGraph from '../components/MiniCurveGraph';
 import {
   getCpuInfo,
   getCurrentEnergyMode,
@@ -10,8 +11,15 @@ import {
   getFansStatus,
   getFanProfiles,
   saveFanProfile,
+  applyFanProfile,
   getEnergySchedule,
-  saveEnergySchedule
+  saveEnergySchedule,
+  getAutoSelectConfig,
+  saveAutoSelectConfig,
+  getNetworkRps,
+  getBenchmarkStatus,
+  startBenchmark,
+  stopBenchmark
 } from '../api/client';
 
 const MODE_ICONS = {
@@ -38,6 +46,13 @@ const MODE_COLORS = {
   performance: { bg: 'bg-orange-600', ring: 'ring-orange-400', hover: 'hover:bg-orange-700' }
 };
 
+// Mode to fan profile mapping
+const MODE_FAN_PROFILES = {
+  economy: 'silent',
+  auto: 'balanced',
+  performance: 'performance'
+};
+
 function Energy() {
   // CPU state
   const [cpuInfo, setCpuInfo] = useState({ temperature: null, frequency: null, usage: null });
@@ -50,20 +65,31 @@ function Energy() {
   const [fans, setFans] = useState([]);
   const [fansAvailable, setFansAvailable] = useState(false);
   const [fanProfiles, setFanProfiles] = useState([]);
-  const [editingProfile, setEditingProfile] = useState('silent');
-  const [savingProfiles, setSavingProfiles] = useState(false);
-  const [profilesModified, setProfilesModified] = useState(false);
+  const [editingProfile, setEditingProfile] = useState(null); // Will be set based on current mode
 
   // Schedule state
   const [schedule, setSchedule] = useState({
     enabled: false,
-    nightStart: '22:00',
-    nightEnd: '08:00',
-    dayMode: 'auto',
-    nightMode: 'economy'
+    nightStart: '00:00',
+    nightEnd: '08:00'
   });
   const [savingSchedule, setSavingSchedule] = useState(false);
   const [scheduleMessage, setScheduleMessage] = useState(null);
+
+  // Auto-select state
+  const [autoSelect, setAutoSelect] = useState({
+    enabled: false,
+    networkInterface: null,
+    thresholds: { low: 1000, high: 10000 },
+    averagingTime: 3,
+    sampleInterval: 1000
+  });
+  const [savingAutoSelect, setSavingAutoSelect] = useState(false);
+  const [autoSelectMessage, setAutoSelectMessage] = useState(null);
+  const [networkRps, setNetworkRps] = useState({ current: 0, averaged: 0, appliedMode: null });
+
+  // Benchmark state
+  const [benchmark, setBenchmark] = useState({ running: false, elapsed: 0 });
 
   const [loading, setLoading] = useState(true);
   const pollingRef = useRef(null);
@@ -72,15 +98,18 @@ function Energy() {
   useEffect(() => {
     async function fetchInitialData() {
       try {
-        const [modeRes, fansRes, profilesRes, scheduleRes] = await Promise.all([
+        const [modeRes, fansRes, profilesRes, scheduleRes, autoSelectRes] = await Promise.all([
           getCurrentEnergyMode(),
           getFansStatus(),
           getFanProfiles(),
-          getEnergySchedule()
+          getEnergySchedule(),
+          getAutoSelectConfig()
         ]);
 
         if (modeRes.data.success) {
           setCurrentMode(modeRes.data.mode);
+          // Set editing profile to match current mode
+          setEditingProfile(MODE_FAN_PROFILES[modeRes.data.mode] || 'balanced');
         }
 
         if (fansRes.data.success) {
@@ -95,6 +124,10 @@ function Energy() {
         if (scheduleRes.data.success) {
           setSchedule(scheduleRes.data.config);
         }
+
+        if (autoSelectRes.data.success) {
+          setAutoSelect(autoSelectRes.data.config);
+        }
       } catch (error) {
         console.error('Error fetching initial data:', error);
       } finally {
@@ -105,13 +138,16 @@ function Energy() {
     fetchInitialData();
   }, []);
 
-  // CPU and fans polling
+  // CPU, fans, benchmark, network RPS and current mode polling
   useEffect(() => {
     async function pollData() {
       try {
-        const [cpuRes, fansRes] = await Promise.all([
+        const [cpuRes, fansRes, benchRes, rpsRes, modeRes] = await Promise.all([
           getCpuInfo(),
-          getFansStatus()
+          getFansStatus(),
+          getBenchmarkStatus(),
+          getNetworkRps(),
+          getCurrentEnergyMode()
         ]);
 
         if (cpuRes.data.success) {
@@ -125,13 +161,33 @@ function Energy() {
         if (fansRes.data.success) {
           setFans(fansRes.data.fans);
         }
+
+        if (benchRes.data.success) {
+          setBenchmark({
+            running: benchRes.data.running,
+            elapsed: benchRes.data.elapsed || 0
+          });
+        }
+
+        if (rpsRes.data.success) {
+          setNetworkRps({
+            current: rpsRes.data.rps || 0,
+            averaged: rpsRes.data.averagedRps || 0,
+            appliedMode: rpsRes.data.appliedMode || null
+          });
+        }
+
+        // Update current mode (reflects auto-select changes)
+        if (modeRes.data.success && modeRes.data.mode) {
+          setCurrentMode(modeRes.data.mode);
+        }
       } catch (error) {
         console.error('Error polling data:', error);
       }
     }
 
     pollData();
-    pollingRef.current = setInterval(pollData, 2000);
+    pollingRef.current = setInterval(pollData, 1000);
 
     return () => {
       if (pollingRef.current) {
@@ -157,6 +213,27 @@ function Energy() {
     }
   }
 
+  // Benchmark handlers
+  async function handleStartBenchmark() {
+    try {
+      const res = await startBenchmark(60);
+      if (res.data.success) {
+        setBenchmark({ running: true, elapsed: 0 });
+      }
+    } catch (error) {
+      console.error('Error starting benchmark:', error);
+    }
+  }
+
+  async function handleStopBenchmark() {
+    try {
+      await stopBenchmark();
+      setBenchmark({ running: false, elapsed: 0 });
+    } catch (error) {
+      console.error('Error stopping benchmark:', error);
+    }
+  }
+
   // Fan curve change handler
   const handleCurveChange = useCallback((profileName, fanId, newCurve) => {
     setFanProfiles(prev => prev.map(p => {
@@ -172,24 +249,27 @@ function Energy() {
         }
       };
     }));
-    setProfilesModified(true);
   }, []);
 
-  // Save fan profiles
-  async function handleSaveProfiles() {
-    setSavingProfiles(true);
+  // Handle drag end - save and apply profile if it's active
+  const handleDragEnd = useCallback(async (profileName) => {
+    // Find the modified profile
+    const profile = fanProfiles.find(p => p.name === profileName);
+    if (!profile) return;
+
     try {
-      // Save all profiles
-      for (const profile of fanProfiles) {
-        await saveFanProfile(profile);
+      // Save the profile
+      await saveFanProfile(profile);
+
+      // If this profile is the one used by the current mode, re-apply it
+      const currentModeProfile = MODE_FAN_PROFILES[currentMode];
+      if (profileName === currentModeProfile) {
+        await applyFanProfile(profileName);
       }
-      setProfilesModified(false);
     } catch (error) {
-      console.error('Error saving profiles:', error);
-    } finally {
-      setSavingProfiles(false);
+      console.error('Error saving/applying profile:', error);
     }
-  }
+  }, [fanProfiles, currentMode]);
 
   // Schedule save handler
   async function handleSaveSchedule() {
@@ -207,6 +287,25 @@ function Energy() {
     } finally {
       setSavingSchedule(false);
       setTimeout(() => setScheduleMessage(null), 3000);
+    }
+  }
+
+  // Auto-select save handler
+  async function handleSaveAutoSelect() {
+    setSavingAutoSelect(true);
+    setAutoSelectMessage(null);
+    try {
+      const res = await saveAutoSelectConfig(autoSelect);
+      if (res.data.success) {
+        setAutoSelectMessage({ type: 'success', text: 'Configuration enregistrée' });
+      } else {
+        setAutoSelectMessage({ type: 'error', text: res.data.error || 'Erreur' });
+      }
+    } catch (error) {
+      setAutoSelectMessage({ type: 'error', text: error.message });
+    } finally {
+      setSavingAutoSelect(false);
+      setTimeout(() => setAutoSelectMessage(null), 3000);
     }
   }
 
@@ -240,8 +339,10 @@ function Energy() {
         Énergie
       </h1>
 
-      {/* CPU Info Card */}
-      <Card title="Infos CPU (Ryzen 9 3900X)" icon={Cpu}>
+      {/* CPU Info + Mode side by side */}
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        {/* CPU Info Card */}
+        <Card title="Infos CPU (Ryzen 9 3900X)" icon={Cpu}>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           {/* Temperature */}
           <div className="bg-gray-900 rounded-lg p-4">
@@ -296,178 +397,289 @@ function Energy() {
             </div>
           </div>
         </div>
+
+        {/* Benchmark button */}
+        <div className="mt-4 pt-4 border-t border-gray-700 flex items-center justify-between">
+          <div className="text-sm text-gray-400">
+            {benchmark.running
+              ? `Benchmark en cours... ${benchmark.elapsed}s / 60s`
+              : 'Stress test CPU (1 min max)'}
+          </div>
+          {benchmark.running ? (
+            <button
+              onClick={handleStopBenchmark}
+              className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition-colors"
+            >
+              <Square size={16} />
+              Arrêter
+            </button>
+          ) : (
+            <button
+              onClick={handleStartBenchmark}
+              className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors"
+            >
+              <Play size={16} />
+              Benchmark
+            </button>
+          )}
+        </div>
       </Card>
 
-      {/* Mode Card */}
-      <Card title="Mode" icon={Zap}>
-        <div className="space-y-4">
+        {/* Mode Card */}
+        <Card title="Mode" icon={Zap}>
+        <div className="flex flex-col md:flex-row gap-6">
           {/* Mode buttons */}
           <div className="flex flex-wrap gap-4 justify-center md:justify-start">
             {['economy', 'auto', 'performance'].map(mode => {
               const Icon = MODE_ICONS[mode];
               const isActive = currentMode === mode;
               const colors = MODE_COLORS[mode];
+              const isDisabled = changingMode || autoSelect.enabled;
 
               return (
                 <button
                   key={mode}
                   onClick={() => handleModeChange(mode)}
-                  disabled={changingMode}
+                  disabled={isDisabled}
                   className={`flex flex-col items-center justify-center w-28 h-28 rounded-xl transition-all ${
                     isActive
                       ? `${colors.bg} text-white ring-2 ${colors.ring} shadow-lg`
-                      : `bg-gray-800 text-gray-300 ${colors.hover}`
-                  } ${changingMode ? 'opacity-50 cursor-wait' : ''}`}
+                      : `bg-gray-800 text-gray-300 ${isDisabled ? '' : colors.hover}`
+                  } ${isDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
                 >
                   <Icon size={32} className={isActive ? 'text-white' : 'text-gray-400'} />
                   <span className="mt-2 font-medium">{MODE_LABELS[mode]}</span>
                   {isActive && (
-                    <span className="text-xs opacity-75 mt-1">actif</span>
+                    <span className="text-xs opacity-75 mt-1">
+                      {autoSelect.enabled ? 'auto' : 'actif'}
+                    </span>
                   )}
                 </button>
               );
             })}
           </div>
 
-          {/* Mode description and fan status */}
-          <div className="bg-gray-900 rounded-lg p-4">
-            <p className="text-gray-300">{MODE_DESCRIPTIONS[currentMode]}</p>
-            {fansAvailable && fans.length > 0 && (
-              <div className="mt-3 flex flex-wrap gap-4 text-sm text-gray-400">
-                {fans.map(fan => (
-                  <div key={fan.id} className="flex items-center gap-2">
-                    <Fan size={14} className={fan.rpm > 0 ? 'text-blue-400' : 'text-gray-500'} />
-                    <span>{fan.name}: <span className="text-white font-mono">{fan.rpm}</span> RPM</span>
+          {/* Mode details and mini graph on the right */}
+          <div className="flex-1 bg-gray-900 rounded-lg p-4 flex flex-col justify-center">
+            <div className="flex items-center gap-4">
+              {/* Mini curve graph */}
+              {fansAvailable && fanProfiles.length > 0 && (
+                <div className="flex-shrink-0 w-32 h-16">
+                  <MiniCurveGraph
+                    profile={fanProfiles.find(p => p.name === MODE_FAN_PROFILES[currentMode])}
+                    currentTemp={cpuInfo.temperature}
+                  />
+                </div>
+              )}
+              <div className="flex-1">
+                <p className="text-gray-300 font-medium">{MODE_DESCRIPTIONS[currentMode]}</p>
+                {fansAvailable && fans.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-4 text-sm text-gray-400">
+                    {fans.map(fan => (
+                      <div key={fan.id} className="flex items-center gap-2">
+                        <Fan size={14} className={fan.rpm > 0 ? 'text-blue-400' : 'text-gray-500'} />
+                        <span>{fan.name}: <span className="text-white font-mono">{fan.rpm}</span> RPM</span>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      </Card>
-
-      {/* Fan Curves Card */}
-      {fansAvailable && (
-        <Card title="Courbes ventilateurs" icon={Fan}>
-          <div className="space-y-4">
-            {/* Profile tabs */}
-            <div className="flex gap-2">
-              {fanProfiles.map(profile => (
-                <button
-                  key={profile.name}
-                  onClick={() => setEditingProfile(profile.name)}
-                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-                    editingProfile === profile.name
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                  }`}
-                >
-                  {profile.label}
-                </button>
-              ))}
-            </div>
-
-            {/* Curve editor */}
-            <FanCurveEditor
-              profiles={fanProfiles}
-              activeProfile={editingProfile}
-              onCurveChange={handleCurveChange}
-              onSave={handleSaveProfiles}
-              saving={savingProfiles}
-            />
-
-            {profilesModified && !savingProfiles && (
-              <p className="text-yellow-400 text-sm">
-                Modifications non enregistrées
-              </p>
-            )}
-          </div>
-        </Card>
-      )}
-
-      {/* Schedule Card */}
-      <Card title="Programmation automatique" icon={Clock}>
-        <div className="space-y-4">
-          {/* Enable toggle */}
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => setSchedule(prev => ({ ...prev, enabled: !prev.enabled }))}
-              className={`relative w-12 h-6 rounded-full transition-colors ${
-                schedule.enabled ? 'bg-blue-600' : 'bg-gray-600'
-              }`}
-            >
-              <span
-                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
-                  schedule.enabled ? 'translate-x-6' : ''
-                }`}
-              />
-            </button>
-            <span className="text-gray-300">Activer la programmation</span>
-          </div>
-
-          {schedule.enabled && (
-            <div className="bg-gray-900 rounded-lg p-4 space-y-4">
-              {/* Time settings */}
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="text-gray-400">Mode nuit de</span>
-                <input
-                  type="time"
-                  value={schedule.nightStart}
-                  onChange={e => setSchedule(prev => ({ ...prev, nightStart: e.target.value }))}
-                  className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white"
-                />
-                <span className="text-gray-400">à</span>
-                <input
-                  type="time"
-                  value={schedule.nightEnd}
-                  onChange={e => setSchedule(prev => ({ ...prev, nightEnd: e.target.value }))}
-                  className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white"
-                />
-              </div>
-
-              {/* Mode settings */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm text-gray-400 mb-1">Mode jour</label>
-                  <select
-                    value={schedule.dayMode}
-                    onChange={e => setSchedule(prev => ({ ...prev, dayMode: e.target.value }))}
-                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white"
-                  >
-                    <option value="economy">Économie</option>
-                    <option value="auto">Auto</option>
-                    <option value="performance">Performance</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm text-gray-400 mb-1">Mode nuit</label>
-                  <select
-                    value={schedule.nightMode}
-                    onChange={e => setSchedule(prev => ({ ...prev, nightMode: e.target.value }))}
-                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white"
-                  >
-                    <option value="economy">Économie</option>
-                    <option value="auto">Auto</option>
-                    <option value="performance">Performance</option>
-                  </select>
-                </div>
-              </div>
-
-              {/* Save button */}
-              <div className="flex items-center gap-3">
-                <Button onClick={handleSaveSchedule} loading={savingSchedule}>
-                  Enregistrer
-                </Button>
-                {scheduleMessage && (
-                  <span className={scheduleMessage.type === 'success' ? 'text-green-400' : 'text-red-400'}>
-                    {scheduleMessage.text}
-                  </span>
                 )}
               </div>
             </div>
-          )}
+          </div>
         </div>
       </Card>
+      </div>
+
+      {/* Fan Curves + Programmation side by side */}
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        {/* Fan Curves Card */}
+        {fansAvailable && (
+          <Card title="Courbes ventilateurs" icon={Fan}>
+            <div className="space-y-4">
+              {/* Profile tabs */}
+              <div className="flex gap-2">
+                {fanProfiles.map(profile => (
+                  <button
+                    key={profile.name}
+                    onClick={() => setEditingProfile(profile.name)}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                      editingProfile === profile.name
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                    }`}
+                  >
+                    {profile.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Curve editor */}
+              <FanCurveEditor
+                profiles={fanProfiles}
+                activeProfile={editingProfile}
+                onCurveChange={handleCurveChange}
+                onDragEnd={handleDragEnd}
+              />
+            </div>
+          </Card>
+        )}
+
+        {/* Programmation Card */}
+        <Card title="Programmation" icon={Clock}>
+          <div className="space-y-6">
+          {/* Schedule */}
+          <div className="space-y-4">
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setSchedule(prev => ({ ...prev, enabled: !prev.enabled }))}
+                className={`relative w-12 h-6 rounded-full transition-colors ${
+                  schedule.enabled ? 'bg-blue-600' : 'bg-gray-600'
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                    schedule.enabled ? 'translate-x-6' : ''
+                  }`}
+                />
+              </button>
+              <span className="text-gray-300 font-medium">Programmation horaire</span>
+            </div>
+
+            {schedule.enabled && (
+              <div className="bg-gray-900 rounded-lg p-4 space-y-3">
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className="text-gray-400">Forcer économie de</span>
+                  <input
+                    type="time"
+                    value={schedule.nightStart}
+                    onChange={e => setSchedule(prev => ({ ...prev, nightStart: e.target.value }))}
+                    className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white"
+                  />
+                  <span className="text-gray-400">à</span>
+                  <input
+                    type="time"
+                    value={schedule.nightEnd}
+                    onChange={e => setSchedule(prev => ({ ...prev, nightEnd: e.target.value }))}
+                    className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white"
+                  />
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <Button onClick={handleSaveSchedule} loading={savingSchedule}>
+                    Enregistrer
+                  </Button>
+                  {scheduleMessage && (
+                    <span className={scheduleMessage.type === 'success' ? 'text-green-400' : 'text-red-400'}>
+                      {scheduleMessage.text}
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Auto-select */}
+          <div className="space-y-4">
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setAutoSelect(prev => ({ ...prev, enabled: !prev.enabled }))}
+                className={`relative w-12 h-6 rounded-full transition-colors ${
+                  autoSelect.enabled ? 'bg-green-600' : 'bg-gray-600'
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                    autoSelect.enabled ? 'translate-x-6' : ''
+                  }`}
+                />
+              </button>
+              <span className="text-gray-300 font-medium">Sélection automatique</span>
+            </div>
+
+            {/* Current RPS indicator - always visible */}
+            <div className="bg-gray-900 rounded-lg p-3">
+              <div className="flex items-center gap-2 text-sm text-gray-400 mb-2">
+                <Activity size={14} />
+                <span>Réseau SFP (10.0.0.10)</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-gray-400 text-sm">Charge (moy. {autoSelect.averagingTime}s):</span>
+                <span className="text-white font-mono font-bold text-lg">{networkRps.averaged.toLocaleString()} req/s</span>
+              </div>
+              {autoSelect.enabled && networkRps.appliedMode && (
+                <div className="flex items-center justify-between mt-1">
+                  <span className="text-gray-400 text-sm">Mode appliqué:</span>
+                  <span className={`font-medium ${
+                    networkRps.appliedMode === 'economy' ? 'text-indigo-400' :
+                    networkRps.appliedMode === 'performance' ? 'text-orange-400' : 'text-blue-400'
+                  }`}>
+                    {MODE_LABELS[networkRps.appliedMode]}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {autoSelect.enabled && (
+              <div className="bg-gray-900 rounded-lg p-4 space-y-4">
+                <div className="grid grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">Seuil bas (req/s)</label>
+                    <input
+                      type="number"
+                      value={autoSelect.thresholds.low}
+                      onChange={e => setAutoSelect(prev => ({
+                        ...prev,
+                        thresholds: { ...prev.thresholds, low: parseInt(e.target.value) || 0 }
+                      }))}
+                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
+                    />
+                    <span className="text-xs text-indigo-400">→ Économie</span>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">Seuil haut (req/s)</label>
+                    <input
+                      type="number"
+                      value={autoSelect.thresholds.high}
+                      onChange={e => setAutoSelect(prev => ({
+                        ...prev,
+                        thresholds: { ...prev.thresholds, high: parseInt(e.target.value) || 0 }
+                      }))}
+                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
+                    />
+                    <span className="text-xs text-orange-400">→ Performance</span>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">Temps moyenne (s)</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="30"
+                      value={autoSelect.averagingTime}
+                      onChange={e => setAutoSelect(prev => ({
+                        ...prev,
+                        averagingTime: Math.max(1, Math.min(30, parseInt(e.target.value) || 3))
+                      }))}
+                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <Button onClick={handleSaveAutoSelect} loading={savingAutoSelect}>
+                    Enregistrer
+                  </Button>
+                  {autoSelectMessage && (
+                    <span className={autoSelectMessage.type === 'success' ? 'text-green-400' : 'text-red-400'}>
+                      {autoSelectMessage.text}
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </Card>
+      </div>
     </div>
   );
 }

@@ -143,4 +143,15 @@ export const applyFanProfile = (name) => api.post(`/energy/fans/profiles/${name}
 export const getEnergySchedule = () => api.get('/energy/schedule');
 export const saveEnergySchedule = (config) => api.post('/energy/schedule', config);
 
+// Energy - Auto-select
+export const getAutoSelectConfig = () => api.get('/energy/autoselect');
+export const saveAutoSelectConfig = (config) => api.post('/energy/autoselect', config);
+export const getNetworkRps = () => api.get('/energy/autoselect/rps');
+export const getAutoSelectStatus = () => api.get('/energy/autoselect/status');
+
+// Energy - Benchmark
+export const getBenchmarkStatus = () => api.get('/energy/benchmark');
+export const startBenchmark = (duration = 60) => api.post('/energy/benchmark/start', { duration });
+export const stopBenchmark = () => api.post('/energy/benchmark/stop');
+
 export default api;
