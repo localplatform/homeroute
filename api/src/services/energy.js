@@ -2,8 +2,12 @@ import { readFile, writeFile, mkdir, readdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
+import { EventEmitter } from 'events';
 import path from 'path';
 import os from 'os';
+
+// Event emitter for real-time updates
+export const energyEvents = new EventEmitter();
 
 const execAsync = promisify(exec);
 
@@ -613,6 +617,9 @@ export async function applyMode(mode) {
     // Apply fan profile
     await applyFanProfile(modeConfig.fanProfile);
 
+    // Emit event for real-time updates
+    energyEvents.emit('modeChange', { mode, config: modeConfig });
+
     return { success: true, message: `Mode ${modeConfig.label} appliqué`, mode, config: modeConfig };
   } catch (error) {
     return { success: false, error: error.message };
@@ -707,7 +714,7 @@ const DEFAULT_AUTOSELECT = {
     high: 10000   // Above this -> performance (req/s)
   },
   averagingTime: 3,      // Averaging window in seconds (replaces hysteresis)
-  sampleInterval: 1000   // Sampling interval (ms) - faster for smooth averaging
+  sampleInterval: 500    // Sampling interval (ms) - 500ms for smooth updates
 };
 
 // Network stats tracking
@@ -937,6 +944,15 @@ async function updateAutoSelect() {
       return;
     }
 
+    // Get current RPS first (this also updates the averaging buffer)
+    const rpsResult = await getNetworkRps();
+    if (!rpsResult.success) {
+      console.error('Auto-select: Failed to get RPS:', rpsResult.error);
+      return;
+    }
+
+    const avgRps = rpsResult.averagedRps;
+
     // Check if schedule forces economy during night
     const { config: scheduleConfig } = await getScheduleConfig();
     if (isInNightPeriod(scheduleConfig)) {
@@ -946,19 +962,24 @@ async function updateAutoSelect() {
         currentAutoMode = 'economy';
         await applyMode('economy');
       }
-      return;
-    }
-
-    // Get current RPS (this also updates the averaging buffer)
-    const rpsResult = await getNetworkRps();
-    if (!rpsResult.success) {
-      console.error('Auto-select: Failed to get RPS:', rpsResult.error);
+      // Still emit RPS update even during night period
+      energyEvents.emit('rpsUpdate', {
+        rps: rpsResult.rps,
+        averagedRps: avgRps,
+        appliedMode: currentAutoMode
+      });
       return;
     }
 
     // Use averaged RPS for mode determination
-    const avgRps = rpsResult.averagedRps;
     const targetMode = determineMode(avgRps, config);
+
+    // Emit RPS update event
+    energyEvents.emit('rpsUpdate', {
+      rps: rpsResult.rps,
+      averagedRps: avgRps,
+      appliedMode: currentAutoMode
+    });
 
     // Only change mode if different
     if (targetMode !== currentAutoMode) {
@@ -975,7 +996,7 @@ async function updateAutoSelect() {
 function startAutoSelect(config) {
   stopAutoSelect();
 
-  const interval = config.sampleInterval || 5000;
+  const interval = config.sampleInterval || DEFAULT_AUTOSELECT.sampleInterval;
   autoSelectInterval = setInterval(updateAutoSelect, interval);
 
   // Run immediately

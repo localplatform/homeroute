@@ -16,7 +16,6 @@ import {
   saveEnergySchedule,
   getAutoSelectConfig,
   saveAutoSelectConfig,
-  getNetworkRps,
   getBenchmarkStatus,
   startBenchmark,
   stopBenchmark
@@ -138,16 +137,41 @@ function Energy() {
     fetchInitialData();
   }, []);
 
-  // CPU, fans, benchmark, network RPS and current mode polling
+  // SSE connection for real-time mode and RPS updates
+  useEffect(() => {
+    const eventSource = new EventSource('/api/energy/events');
+
+    eventSource.addEventListener('modeChange', (e) => {
+      const data = JSON.parse(e.data);
+      setCurrentMode(data.mode);
+    });
+
+    eventSource.addEventListener('rpsUpdate', (e) => {
+      const data = JSON.parse(e.data);
+      setNetworkRps({
+        current: data.rps || 0,
+        averaged: data.averagedRps || 0,
+        appliedMode: data.appliedMode || null
+      });
+    });
+
+    eventSource.onerror = () => {
+      console.error('SSE connection error, reconnecting...');
+    };
+
+    return () => {
+      eventSource.close();
+    };
+  }, []);
+
+  // CPU, fans and benchmark polling (less frequent, SSE handles mode/RPS)
   useEffect(() => {
     async function pollData() {
       try {
-        const [cpuRes, fansRes, benchRes, rpsRes, modeRes] = await Promise.all([
+        const [cpuRes, fansRes, benchRes] = await Promise.all([
           getCpuInfo(),
           getFansStatus(),
-          getBenchmarkStatus(),
-          getNetworkRps(),
-          getCurrentEnergyMode()
+          getBenchmarkStatus()
         ]);
 
         if (cpuRes.data.success) {
@@ -168,26 +192,13 @@ function Energy() {
             elapsed: benchRes.data.elapsed || 0
           });
         }
-
-        if (rpsRes.data.success) {
-          setNetworkRps({
-            current: rpsRes.data.rps || 0,
-            averaged: rpsRes.data.averagedRps || 0,
-            appliedMode: rpsRes.data.appliedMode || null
-          });
-        }
-
-        // Update current mode (reflects auto-select changes)
-        if (modeRes.data.success && modeRes.data.mode) {
-          setCurrentMode(modeRes.data.mode);
-        }
       } catch (error) {
         console.error('Error polling data:', error);
       }
     }
 
     pollData();
-    pollingRef.current = setInterval(pollData, 1000);
+    pollingRef.current = setInterval(pollData, 2000); // Slower polling, SSE handles real-time
 
     return () => {
       if (pollingRef.current) {
@@ -531,7 +542,16 @@ function Energy() {
           <div className="space-y-4">
             <div className="flex items-center gap-3">
               <button
-                onClick={() => setSchedule(prev => ({ ...prev, enabled: !prev.enabled }))}
+                onClick={async () => {
+                  const newSchedule = { ...schedule, enabled: !schedule.enabled };
+                  setSchedule(newSchedule);
+                  // Auto-save when toggling
+                  try {
+                    await saveEnergySchedule(newSchedule);
+                  } catch (error) {
+                    console.error('Error saving schedule:', error);
+                  }
+                }}
                 className={`relative w-12 h-6 rounded-full transition-colors ${
                   schedule.enabled ? 'bg-blue-600' : 'bg-gray-600'
                 }`}
@@ -582,7 +602,16 @@ function Energy() {
           <div className="space-y-4">
             <div className="flex items-center gap-3">
               <button
-                onClick={() => setAutoSelect(prev => ({ ...prev, enabled: !prev.enabled }))}
+                onClick={async () => {
+                  const newAutoSelect = { ...autoSelect, enabled: !autoSelect.enabled };
+                  setAutoSelect(newAutoSelect);
+                  // Auto-save when toggling
+                  try {
+                    await saveAutoSelectConfig(newAutoSelect);
+                  } catch (error) {
+                    console.error('Error saving auto-select config:', error);
+                  }
+                }}
                 className={`relative w-12 h-6 rounded-full transition-colors ${
                   autoSelect.enabled ? 'bg-green-600' : 'bg-gray-600'
                 }`}
@@ -606,14 +635,14 @@ function Energy() {
                 <span className="text-gray-400 text-sm">Charge (moy. {autoSelect.averagingTime}s):</span>
                 <span className="text-white font-mono font-bold text-lg">{networkRps.averaged.toLocaleString()} req/s</span>
               </div>
-              {autoSelect.enabled && networkRps.appliedMode && (
+              {autoSelect.enabled && currentMode && (
                 <div className="flex items-center justify-between mt-1">
                   <span className="text-gray-400 text-sm">Mode appliqué:</span>
                   <span className={`font-medium ${
-                    networkRps.appliedMode === 'economy' ? 'text-indigo-400' :
-                    networkRps.appliedMode === 'performance' ? 'text-orange-400' : 'text-blue-400'
+                    currentMode === 'economy' ? 'text-indigo-400' :
+                    currentMode === 'performance' ? 'text-orange-400' : 'text-blue-400'
                   }`}>
-                    {MODE_LABELS[networkRps.appliedMode]}
+                    {MODE_LABELS[currentMode]}
                   </span>
                 </div>
               )}

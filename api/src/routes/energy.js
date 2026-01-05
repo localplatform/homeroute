@@ -19,10 +19,52 @@ import {
   getAutoSelectConfig,
   saveAutoSelectConfig,
   getNetworkRps,
-  getAutoSelectStatus
+  getAutoSelectStatus,
+  energyEvents
 } from '../services/energy.js';
 
 const router = Router();
+
+// ============ SSE (Server-Sent Events) ============
+
+// GET /api/energy/events - Real-time updates via SSE
+router.get('/events', (req, res) => {
+  // Set headers for SSE
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
+  res.flushHeaders();
+
+  // Send initial connection event
+  res.write('event: connected\ndata: {}\n\n');
+
+  // Handler for mode changes
+  const onModeChange = (data) => {
+    res.write(`event: modeChange\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  // Handler for RPS updates
+  const onRpsUpdate = (data) => {
+    res.write(`event: rpsUpdate\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  // Subscribe to events
+  energyEvents.on('modeChange', onModeChange);
+  energyEvents.on('rpsUpdate', onRpsUpdate);
+
+  // Heartbeat every 30 seconds to keep connection alive
+  const heartbeat = setInterval(() => {
+    res.write('event: heartbeat\ndata: {}\n\n');
+  }, 30000);
+
+  // Cleanup on connection close
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    energyEvents.off('modeChange', onModeChange);
+    energyEvents.off('rpsUpdate', onRpsUpdate);
+  });
+});
 
 // ============ CPU INFO ============
 
