@@ -16,7 +16,11 @@ import {
   Shield,
   Key,
   AlertTriangle,
-  User
+  User,
+  FileCode,
+  Copy,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
@@ -74,6 +78,72 @@ function ReverseProxy() {
   const [saving, setSaving] = useState(false);
   const [renewing, setRenewing] = useState(false);
   const [reloading, setReloading] = useState(false);
+
+  // Instructions section state
+  const [showInstructions, setShowInstructions] = useState(false);
+  const [instructionsCopied, setInstructionsCopied] = useState(false);
+
+  // Instructions pour Claude Code agents
+  const authInstructions = `# Authentification
+
+Cette application utilise un système d'authentification centralisé optionnel.
+L'app est accessible à tous, mais peut détecter les utilisateurs connectés.
+
+## Récupérer l'utilisateur connecté
+
+Si un utilisateur est connecté, le reverse proxy ajoute ces headers HTTP :
+
+- \`X-Auth-User\` : nom d'utilisateur (ex: \`john\`)
+- \`X-Auth-Email\` : email (ex: \`john@example.com\`)
+- \`X-Auth-Name\` : nom affiché (ex: \`John Doe\`)
+- \`X-Auth-Groups\` : groupes séparés par virgule (ex: \`users,admins\`)
+
+Si l'utilisateur n'est pas connecté, ces headers sont absents.
+
+## Détecter si connecté
+
+Vérifie la présence du header \`X-Auth-User\` :
+- Présent → utilisateur connecté, lire les autres headers
+- Absent → utilisateur non connecté (visiteur anonyme)
+
+## Groupes disponibles
+
+- \`admins\` : administrateurs
+- \`power_users\` : utilisateurs avancés
+- \`users\` : utilisateurs standards
+
+Pour afficher/cacher des fonctionnalités, vérifie si le groupe est dans \`X-Auth-Groups\`.
+
+## Connexion
+
+Pour permettre à l'utilisateur de se connecter, redirige vers :
+\`https://auth.mynetwk.biz/login?rd=URL_RETOUR\`
+
+## API de vérification (optionnel)
+
+- \`POST https://proxy.mynetwk.biz/api/authproxy/verify\`
+  - Body : \`{ "cookie": "valeur_auth_session" }\`
+  - Réponse : \`{ "valid": true, "user": { username, email, displayName, groups } }\`
+
+- \`POST https://proxy.mynetwk.biz/api/authproxy/check-group\`
+  - Body : \`{ "cookie": "valeur_auth_session", "groups": ["admins"] }\`
+  - Réponse : \`{ "valid": true, "hasAccess": true, "matchedGroups": ["admins"] }\`
+
+## Notes
+
+- L'app reste accessible même sans connexion
+- Les headers sont fiables car injectés par le proxy après vérification
+- Utilise les headers pour adapter l'UI (afficher bouton admin, etc.)`;
+
+  async function copyInstructions() {
+    try {
+      await navigator.clipboard.writeText(authInstructions);
+      setInstructionsCopied(true);
+      setTimeout(() => setInstructionsCopied(false), 2000);
+    } catch (err) {
+      console.error('Failed to copy:', err);
+    }
+  }
 
   useEffect(() => {
     fetchData();
@@ -461,6 +531,17 @@ function ReverseProxy() {
             <span className="bg-gray-700 text-gray-300 text-xs px-1.5 py-0.5 rounded">{authAccounts.length}</span>
           )}
         </button>
+        <button
+          onClick={() => setActiveTab('integration')}
+          className={`flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
+            activeTab === 'integration'
+              ? 'border-blue-500 text-blue-400'
+              : 'border-transparent text-gray-400 hover:text-gray-300'
+          }`}
+        >
+          <FileCode className="w-4 h-4" />
+          Intégration
+        </button>
       </div>
 
       {/* Hosts Tab */}
@@ -673,6 +754,79 @@ function ReverseProxy() {
           <p className="text-xs text-gray-500 mt-4 pt-4 border-t border-gray-700">
             Ces comptes sont utilisés pour l&apos;authentification HTTP Basic sur les hôtes avec l&apos;option &quot;Authentification requise&quot; activée.
           </p>
+        </Card>
+      )}
+
+      {/* Integration Tab */}
+      {activeTab === 'integration' && (
+        <Card
+          title="Instructions d'intégration Auth"
+          icon={FileCode}
+          actions={
+            <Button onClick={copyInstructions} variant="secondary" className="text-sm">
+              {instructionsCopied ? (
+                <>
+                  <CheckCircle className="w-4 h-4" />
+                  Copié !
+                </>
+              ) : (
+                <>
+                  <Copy className="w-4 h-4" />
+                  Copier
+                </>
+              )}
+            </Button>
+          }
+        >
+          <div className="space-y-4">
+            <p className="text-sm text-gray-400">
+              Ces instructions sont destinées aux agents Claude Code qui développent des applications proxifiées.
+              Copiez ce texte dans le fichier CLAUDE.md de vos projets.
+            </p>
+
+            <div className="bg-gray-900 rounded-lg p-4 border border-gray-700">
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-xs text-gray-500 font-mono">CLAUDE.md</span>
+                <button
+                  onClick={() => setShowInstructions(!showInstructions)}
+                  className="text-gray-400 hover:text-gray-300 flex items-center gap-1 text-xs"
+                >
+                  {showInstructions ? (
+                    <>
+                      <ChevronUp className="w-4 h-4" />
+                      Réduire
+                    </>
+                  ) : (
+                    <>
+                      <ChevronDown className="w-4 h-4" />
+                      Afficher
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {showInstructions && (
+                <pre className="text-xs text-gray-300 whitespace-pre-wrap font-mono overflow-x-auto max-h-96 overflow-y-auto">
+                  {authInstructions}
+                </pre>
+              )}
+
+              {!showInstructions && (
+                <p className="text-xs text-gray-500 italic">
+                  Cliquez sur &quot;Afficher&quot; pour voir le contenu complet
+                </p>
+              )}
+            </div>
+
+            <div className="bg-blue-900/20 border border-blue-800 rounded-lg p-4">
+              <h4 className="text-sm font-medium text-blue-400 mb-2">Fonctionnement</h4>
+              <ul className="text-xs text-gray-400 space-y-1 list-disc list-inside">
+                <li>Par défaut, toutes les apps reçoivent les headers <code className="text-blue-400">X-Auth-*</code> si l&apos;utilisateur est connecté</li>
+                <li>Si &quot;Authentification requise&quot; est activé, l&apos;accès est bloqué pour les non-connectés</li>
+                <li>Les apps peuvent lire les headers pour adapter leur UI selon l&apos;utilisateur</li>
+              </ul>
+            </div>
+          </div>
         </Card>
       )}
 

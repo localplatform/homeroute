@@ -23,6 +23,7 @@ import authRoutes from './routes/auth.js';
 import updatesRoutes from './routes/updates.js';
 import energyRoutes from './routes/energy.js';
 import usersRoutes from './routes/users.js';
+import authproxyRoutes from './routes/authproxy.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -75,6 +76,7 @@ async function startServer() {
   app.use('/api/updates', updatesRoutes);
   app.use('/api/energy', energyRoutes);
   app.use('/api/users', usersRoutes);
+  app.use('/api/authproxy', authproxyRoutes);
 
   // Health check
   app.get('/api/health', (req, res) => {
