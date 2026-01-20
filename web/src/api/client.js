@@ -61,12 +61,6 @@ export const reloadCaddy = () => api.post('/reverseproxy/reload');
 export const getSystemRouteStatus = () => api.get('/reverseproxy/system-route');
 export const getCertificatesStatus = () => api.get('/reverseproxy/certificates/status');
 
-// Reverse Proxy - Auth Accounts
-export const getAuthAccounts = () => api.get('/reverseproxy/auth/accounts');
-export const addAuthAccount = (username, password) => api.post('/reverseproxy/auth/accounts', { username, password });
-export const updateAuthAccount = (id, data) => api.put(`/reverseproxy/auth/accounts/${id}`, data);
-export const deleteAuthAccount = (id) => api.delete(`/reverseproxy/auth/accounts/${id}`);
-
 // Auth - Session (login page)
 export const login = (username, password) => api.post('/auth/login', { username, password });
 export const logout = () => api.post('/auth/logout');

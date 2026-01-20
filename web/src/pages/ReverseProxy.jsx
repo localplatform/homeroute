@@ -16,7 +16,6 @@ import {
   Shield,
   Key,
   AlertTriangle,
-  User,
   FileCode,
   Copy,
   ChevronDown,
@@ -35,10 +34,6 @@ import {
   updateBaseDomain,
   renewCertificates,
   reloadCaddy,
-  getAuthAccounts,
-  addAuthAccount,
-  updateAuthAccount,
-  deleteAuthAccount,
   getCertificatesStatus
 } from '../api/client';
 
@@ -49,11 +44,7 @@ function ReverseProxy() {
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState(null);
 
-  // Tab state
-  const [activeTab, setActiveTab] = useState('hosts');
-
-  // Auth accounts state
-  const [authAccounts, setAuthAccounts] = useState([]);
+  // Certificate statuses
   const [certStatuses, setCertStatuses] = useState({});
 
   // Modal states
@@ -61,64 +52,86 @@ function ReverseProxy() {
   const [showConfigModal, setShowConfigModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showDomainRequiredModal, setShowDomainRequiredModal] = useState(false);
-  const [showAddAccountModal, setShowAddAccountModal] = useState(false);
-  const [showEditAccountModal, setShowEditAccountModal] = useState(false);
   const [editingHost, setEditingHost] = useState(null);
-  const [editingAccount, setEditingAccount] = useState(null);
 
   // Form states
   const [hostType, setHostType] = useState('subdomain');
   const [newHost, setNewHost] = useState({ subdomain: '', customDomain: '', targetHost: 'localhost', targetPort: '', localOnly: false, requireAuth: false });
   const [editForm, setEditForm] = useState({ targetHost: '', targetPort: '', localOnly: false, requireAuth: false });
   const [configForm, setConfigForm] = useState({ baseDomain: '' });
-  const [newAccount, setNewAccount] = useState({ username: '', password: '' });
-  const [editAccountForm, setEditAccountForm] = useState({ username: '', password: '' });
 
   // Action states
   const [saving, setSaving] = useState(false);
   const [renewing, setRenewing] = useState(false);
   const [reloading, setReloading] = useState(false);
 
-  // Instructions section state
-  const [showInstructions, setShowInstructions] = useState(false);
+  // Integration section state
+  const [showIntegration, setShowIntegration] = useState(false);
   const [instructionsCopied, setInstructionsCopied] = useState(false);
 
   // Instructions pour Claude Code agents
   const authInstructions = `# Authentification
 
-Cette application utilise un système d'authentification centralisé optionnel.
-L'app est accessible à tous, mais peut détecter les utilisateurs connectés.
+Le cookie \`auth_session\` est partagé sur \`*.mynetwk.biz\`.
+Pour vérifier si un utilisateur est connecté, appelle l'API auth.
 
-## Récupérer l'utilisateur connecté
+## Endpoints disponibles
 
-Le cookie \`auth_session\` est automatiquement envoyé par le navigateur.
-Pour vérifier si l'utilisateur est connecté et obtenir ses infos, appelle l'API :
+### GET https://auth.mynetwk.biz/api/auth/me
+Récupérer les infos de l'utilisateur connecté.
 
-\`\`\`javascript
-// Côté serveur (Express.js)
-const authCookie = req.cookies.auth_session;
-if (authCookie) {
-  const res = await fetch('https://proxy.mynetwk.biz/api/authproxy/verify', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ cookie: authCookie })
-  });
-  const { valid, user } = await res.json();
-  if (valid) {
-    // user = { username, email, displayName, groups, isAdmin, isPowerUser }
-  }
-}
-\`\`\`
+**Entrée :** Cookie \`auth_session\`
 
-## API de vérification
+**Sortie (connecté) :**
+- \`success\`: true
+- \`user.username\`: nom d'utilisateur
+- \`user.displayname\`: nom affiché
+- \`user.email\`: email
+- \`user.groups\`: liste des groupes (ex: ["users", "admins"])
+- \`session.expires_at\`: expiration de la session
 
-- \`POST https://proxy.mynetwk.biz/api/authproxy/verify\`
-  - Body : \`{ "cookie": "valeur_auth_session" }\`
-  - Réponse : \`{ "valid": true, "user": { username, email, displayName, groups, isAdmin, isPowerUser } }\`
+**Sortie (non connecté) :** \`success\`: false, \`error\`: "Non authentifié"
 
-- \`POST https://proxy.mynetwk.biz/api/authproxy/check-group\`
-  - Body : \`{ "cookie": "valeur_auth_session", "groups": ["admins"] }\`
-  - Réponse : \`{ "valid": true, "hasAccess": true, "matchedGroups": ["admins"] }\`
+---
+
+### GET https://auth.mynetwk.biz/api/auth/check
+Vérification rapide d'authentification.
+
+**Entrée :** Cookie \`auth_session\`
+
+**Sortie (connecté) :**
+- \`authenticated\`: true
+- \`user_id\`: identifiant utilisateur
+
+**Sortie (non connecté) :** \`authenticated\`: false
+
+---
+
+### POST https://auth.mynetwk.biz/api/auth/login
+Connecter un utilisateur.
+
+**Entrée (body JSON) :**
+- \`username\`: nom d'utilisateur
+- \`password\`: mot de passe
+- \`remember_me\` (optionnel): true pour session de 30 jours
+
+**Sortie (succès) :**
+- \`success\`: true
+- \`user\`: infos utilisateur
+- \`expires_at\`: expiration
+
+**Sortie (échec) :** \`success\`: false, \`error\`: message d'erreur
+
+---
+
+### POST https://auth.mynetwk.biz/api/auth/logout
+Déconnecter l'utilisateur.
+
+**Entrée :** Cookie \`auth_session\`
+
+**Sortie :** \`success\`: true
+
+---
 
 ## Groupes disponibles
 
@@ -126,16 +139,14 @@ if (authCookie) {
 - \`power_users\` : utilisateurs avancés
 - \`users\` : utilisateurs standards
 
-## Connexion
+## URL de connexion
 
-Pour permettre à l'utilisateur de se connecter, redirige vers :
-\`https://auth.mynetwk.biz/login?rd=URL_RETOUR\`
+Rediriger vers : \`https://auth.mynetwk.biz/login?rd=URL_RETOUR\`
 
 ## Notes
 
-- L'app reste accessible même sans connexion
-- Le cookie \`auth_session\` est partagé sur le domaine \`*.mynetwk.biz\`
-- Appelle l'API de vérification côté serveur pour valider le cookie`;
+- Le cookie est automatiquement envoyé par le navigateur
+- Toutes les apps sur \`*.mynetwk.biz\` partagent le même cookie`;
 
   async function copyInstructions() {
     try {
@@ -153,11 +164,10 @@ Pour permettre à l'utilisateur de se connecter, redirige vers :
 
   async function fetchData() {
     try {
-      const [configRes, statusRes, hostsRes, accountsRes, certsRes] = await Promise.all([
+      const [configRes, statusRes, hostsRes, certsRes] = await Promise.all([
         getReverseProxyConfig(),
         getReverseProxyStatus(),
         getReverseProxyHosts(),
-        getAuthAccounts(),
         getCertificatesStatus()
       ]);
 
@@ -174,9 +184,6 @@ Pour permettre à l'utilisateur de se connecter, redirige vers :
       }
       if (hostsRes.data.success) {
         setHosts(hostsRes.data.hosts || []);
-      }
-      if (accountsRes.data.success) {
-        setAuthAccounts(accountsRes.data.accounts || []);
       }
       if (certsRes.data.success) {
         setCertStatuses(certsRes.data.certificates || {});
@@ -320,79 +327,6 @@ Pour permettre à l'utilisateur de se connecter, redirige vers :
     }
   }
 
-  // ========== Auth Account Handlers ==========
-
-  async function handleAddAccount() {
-    if (!newAccount.username || !newAccount.password) {
-      setMessage({ type: 'error', text: 'Nom d\'utilisateur et mot de passe requis' });
-      return;
-    }
-    setSaving(true);
-    try {
-      const res = await addAuthAccount(newAccount.username, newAccount.password);
-      if (res.data.success) {
-        setMessage({ type: 'success', text: 'Compte créé' });
-        setShowAddAccountModal(false);
-        setNewAccount({ username: '', password: '' });
-        fetchData();
-      } else {
-        setMessage({ type: 'error', text: res.data.error });
-      }
-    } catch (error) {
-      setMessage({ type: 'error', text: error.response?.data?.error || 'Erreur' });
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  function openEditAccountModal(account) {
-    setEditingAccount(account);
-    setEditAccountForm({ username: account.username, password: '' });
-    setShowEditAccountModal(true);
-  }
-
-  async function handleEditAccount() {
-    if (!editAccountForm.username) {
-      setMessage({ type: 'error', text: 'Nom d\'utilisateur requis' });
-      return;
-    }
-    setSaving(true);
-    try {
-      const updates = { username: editAccountForm.username };
-      if (editAccountForm.password) {
-        updates.password = editAccountForm.password;
-      }
-      const res = await updateAuthAccount(editingAccount.id, updates);
-      if (res.data.success) {
-        setMessage({ type: 'success', text: 'Compte modifié' });
-        setShowEditAccountModal(false);
-        setEditingAccount(null);
-        fetchData();
-      } else {
-        setMessage({ type: 'error', text: res.data.error });
-      }
-    } catch (error) {
-      setMessage({ type: 'error', text: error.response?.data?.error || 'Erreur' });
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleDeleteAccount(accountId) {
-    if (!confirm('Supprimer ce compte ?')) return;
-    try {
-      const res = await deleteAuthAccount(accountId);
-      if (res.data.success) {
-        setMessage({ type: 'success', text: 'Compte supprimé' });
-        fetchData();
-      } else {
-        setMessage({ type: 'error', text: res.data.error });
-      }
-    } catch (error) {
-      setMessage({ type: 'error', text: 'Erreur' });
-    }
-  }
-
   async function handleRenewCerts() {
     setRenewing(true);
     setMessage(null);
@@ -506,75 +440,10 @@ Pour permettre à l'utilisateur de se connecter, redirige vers :
         </Card>
       </div>
 
-      {/* Tabs */}
-      <div className="flex gap-1 border-b border-gray-700">
-        <button
-          onClick={() => setActiveTab('hosts')}
-          className={`flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
-            activeTab === 'hosts'
-              ? 'border-blue-500 text-blue-400'
-              : 'border-transparent text-gray-400 hover:text-gray-300'
-          }`}
-        >
-          <Globe className="w-4 h-4" />
-          Hôtes
-        </button>
-        <button
-          onClick={() => setActiveTab('auth')}
-          className={`flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
-            activeTab === 'auth'
-              ? 'border-blue-500 text-blue-400'
-              : 'border-transparent text-gray-400 hover:text-gray-300'
-          }`}
-        >
-          <Key className="w-4 h-4" />
-          Authentification
-          {authAccounts.length > 0 && (
-            <span className="bg-gray-700 text-gray-300 text-xs px-1.5 py-0.5 rounded">{authAccounts.length}</span>
-          )}
-        </button>
-        <button
-          onClick={() => setActiveTab('integration')}
-          className={`flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
-            activeTab === 'integration'
-              ? 'border-blue-500 text-blue-400'
-              : 'border-transparent text-gray-400 hover:text-gray-300'
-          }`}
-        >
-          <FileCode className="w-4 h-4" />
-          Intégration
-        </button>
-      </div>
-
-      {/* Hosts Tab */}
-      {activeTab === 'hosts' && (
-        <>
-          {/* Configuration Card */}
-          <Card
-            title="Configuration"
-            icon={Settings}
-            actions={
-              <Button onClick={() => setShowConfigModal(true)} variant="secondary" className="text-sm">
-                Modifier
-              </Button>
-            }
-          >
-            <div className="space-y-3 text-sm">
-              <div className="flex justify-between">
-                <span className="text-gray-400">Domaine de base</span>
-                <span className="font-mono">{config?.baseDomain || '-'}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-400">Dashboard distant</span>
-                <span className="font-mono text-blue-400">proxy.{config?.baseDomain || 'domain.com'}</span>
-              </div>
-              <p className="text-xs text-gray-500 pt-2 border-t border-gray-700">
-                Les sous-domaines utilisent ce domaine de base. Les certificats SSL sont obtenus automatiquement via Let&apos;s Encrypt.
-              </p>
-            </div>
-          </Card>
-
-          {/* Hosts Table */}
+      {/* Main Content - 2 columns layout */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Left column - Hosts Table (2/3) */}
+        <div className="lg:col-span-2">
           <Card title="Hôtes configurés" icon={Globe}>
         {hosts.length === 0 ? (
           <div className="text-center py-8 text-gray-500">
@@ -686,151 +555,91 @@ Pour permettre à l'utilisateur de se connecter, redirige vers :
           </div>
         )}
           </Card>
-        </>
-      )}
+        </div>
 
-      {/* Auth Tab */}
-      {activeTab === 'auth' && (
-        <Card
-          title="Comptes d'authentification"
-          icon={Key}
-          actions={
-            <Button onClick={() => setShowAddAccountModal(true)}>
-              <Plus className="w-4 h-4" />
-              Ajouter
-            </Button>
-          }
-        >
-          {authAccounts.length === 0 ? (
-            <div className="text-center py-8 text-gray-500">
-              <Key className="w-12 h-12 mx-auto mb-2 opacity-50" />
-              <p>Aucun compte configuré</p>
-              <p className="text-xs mt-2">Créez un compte pour activer l&apos;authentification sur les hôtes</p>
+        {/* Right column - Configuration & Integration (1/3) */}
+        <div className="space-y-6">
+          {/* Configuration Card */}
+          <Card
+            title="Configuration"
+            icon={Settings}
+            actions={
+              <Button onClick={() => setShowConfigModal(true)} variant="secondary" className="text-sm">
+                Modifier
+              </Button>
+            }
+          >
+            <div className="space-y-3 text-sm">
+              <div className="flex justify-between">
+                <span className="text-gray-400">Domaine de base</span>
+                <span className="font-mono">{config?.baseDomain || '-'}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-400">Dashboard distant</span>
+                <span className="font-mono text-blue-400">proxy.{config?.baseDomain || 'domain.com'}</span>
+              </div>
+              <p className="text-xs text-gray-500 pt-2 border-t border-gray-700">
+                Les sous-domaines utilisent ce domaine de base. Les certificats SSL sont obtenus automatiquement via Let&apos;s Encrypt.
+              </p>
             </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-left text-gray-400 border-b border-gray-700">
-                    <th className="pb-2">Utilisateur</th>
-                    <th className="pb-2">Créé le</th>
-                    <th className="pb-2 text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {authAccounts.map(account => (
-                    <tr key={account.id} className="border-b border-gray-700/50">
-                      <td className="py-3">
-                        <div className="flex items-center gap-2">
-                          <User className="w-4 h-4 text-gray-500" />
-                          <span className="font-mono">{account.username}</span>
-                        </div>
-                      </td>
-                      <td className="py-3 text-gray-400">
-                        {new Date(account.createdAt).toLocaleDateString('fr-FR')}
-                      </td>
-                      <td className="py-3 text-right">
-                        <div className="flex justify-end gap-1">
-                          <button
-                            onClick={() => openEditAccountModal(account)}
-                            className="text-blue-400 hover:text-blue-300 p-1"
-                            title="Modifier"
-                          >
-                            <Pencil className="w-4 h-4" />
-                          </button>
-                          <button
-                            onClick={() => handleDeleteAccount(account.id)}
-                            className="text-red-400 hover:text-red-300 p-1"
-                            title="Supprimer"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          <p className="text-xs text-gray-500 mt-4 pt-4 border-t border-gray-700">
-            Ces comptes sont utilisés pour l&apos;authentification HTTP Basic sur les hôtes avec l&apos;option &quot;Authentification requise&quot; activée.
-          </p>
-        </Card>
-      )}
+          </Card>
 
-      {/* Integration Tab */}
-      {activeTab === 'integration' && (
-        <Card
-          title="Instructions d'intégration Auth"
-          icon={FileCode}
-          actions={
-            <Button onClick={copyInstructions} variant="secondary" className="text-sm">
-              {instructionsCopied ? (
-                <>
-                  <CheckCircle className="w-4 h-4" />
-                  Copié !
-                </>
-              ) : (
-                <>
-                  <Copy className="w-4 h-4" />
-                  Copier
-                </>
-              )}
-            </Button>
-          }
-        >
-          <div className="space-y-4">
-            <p className="text-sm text-gray-400">
-              Ces instructions sont destinées aux agents Claude Code qui développent des applications proxifiées.
-              Copiez ce texte dans le fichier CLAUDE.md de vos projets.
-            </p>
-
-            <div className="bg-gray-900 rounded-lg p-4 border border-gray-700">
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-xs text-gray-500 font-mono">CLAUDE.md</span>
-                <button
-                  onClick={() => setShowInstructions(!showInstructions)}
-                  className="text-gray-400 hover:text-gray-300 flex items-center gap-1 text-xs"
-                >
-                  {showInstructions ? (
+          {/* Integration Section */}
+          <Card
+            title="Intégration Auth"
+            icon={FileCode}
+            actions={
+              <div className="flex gap-2">
+                <Button onClick={copyInstructions} variant="secondary" className="text-sm">
+                  {instructionsCopied ? (
                     <>
-                      <ChevronUp className="w-4 h-4" />
-                      Réduire
+                      <CheckCircle className="w-4 h-4" />
+                      Copié !
                     </>
                   ) : (
                     <>
-                      <ChevronDown className="w-4 h-4" />
-                      Afficher
+                      <Copy className="w-4 h-4" />
+                      Copier
                     </>
                   )}
+                </Button>
+                <button
+                  onClick={() => setShowIntegration(!showIntegration)}
+                  className="text-gray-400 hover:text-gray-300 flex items-center gap-1 text-sm px-2 py-1 bg-gray-700 rounded hover:bg-gray-600"
+                >
+                  {showIntegration ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
                 </button>
               </div>
+            }
+          >
+            <p className="text-sm text-gray-400 mb-3">
+              Instructions pour intégrer l&apos;authentification centralisée dans vos applications proxifiées.
+            </p>
 
-              {showInstructions && (
-                <pre className="text-xs text-gray-300 whitespace-pre-wrap font-mono overflow-x-auto max-h-96 overflow-y-auto">
-                  {authInstructions}
-                </pre>
-              )}
+            {showIntegration && (
+              <div className="space-y-4">
+                <div className="bg-gray-900 rounded-lg p-4 border border-gray-700">
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-xs text-gray-500 font-mono">CLAUDE.md</span>
+                  </div>
+                  <pre className="text-xs text-gray-300 whitespace-pre-wrap font-mono overflow-x-auto max-h-96 overflow-y-auto">
+                    {authInstructions}
+                  </pre>
+                </div>
 
-              {!showInstructions && (
-                <p className="text-xs text-gray-500 italic">
-                  Cliquez sur &quot;Afficher&quot; pour voir le contenu complet
-                </p>
-              )}
-            </div>
-
-            <div className="bg-blue-900/20 border border-blue-800 rounded-lg p-4">
-              <h4 className="text-sm font-medium text-blue-400 mb-2">Fonctionnement</h4>
-              <ul className="text-xs text-gray-400 space-y-1 list-disc list-inside">
-                <li>Le cookie <code className="text-blue-400">auth_session</code> est partagé sur <code className="text-blue-400">*.mynetwk.biz</code></li>
-                <li>Les apps appellent l&apos;API <code className="text-blue-400">/api/authproxy/verify</code> pour vérifier le cookie</li>
-                <li>L&apos;API retourne les infos utilisateur (username, email, groupes, isAdmin)</li>
-              </ul>
-            </div>
-          </div>
-        </Card>
-      )}
+                <div className="bg-blue-900/20 border border-blue-800 rounded-lg p-4">
+                  <h4 className="text-sm font-medium text-blue-400 mb-2">Fonctionnement</h4>
+                  <ul className="text-xs text-gray-400 space-y-1 list-disc list-inside">
+                    <li>Le cookie <code className="text-blue-400">auth_session</code> est partagé sur <code className="text-blue-400">*.mynetwk.biz</code></li>
+                    <li>Les apps appellent <code className="text-blue-400">GET /api/auth/me</code> pour récupérer l&apos;utilisateur</li>
+                    <li>L&apos;API retourne les infos : username, email, groups</li>
+                  </ul>
+                </div>
+              </div>
+            )}
+          </Card>
+        </div>
+      </div>
 
       {/* Add Host Modal */}
       {showAddModal && (
@@ -969,13 +778,6 @@ Pour permettre à l'utilisateur de se connecter, redirige vers :
                   <div className={`w-4 h-4 bg-white rounded-full mt-1 transition-transform ${newHost.requireAuth ? 'translate-x-5' : 'translate-x-1'}`} />
                 </div>
               </div>
-              {newHost.requireAuth && authAccounts.length === 0 && (
-                <div className="flex items-center gap-2 text-xs text-yellow-400 bg-yellow-900/30 p-2 rounded">
-                  <AlertTriangle className="w-4 h-4" />
-                  Créez au moins un compte dans l&apos;onglet Authentification
-                </div>
-              )}
-
               {/* Certificate Info */}
               <div className="text-xs text-gray-500 bg-gray-900/50 rounded p-3">
                 <p className="flex items-center gap-1">
@@ -1137,12 +939,6 @@ Pour permettre à l'utilisateur de se connecter, redirige vers :
                   <div className={`w-4 h-4 bg-white rounded-full mt-1 transition-transform ${editForm.requireAuth ? 'translate-x-5' : 'translate-x-1'}`} />
                 </div>
               </div>
-              {editForm.requireAuth && authAccounts.length === 0 && (
-                <div className="flex items-center gap-2 text-xs text-yellow-400 bg-yellow-900/30 p-2 rounded">
-                  <AlertTriangle className="w-4 h-4" />
-                  Créez au moins un compte dans l&apos;onglet Authentification
-                </div>
-              )}
             </div>
 
             <div className="flex justify-end gap-2 mt-6">
@@ -1150,106 +946,6 @@ Pour permettre à l'utilisateur de se connecter, redirige vers :
                 Annuler
               </Button>
               <Button onClick={handleEditHost} loading={saving}>
-                Sauvegarder
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Add Account Modal */}
-      {showAddAccountModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md border border-gray-700">
-            <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
-              <User className="w-5 h-5 text-purple-400" />
-              Nouveau compte
-            </h2>
-
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm text-gray-400 mb-1">Nom d&apos;utilisateur</label>
-                <input
-                  type="text"
-                  placeholder="admin"
-                  value={newAccount.username}
-                  onChange={e => setNewAccount({ ...newAccount, username: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm focus:outline-none focus:border-blue-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm text-gray-400 mb-1">Mot de passe</label>
-                <input
-                  type="password"
-                  placeholder="••••••••"
-                  value={newAccount.password}
-                  onChange={e => setNewAccount({ ...newAccount, password: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm focus:outline-none focus:border-blue-500"
-                />
-              </div>
-
-              <div className="text-xs text-gray-500 bg-gray-900/50 rounded p-3">
-                <p className="flex items-center gap-1">
-                  <Key className="w-3 h-3" />
-                  Ce compte sera utilisé pour l&apos;authentification HTTP Basic
-                </p>
-              </div>
-            </div>
-
-            <div className="flex justify-end gap-2 mt-6">
-              <Button variant="secondary" onClick={() => { setShowAddAccountModal(false); setNewAccount({ username: '', password: '' }); }}>
-                Annuler
-              </Button>
-              <Button onClick={handleAddAccount} loading={saving}>
-                Créer
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Edit Account Modal */}
-      {showEditAccountModal && editingAccount && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md border border-gray-700">
-            <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
-              <Pencil className="w-5 h-5 text-blue-400" />
-              Modifier le compte
-            </h2>
-
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm text-gray-400 mb-1">Nom d&apos;utilisateur</label>
-                <input
-                  type="text"
-                  placeholder="admin"
-                  value={editAccountForm.username}
-                  onChange={e => setEditAccountForm({ ...editAccountForm, username: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm focus:outline-none focus:border-blue-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm text-gray-400 mb-1">Nouveau mot de passe (optionnel)</label>
-                <input
-                  type="password"
-                  placeholder="Laisser vide pour conserver l'actuel"
-                  value={editAccountForm.password}
-                  onChange={e => setEditAccountForm({ ...editAccountForm, password: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm focus:outline-none focus:border-blue-500"
-                />
-                <p className="text-xs text-gray-500 mt-1">
-                  Laissez vide pour conserver le mot de passe actuel
-                </p>
-              </div>
-            </div>
-
-            <div className="flex justify-end gap-2 mt-6">
-              <Button variant="secondary" onClick={() => { setShowEditAccountModal(false); setEditingAccount(null); }}>
-                Annuler
-              </Button>
-              <Button onClick={handleEditAccount} loading={saving}>
                 Sauvegarder
               </Button>
             </div>

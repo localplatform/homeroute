@@ -7,10 +7,6 @@ import {
   updateHost,
   deleteHost,
   toggleHost,
-  getAuthAccounts,
-  addAuthAccount,
-  updateAuthAccount,
-  deleteAuthAccount,
   getCaddyStatus,
   reloadCaddy,
   renewCertificates,
@@ -104,36 +100,6 @@ router.post('/certificates/renew', async (req, res) => {
 // GET /api/reverseproxy/certificates/status - Status des certificats
 router.get('/certificates/status', async (req, res) => {
   const result = await getCertificatesStatus();
-  res.json(result);
-});
-
-// ========== Auth Accounts Endpoints ==========
-
-// GET /api/reverseproxy/auth/accounts - Liste des comptes
-router.get('/auth/accounts', async (req, res) => {
-  const result = await getAuthAccounts();
-  res.json(result);
-});
-
-// POST /api/reverseproxy/auth/accounts - Créer un compte
-router.post('/auth/accounts', async (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password) {
-    return res.status(400).json({ success: false, error: 'Username and password required' });
-  }
-  const result = await addAuthAccount(username, password);
-  res.json(result);
-});
-
-// PUT /api/reverseproxy/auth/accounts/:id - Modifier un compte
-router.put('/auth/accounts/:id', async (req, res) => {
-  const result = await updateAuthAccount(req.params.id, req.body);
-  res.json(result);
-});
-
-// DELETE /api/reverseproxy/auth/accounts/:id - Supprimer un compte
-router.delete('/auth/accounts/:id', async (req, res) => {
-  const result = await deleteAuthAccount(req.params.id);
   res.json(result);
 });
 

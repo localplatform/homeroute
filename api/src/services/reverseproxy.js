@@ -4,7 +4,6 @@ import path from 'path';
 import crypto from 'crypto';
 import http from 'http';
 import tls from 'tls';
-import bcrypt from 'bcrypt';
 
 // Environment configuration
 const getEnv = () => ({
@@ -24,7 +23,6 @@ const LOCAL_NETWORKS = [
 // Default config structure
 const getDefaultConfig = () => ({
   baseDomain: '',
-  authAccounts: [],
   hosts: []
 });
 
@@ -309,140 +307,6 @@ export async function deleteHost(hostId) {
 export async function toggleHost(hostId, enabled) {
   try {
     return await updateHost(hostId, { enabled: !!enabled });
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-}
-
-// ========== Auth Accounts Management ==========
-
-export async function getAuthAccounts() {
-  try {
-    const config = await loadConfig();
-    // Return accounts without password hashes
-    const accounts = (config.authAccounts || []).map(a => ({
-      id: a.id,
-      username: a.username,
-      createdAt: a.createdAt
-    }));
-    return { success: true, accounts };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-}
-
-export async function addAuthAccount(username, password) {
-  try {
-    if (!username || !password) {
-      return { success: false, error: 'Username and password are required' };
-    }
-
-    if (username.length < 3) {
-      return { success: false, error: 'Username must be at least 3 characters' };
-    }
-
-    if (password.length < 6) {
-      return { success: false, error: 'Password must be at least 6 characters' };
-    }
-
-    const config = await loadConfig();
-    if (!config.authAccounts) config.authAccounts = [];
-
-    // Check for duplicate username
-    if (config.authAccounts.some(a => a.username.toLowerCase() === username.toLowerCase())) {
-      return { success: false, error: 'Username already exists' };
-    }
-
-    // Hash password with bcrypt
-    const passwordHash = await bcrypt.hash(password, 10);
-
-    const newAccount = {
-      id: crypto.randomUUID(),
-      username: username.toLowerCase(),
-      passwordHash,
-      createdAt: new Date().toISOString()
-    };
-
-    config.authAccounts.push(newAccount);
-    await saveConfigFile(config);
-
-    // Reload Caddy to apply auth changes
-    await applyCaddyConfig();
-
-    return {
-      success: true,
-      account: { id: newAccount.id, username: newAccount.username, createdAt: newAccount.createdAt }
-    };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-}
-
-export async function updateAuthAccount(accountId, updates) {
-  try {
-    const config = await loadConfig();
-    if (!config.authAccounts) config.authAccounts = [];
-
-    const accountIndex = config.authAccounts.findIndex(a => a.id === accountId);
-    if (accountIndex === -1) {
-      return { success: false, error: 'Account not found' };
-    }
-
-    // Update username if provided
-    if (updates.username) {
-      if (updates.username.length < 3) {
-        return { success: false, error: 'Username must be at least 3 characters' };
-      }
-      // Check for duplicate
-      const duplicate = config.authAccounts.some(
-        (a, i) => i !== accountIndex && a.username.toLowerCase() === updates.username.toLowerCase()
-      );
-      if (duplicate) {
-        return { success: false, error: 'Username already exists' };
-      }
-      config.authAccounts[accountIndex].username = updates.username.toLowerCase();
-    }
-
-    // Update password if provided
-    if (updates.password) {
-      if (updates.password.length < 6) {
-        return { success: false, error: 'Password must be at least 6 characters' };
-      }
-      config.authAccounts[accountIndex].passwordHash = await bcrypt.hash(updates.password, 10);
-    }
-
-    await saveConfigFile(config);
-    await applyCaddyConfig();
-
-    const account = config.authAccounts[accountIndex];
-    return {
-      success: true,
-      account: { id: account.id, username: account.username, createdAt: account.createdAt }
-    };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-}
-
-export async function deleteAuthAccount(accountId) {
-  try {
-    const config = await loadConfig();
-    if (!config.authAccounts) config.authAccounts = [];
-
-    const accountIndex = config.authAccounts.findIndex(a => a.id === accountId);
-    if (accountIndex === -1) {
-      return { success: false, error: 'Account not found' };
-    }
-
-    const deleted = config.authAccounts.splice(accountIndex, 1)[0];
-    await saveConfigFile(config);
-    await applyCaddyConfig();
-
-    return {
-      success: true,
-      message: 'Account deleted',
-      account: { id: deleted.id, username: deleted.username }
-    };
   } catch (error) {
     return { success: false, error: error.message };
   }
