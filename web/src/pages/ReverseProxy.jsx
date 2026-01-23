@@ -435,6 +435,7 @@ Verification rapide (sans les details utilisateur).
         // Legacy: convert single api to apis[]
         apis = [{ slug: '', ...existing.api }];
       }
+      // No default API added - user can add via "+ Ajouter API" button
       formEndpoints[env.id] = {
         enabled: !!existing,
         frontend: existing?.frontend ? { ...existing.frontend } : { targetHost: 'localhost', targetPort: '', localOnly: false, requireAuth: false },
@@ -1373,12 +1374,27 @@ Verification rapide (sans les details utilisateur).
 
                 // Helper to add a new API
                 const addApi = () => {
+                  // If no APIs exist, create default API (empty slug) directly
+                  if (envData.apis.length === 0) {
+                    setEditAppForm({
+                      ...editAppForm,
+                      endpoints: {
+                        ...editAppForm.endpoints,
+                        [env.id]: {
+                          ...envData,
+                          apis: [{ slug: '', targetHost: 'localhost', targetPort: '', localOnly: false, requireAuth: false }]
+                        }
+                      }
+                    });
+                    return;
+                  }
+                  // Otherwise ask for slug
                   const slug = prompt('Slug de l\'API (ex: cdn, ws, v2):');
                   if (slug === null) return;
                   const cleanSlug = slug.toLowerCase().replace(/[^a-z0-9-]/g, '');
                   // Check if slug already exists
                   if (envData.apis.some(a => a.slug === cleanSlug)) {
-                    setMessage({ type: 'error', text: `API "${cleanSlug}" existe deja` });
+                    setMessage({ type: 'error', text: cleanSlug ? `API "${cleanSlug}" existe deja` : 'API par defaut existe deja' });
                     return;
                   }
                   setEditAppForm({
@@ -1501,16 +1517,14 @@ Verification rapide (sans les details utilisateur).
                           {/* APIs */}
                           {envData.apis.map((api, apiIndex) => (
                             <div key={apiIndex} className="bg-gray-900/30 rounded-lg p-3 border border-gray-700 relative">
-                              {/* Bouton supprimer (sauf API par defaut) */}
-                              {api.slug !== '' && (
-                                <button
-                                  onClick={() => removeApi(apiIndex)}
-                                  className="absolute top-2 right-2 text-gray-500 hover:text-red-400 p-1"
-                                  title="Supprimer"
-                                >
-                                  <Trash2 className="w-3 h-3" />
-                                </button>
-                              )}
+                              {/* Bouton supprimer */}
+                              <button
+                                onClick={() => removeApi(apiIndex)}
+                                className="absolute top-2 right-2 text-gray-500 hover:text-red-400 p-1"
+                                title="Supprimer"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
                               <div className="text-xs text-green-400 mb-2 font-mono flex items-center gap-1">
                                 <Server className="w-3 h-3" />
                                 {getAppDomain(editingApp.slug, 'api', env, config?.baseDomain, api.slug)}
