@@ -157,7 +157,8 @@
       "Bash(docker pull:*)",
       "Bash(docker kill:*)",
       "Bash(docker start:*)",
-      "Read(//ssd_pool/**)"
+      "Read(//ssd_pool/**)",
+      "Bash(pm2 jlist:*)"
     ]
   }
 }
