@@ -61,6 +61,27 @@ export const reloadCaddy = () => api.post('/reverseproxy/reload');
 export const getSystemRouteStatus = () => api.get('/reverseproxy/system-route');
 export const getCertificatesStatus = () => api.get('/reverseproxy/certificates/status');
 
+// Reverse Proxy - Environments
+export const getReverseProxyEnvironments = () => api.get('/reverseproxy/environments');
+export const addReverseProxyEnvironment = (env) => api.post('/reverseproxy/environments', env);
+export const updateReverseProxyEnvironment = (id, updates) => api.put(`/reverseproxy/environments/${id}`, updates);
+export const deleteReverseProxyEnvironment = (id) => api.delete(`/reverseproxy/environments/${id}`);
+
+// Reverse Proxy - Applications
+export const getReverseProxyApplications = () => api.get('/reverseproxy/applications');
+export const addReverseProxyApplication = (app) => api.post('/reverseproxy/applications', app);
+export const updateReverseProxyApplication = (id, updates) => api.put(`/reverseproxy/applications/${id}`, updates);
+export const deleteReverseProxyApplication = (id) => api.delete(`/reverseproxy/applications/${id}`);
+export const toggleReverseProxyApplication = (id, enabled) => api.post(`/reverseproxy/applications/${id}/toggle`, { enabled });
+
+// Reverse Proxy - Migration
+export const getMigrationSuggestions = () => api.get('/reverseproxy/migration/suggestions');
+export const executeMigration = (suggestions) => api.post('/reverseproxy/migrate', { suggestions });
+
+// Reverse Proxy - Cloudflare
+export const getCloudflareConfig = () => api.get('/reverseproxy/cloudflare');
+export const updateCloudflareConfig = (config) => api.put('/reverseproxy/cloudflare', config);
+
 // Auth - Session (login page)
 export const login = (username, password) => api.post('/auth/login', { username, password });
 export const logout = () => api.post('/auth/logout');

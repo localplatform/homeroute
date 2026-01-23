@@ -11,7 +11,24 @@ import {
   reloadCaddy,
   renewCertificates,
   getSystemRouteStatus,
-  getCertificatesStatus
+  getCertificatesStatus,
+  // Environment management
+  getEnvironments,
+  addEnvironment,
+  updateEnvironment,
+  deleteEnvironment,
+  // Application management
+  getApplications,
+  addApplication,
+  updateApplication,
+  deleteApplication,
+  toggleApplication,
+  // Migration
+  getMigrationSuggestions,
+  executeMigration,
+  // Cloudflare
+  getCloudflareConfig,
+  updateCloudflareConfig
 } from '../services/reverseproxy.js';
 
 const router = Router();
@@ -108,6 +125,108 @@ router.get('/certificates/status', async (req, res) => {
 // GET /api/reverseproxy/system-route - Status de la route système
 router.get('/system-route', async (req, res) => {
   const result = await getSystemRouteStatus();
+  res.json(result);
+});
+
+// ========== Environment Endpoints ==========
+
+// GET /api/reverseproxy/environments - Liste des environnements
+router.get('/environments', async (req, res) => {
+  const result = await getEnvironments();
+  res.json(result);
+});
+
+// POST /api/reverseproxy/environments - Ajouter un environnement
+router.post('/environments', async (req, res) => {
+  const { name, prefix, apiPrefix } = req.body;
+  if (!name) {
+    return res.status(400).json({ success: false, error: 'Name is required' });
+  }
+  const result = await addEnvironment({ name, prefix, apiPrefix });
+  res.json(result);
+});
+
+// PUT /api/reverseproxy/environments/:id - Modifier un environnement
+router.put('/environments/:id', async (req, res) => {
+  const result = await updateEnvironment(req.params.id, req.body);
+  res.json(result);
+});
+
+// DELETE /api/reverseproxy/environments/:id - Supprimer un environnement
+router.delete('/environments/:id', async (req, res) => {
+  const result = await deleteEnvironment(req.params.id);
+  res.json(result);
+});
+
+// ========== Application Endpoints ==========
+
+// GET /api/reverseproxy/applications - Liste des applications
+router.get('/applications', async (req, res) => {
+  const result = await getApplications();
+  res.json(result);
+});
+
+// POST /api/reverseproxy/applications - Ajouter une application
+router.post('/applications', async (req, res) => {
+  const { name, slug, frontend, api, environments } = req.body;
+  if (!name || !slug) {
+    return res.status(400).json({ success: false, error: 'Name and slug are required' });
+  }
+  if (!frontend?.targetHost || !frontend?.targetPort) {
+    return res.status(400).json({ success: false, error: 'Frontend target is required' });
+  }
+  const result = await addApplication({ name, slug, frontend, api, environments });
+  res.json(result);
+});
+
+// PUT /api/reverseproxy/applications/:id - Modifier une application
+router.put('/applications/:id', async (req, res) => {
+  const result = await updateApplication(req.params.id, req.body);
+  res.json(result);
+});
+
+// DELETE /api/reverseproxy/applications/:id - Supprimer une application
+router.delete('/applications/:id', async (req, res) => {
+  const result = await deleteApplication(req.params.id);
+  res.json(result);
+});
+
+// POST /api/reverseproxy/applications/:id/toggle - Activer/désactiver une application
+router.post('/applications/:id/toggle', async (req, res) => {
+  const { enabled } = req.body;
+  const result = await toggleApplication(req.params.id, enabled);
+  res.json(result);
+});
+
+// ========== Migration Endpoints ==========
+
+// GET /api/reverseproxy/migration/suggestions - Suggestions de migration
+router.get('/migration/suggestions', async (req, res) => {
+  const result = await getMigrationSuggestions();
+  res.json(result);
+});
+
+// POST /api/reverseproxy/migrate - Exécuter la migration
+router.post('/migrate', async (req, res) => {
+  const { suggestions } = req.body;
+  if (!suggestions || !Array.isArray(suggestions)) {
+    return res.status(400).json({ success: false, error: 'Suggestions array is required' });
+  }
+  const result = await executeMigration(suggestions);
+  res.json(result);
+});
+
+// ========== Cloudflare Endpoints ==========
+
+// GET /api/reverseproxy/cloudflare - Configuration Cloudflare
+router.get('/cloudflare', async (req, res) => {
+  const result = await getCloudflareConfig();
+  res.json(result);
+});
+
+// PUT /api/reverseproxy/cloudflare - Modifier configuration Cloudflare
+router.put('/cloudflare', async (req, res) => {
+  const result = await updateCloudflareConfig(req.body);
   res.json(result);
 });
 

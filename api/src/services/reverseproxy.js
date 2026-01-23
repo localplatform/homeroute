@@ -23,7 +23,16 @@ const LOCAL_NETWORKS = [
 // Default config structure
 const getDefaultConfig = () => ({
   baseDomain: '',
-  hosts: []
+  environments: [
+    { id: 'prod', name: 'Production', prefix: '', apiPrefix: 'api', isDefault: true },
+    { id: 'dev', name: 'Development', prefix: 'dev', apiPrefix: 'api.dev', isDefault: false }
+  ],
+  applications: [],
+  hosts: [],
+  cloudflare: {
+    enabled: false,
+    wildcardDomains: []
+  }
 });
 
 async function ensureConfigDir() {
@@ -85,6 +94,68 @@ async function caddyApiRequest(method, apiPath, data = null) {
 
 // ========== Configuration Management ==========
 
+// Migrate old application structure (frontend/api global) to new structure (endpoints per env)
+function migrateApplicationStructure(app) {
+  // If already has endpoints structure, no migration needed
+  if (app.endpoints && typeof app.endpoints === 'object') {
+    // Check if we need to migrate api → apis[] within endpoints
+    let needsMigration = false;
+    for (const envEndpoints of Object.values(app.endpoints)) {
+      if (envEndpoints && envEndpoints.api && !envEndpoints.apis) {
+        needsMigration = true;
+        break;
+      }
+    }
+
+    if (needsMigration) {
+      // Migrate api to apis[] for each environment
+      for (const [envId, envEndpoints] of Object.entries(app.endpoints)) {
+        if (envEndpoints && envEndpoints.api && !envEndpoints.apis) {
+          envEndpoints.apis = [{
+            slug: '',
+            targetHost: envEndpoints.api.targetHost,
+            targetPort: envEndpoints.api.targetPort,
+            localOnly: !!envEndpoints.api.localOnly,
+            requireAuth: !!envEndpoints.api.requireAuth
+          }];
+          delete envEndpoints.api;
+        }
+      }
+    }
+    return app;
+  }
+
+  // Convert old structure to new structure
+  const endpoints = {};
+  const envIds = app.environments || ['prod'];
+
+  for (const envId of envIds) {
+    endpoints[envId] = {
+      frontend: app.frontend ? {
+        targetHost: app.frontend.targetHost || 'localhost',
+        targetPort: app.frontend.targetPort || 3000,
+        localOnly: !!app.frontend.localOnly,
+        requireAuth: !!app.frontend.requireAuth
+      } : null,
+      apis: app.api ? [{
+        slug: '',
+        targetHost: app.api.targetHost || 'localhost',
+        targetPort: app.api.targetPort || 3001,
+        localOnly: !!app.api.localOnly,
+        requireAuth: !!app.api.requireAuth
+      }] : []
+    };
+  }
+
+  // Return new structure (remove old fields)
+  const { frontend, api, environments, ...rest } = app;
+  return {
+    ...rest,
+    endpoints,
+    enabled: app.enabled !== false
+  };
+}
+
 // Export loadConfig for auth routes
 export async function loadConfig() {
   const { CONFIG_FILE } = getEnv();
@@ -98,8 +169,24 @@ export async function loadConfig() {
     const saved = JSON.parse(content);
     // Migration: remove old wildcardCert field
     delete saved.wildcardCert;
-    delete saved.cloudflare;
-    return { ...getDefaultConfig(), ...saved };
+
+    // Merge with defaults to ensure all fields exist
+    const defaultConfig = getDefaultConfig();
+    const config = {
+      ...defaultConfig,
+      ...saved,
+      // Ensure nested objects have defaults
+      environments: saved.environments || defaultConfig.environments,
+      applications: saved.applications || defaultConfig.applications,
+      cloudflare: { ...defaultConfig.cloudflare, ...(saved.cloudflare || {}) }
+    };
+
+    // Migrate applications to new structure if needed
+    if (config.applications && config.applications.length > 0) {
+      config.applications = config.applications.map(migrateApplicationStructure);
+    }
+
+    return config;
   } catch {
     return getDefaultConfig();
   }
@@ -312,7 +399,664 @@ export async function toggleHost(hostId, enabled) {
   }
 }
 
+// ========== Environment Management ==========
+
+export async function getEnvironments() {
+  try {
+    const config = await loadConfig();
+    return { success: true, environments: config.environments || [] };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function addEnvironment(envConfig) {
+  try {
+    const { name, prefix, apiPrefix } = envConfig;
+
+    if (!name || typeof prefix !== 'string' || typeof apiPrefix !== 'string') {
+      return { success: false, error: 'Name, prefix and apiPrefix are required' };
+    }
+
+    const config = await loadConfig();
+
+    // Check for duplicate id
+    const id = name.toLowerCase().replace(/[^a-z0-9]/g, '-');
+    if (config.environments.some(e => e.id === id)) {
+      return { success: false, error: 'Environment with this name already exists' };
+    }
+
+    const newEnv = {
+      id,
+      name,
+      prefix: prefix.toLowerCase(),
+      apiPrefix: apiPrefix.toLowerCase(),
+      isDefault: false
+    };
+
+    config.environments.push(newEnv);
+    await saveConfigFile(config);
+
+    return { success: true, environment: newEnv };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function updateEnvironment(envId, updates) {
+  try {
+    const config = await loadConfig();
+    const envIndex = config.environments.findIndex(e => e.id === envId);
+
+    if (envIndex === -1) {
+      return { success: false, error: 'Environment not found' };
+    }
+
+    const allowedUpdates = ['name', 'prefix', 'apiPrefix', 'isDefault'];
+    for (const key of Object.keys(updates)) {
+      if (allowedUpdates.includes(key)) {
+        if (key === 'isDefault' && updates[key]) {
+          // Unset other defaults
+          config.environments.forEach(e => e.isDefault = false);
+        }
+        config.environments[envIndex][key] = updates[key];
+      }
+    }
+
+    await saveConfigFile(config);
+    await applyCaddyConfig();
+
+    return { success: true, environment: config.environments[envIndex] };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function deleteEnvironment(envId) {
+  try {
+    const config = await loadConfig();
+    const envIndex = config.environments.findIndex(e => e.id === envId);
+
+    if (envIndex === -1) {
+      return { success: false, error: 'Environment not found' };
+    }
+
+    // Check if any apps use this environment
+    const appsUsingEnv = config.applications.filter(a => a.environments.includes(envId));
+    if (appsUsingEnv.length > 0) {
+      return { success: false, error: `Cannot delete: ${appsUsingEnv.length} application(s) use this environment` };
+    }
+
+    const deletedEnv = config.environments.splice(envIndex, 1)[0];
+    await saveConfigFile(config);
+
+    return { success: true, message: 'Environment deleted', environment: deletedEnv };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// ========== Application Management ==========
+
+export async function getApplications() {
+  try {
+    const config = await loadConfig();
+    return { success: true, applications: config.applications || [] };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function addApplication(appConfig) {
+  try {
+    const { name, slug, endpoints } = appConfig;
+
+    if (!name || !slug) {
+      return { success: false, error: 'Name and slug are required' };
+    }
+
+    // Validate slug format
+    const slugRegex = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+    if (!slugRegex.test(slug.toLowerCase())) {
+      return { success: false, error: 'Invalid slug format' };
+    }
+
+    if (!endpoints || typeof endpoints !== 'object' || Object.keys(endpoints).length === 0) {
+      return { success: false, error: 'At least one environment endpoint is required' };
+    }
+
+    const config = await loadConfig();
+
+    // Check for duplicate slug
+    if (config.applications.some(a => a.slug === slug.toLowerCase())) {
+      return { success: false, error: 'Application with this slug already exists' };
+    }
+
+    // Validate and sanitize endpoints for each environment
+    const validEndpoints = {};
+    for (const [envId, envEndpoints] of Object.entries(endpoints)) {
+      // Check if environment exists
+      if (!config.environments.some(e => e.id === envId)) {
+        continue; // Skip invalid environments
+      }
+
+      // Validate frontend is required
+      if (!envEndpoints.frontend || !envEndpoints.frontend.targetHost || !envEndpoints.frontend.targetPort) {
+        return { success: false, error: `Frontend target is required for environment ${envId}` };
+      }
+
+      // Process APIs (new format: apis[] array)
+      let apis = [];
+      if (envEndpoints.apis && Array.isArray(envEndpoints.apis)) {
+        apis = envEndpoints.apis.map(api => ({
+          slug: (api.slug || '').toLowerCase().replace(/[^a-z0-9-]/g, ''),
+          targetHost: api.targetHost || 'localhost',
+          targetPort: parseInt(api.targetPort) || 3001,
+          localOnly: !!api.localOnly,
+          requireAuth: !!api.requireAuth
+        }));
+      } else if (envEndpoints.api) {
+        // Backward compatibility: convert single api to apis[]
+        apis = [{
+          slug: '',
+          targetHost: envEndpoints.api.targetHost || 'localhost',
+          targetPort: parseInt(envEndpoints.api.targetPort) || 3001,
+          localOnly: !!envEndpoints.api.localOnly,
+          requireAuth: !!envEndpoints.api.requireAuth
+        }];
+      }
+
+      validEndpoints[envId] = {
+        frontend: {
+          targetHost: envEndpoints.frontend.targetHost,
+          targetPort: parseInt(envEndpoints.frontend.targetPort),
+          localOnly: !!envEndpoints.frontend.localOnly,
+          requireAuth: !!envEndpoints.frontend.requireAuth
+        },
+        apis
+      };
+    }
+
+    if (Object.keys(validEndpoints).length === 0) {
+      return { success: false, error: 'No valid environment endpoints provided' };
+    }
+
+    const newApp = {
+      id: crypto.randomUUID(),
+      name,
+      slug: slug.toLowerCase(),
+      endpoints: validEndpoints,
+      enabled: true,
+      createdAt: new Date().toISOString()
+    };
+
+    config.applications.push(newApp);
+    await saveConfigFile(config);
+    await applyCaddyConfig();
+
+    return { success: true, application: newApp };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function updateApplication(appId, updates) {
+  try {
+    const config = await loadConfig();
+    const appIndex = config.applications.findIndex(a => a.id === appId);
+
+    if (appIndex === -1) {
+      return { success: false, error: 'Application not found' };
+    }
+
+    const app = config.applications[appIndex];
+
+    // Update name if provided
+    if (updates.name) {
+      app.name = updates.name;
+    }
+
+    // Update enabled if provided
+    if (typeof updates.enabled === 'boolean') {
+      app.enabled = updates.enabled;
+    }
+
+    // Update endpoints if provided
+    if (updates.endpoints && typeof updates.endpoints === 'object') {
+      // Initialize endpoints if not exists
+      if (!app.endpoints) {
+        app.endpoints = {};
+      }
+
+      for (const [envId, envEndpoints] of Object.entries(updates.endpoints)) {
+        // Check if environment exists
+        if (!config.environments.some(e => e.id === envId)) {
+          continue; // Skip invalid environments
+        }
+
+        if (envEndpoints === null) {
+          // Remove environment
+          delete app.endpoints[envId];
+        } else {
+          // Process APIs (new format: apis[] array)
+          let apis;
+          if (envEndpoints.apis !== undefined) {
+            if (Array.isArray(envEndpoints.apis)) {
+              apis = envEndpoints.apis.map(api => ({
+                slug: (api.slug || '').toLowerCase().replace(/[^a-z0-9-]/g, ''),
+                targetHost: api.targetHost || 'localhost',
+                targetPort: parseInt(api.targetPort) || 3001,
+                localOnly: !!api.localOnly,
+                requireAuth: !!api.requireAuth
+              }));
+            } else {
+              apis = [];
+            }
+          } else if (envEndpoints.api !== undefined) {
+            // Backward compatibility: convert single api to apis[]
+            if (envEndpoints.api) {
+              apis = [{
+                slug: '',
+                targetHost: envEndpoints.api.targetHost || 'localhost',
+                targetPort: parseInt(envEndpoints.api.targetPort) || 3001,
+                localOnly: !!envEndpoints.api.localOnly,
+                requireAuth: !!envEndpoints.api.requireAuth
+              }];
+            } else {
+              apis = [];
+            }
+          } else {
+            // Keep existing apis
+            apis = app.endpoints[envId]?.apis || [];
+          }
+
+          // Update or add environment endpoints
+          app.endpoints[envId] = {
+            frontend: envEndpoints.frontend ? {
+              targetHost: envEndpoints.frontend.targetHost || 'localhost',
+              targetPort: parseInt(envEndpoints.frontend.targetPort) || 3000,
+              localOnly: !!envEndpoints.frontend.localOnly,
+              requireAuth: !!envEndpoints.frontend.requireAuth
+            } : app.endpoints[envId]?.frontend || null,
+            apis
+          };
+        }
+      }
+    }
+
+    await saveConfigFile(config);
+    await applyCaddyConfig();
+
+    return { success: true, application: app };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function deleteApplication(appId) {
+  try {
+    const config = await loadConfig();
+    const appIndex = config.applications.findIndex(a => a.id === appId);
+
+    if (appIndex === -1) {
+      return { success: false, error: 'Application not found' };
+    }
+
+    const deletedApp = config.applications.splice(appIndex, 1)[0];
+    await saveConfigFile(config);
+    await applyCaddyConfig();
+
+    return { success: true, message: 'Application deleted', application: deletedApp };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function toggleApplication(appId, enabled) {
+  try {
+    return await updateApplication(appId, { enabled: !!enabled });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// ========== Migration ==========
+
+export async function getMigrationSuggestions() {
+  try {
+    const config = await loadConfig();
+    const suggestions = [];
+    const processed = new Set();
+
+    // Patterns to detect API hosts
+    const apiPatterns = (slug) => [
+      `${slug}api`,
+      `${slug}-api`,
+      `api-${slug}`
+    ];
+
+    // Hosts to exclude from migration (keep standalone)
+    const excludeFromMigration = ['code', 'code-api'];
+
+    for (const host of config.hosts) {
+      if (processed.has(host.id)) continue;
+      if (excludeFromMigration.includes(host.subdomain)) {
+        suggestions.push({ type: 'standalone', host });
+        processed.add(host.id);
+        continue;
+      }
+
+      const slug = host.subdomain;
+      const patterns = apiPatterns(slug);
+
+      // Find matching API host
+      const apiHost = config.hosts.find(h =>
+        !processed.has(h.id) &&
+        patterns.includes(h.subdomain) &&
+        !excludeFromMigration.includes(h.subdomain)
+      );
+
+      if (apiHost) {
+        suggestions.push({
+          type: 'application',
+          name: slug.charAt(0).toUpperCase() + slug.slice(1),
+          slug,
+          frontend: host,
+          api: apiHost
+        });
+        processed.add(host.id);
+        processed.add(apiHost.id);
+      }
+    }
+
+    // Remaining hosts become standalone
+    for (const host of config.hosts) {
+      if (!processed.has(host.id)) {
+        suggestions.push({ type: 'standalone', host });
+        processed.add(host.id);
+      }
+    }
+
+    return { success: true, suggestions };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function executeMigration(suggestions) {
+  try {
+    const config = await loadConfig();
+    const migratedApps = [];
+    const standaloneHosts = [];
+    const hostsToRemove = new Set();
+
+    for (const suggestion of suggestions) {
+      if (suggestion.type === 'application') {
+        const newApp = {
+          id: crypto.randomUUID(),
+          name: suggestion.name,
+          slug: suggestion.slug,
+          frontend: {
+            targetHost: suggestion.frontend.targetHost,
+            targetPort: suggestion.frontend.targetPort,
+            localOnly: !!suggestion.frontend.localOnly,
+            requireAuth: !!suggestion.frontend.requireAuth
+          },
+          api: {
+            targetHost: suggestion.api.targetHost,
+            targetPort: suggestion.api.targetPort,
+            localOnly: !!suggestion.api.localOnly,
+            requireAuth: !!suggestion.api.requireAuth
+          },
+          environments: ['prod'],
+          enabled: suggestion.frontend.enabled && suggestion.api.enabled,
+          createdAt: new Date().toISOString()
+        };
+
+        migratedApps.push(newApp);
+        hostsToRemove.add(suggestion.frontend.id);
+        hostsToRemove.add(suggestion.api.id);
+      } else {
+        standaloneHosts.push(suggestion.host);
+      }
+    }
+
+    // Update config
+    config.applications = [...config.applications, ...migratedApps];
+    config.hosts = config.hosts.filter(h => !hostsToRemove.has(h.id));
+
+    await saveConfigFile(config);
+    await applyCaddyConfig();
+
+    return {
+      success: true,
+      migratedApps: migratedApps.length,
+      standaloneHosts: standaloneHosts.length,
+      message: `Migration completed: ${migratedApps.length} applications created, ${standaloneHosts.length} standalone hosts kept`
+    };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// ========== Cloudflare Configuration ==========
+
+export async function getCloudflareConfig() {
+  try {
+    const config = await loadConfig();
+    return {
+      success: true,
+      cloudflare: {
+        enabled: config.cloudflare?.enabled || false,
+        wildcardDomains: config.cloudflare?.wildcardDomains || [],
+        hasToken: !!process.env.CF_API_TOKEN
+      }
+    };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function updateCloudflareConfig(cfConfig) {
+  try {
+    const config = await loadConfig();
+
+    config.cloudflare = {
+      ...config.cloudflare,
+      enabled: !!cfConfig.enabled,
+      wildcardDomains: cfConfig.wildcardDomains || config.cloudflare?.wildcardDomains || []
+    };
+
+    // Auto-generate wildcard domains based on environments
+    if (cfConfig.enabled && config.baseDomain) {
+      const wildcards = new Set();
+      for (const env of config.environments) {
+        if (env.prefix) {
+          wildcards.add(`*.${env.prefix}.${config.baseDomain}`);
+          wildcards.add(`*.${env.apiPrefix}.${config.baseDomain}`);
+        } else {
+          wildcards.add(`*.${config.baseDomain}`);
+          wildcards.add(`*.${env.apiPrefix}.${config.baseDomain}`);
+        }
+      }
+      config.cloudflare.wildcardDomains = Array.from(wildcards);
+    }
+
+    await saveConfigFile(config);
+    await applyCaddyConfig();
+
+    return { success: true, cloudflare: config.cloudflare };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
 // ========== Caddy Configuration Generation ==========
+
+// Generate domain for an application endpoint
+function getAppDomain(app, endpointType, env, baseDomain, apiSlug = '') {
+  // endpointType: 'frontend' or 'api'
+  // env: environment object with prefix and apiPrefix
+  // apiSlug: optional slug for additional APIs (e.g., 'cdn', 'ws')
+
+  if (endpointType === 'api') {
+    // API domain format: {app}-{slug}.{apiPrefix}.{baseDomain} or {app}.{apiPrefix}.{baseDomain}
+    // e.g., www.api.dev.mynetwk.biz (default) or www-cdn.api.dev.mynetwk.biz
+    const hostPart = apiSlug ? `${app.slug}-${apiSlug}` : app.slug;
+    return `${hostPart}.${env.apiPrefix}.${baseDomain}`;
+  } else {
+    // Frontend: {slug}.{prefix}.{baseDomain} or {slug}.{baseDomain}
+    if (env.prefix) {
+      return `${app.slug}.${env.prefix}.${baseDomain}`;
+    }
+    return `${app.slug}.${baseDomain}`;
+  }
+}
+
+// Generate routes for an application across all its environments
+function generateAppRoutes(app, environments, baseDomain) {
+  const authServiceUrl = process.env.AUTH_SERVICE_URL || 'http://localhost:9100';
+  const routes = [];
+
+  // New structure: app.endpoints is an object { envId: { frontend, apis: [] } }
+  if (!app.endpoints || typeof app.endpoints !== 'object') {
+    return routes;
+  }
+
+  for (const [envId, envEndpoints] of Object.entries(app.endpoints)) {
+    const env = environments.find(e => e.id === envId);
+    if (!env || !envEndpoints) continue;
+
+    // Frontend route
+    if (envEndpoints.frontend) {
+      const frontendDomain = getAppDomain(app, 'frontend', env, baseDomain);
+      routes.push(generateEndpointRoute(
+        `${app.id}-frontend-${envId}`,
+        frontendDomain,
+        envEndpoints.frontend,
+        baseDomain,
+        authServiceUrl
+      ));
+    }
+
+    // API routes (multiple APIs supported via apis[])
+    const apis = envEndpoints.apis || [];
+    for (const api of apis) {
+      const apiSlug = api.slug || '';
+      const apiDomain = getAppDomain(app, 'api', env, baseDomain, apiSlug);
+      const routeId = apiSlug
+        ? `${app.id}-api-${apiSlug}-${envId}`
+        : `${app.id}-api-${envId}`;
+      routes.push(generateEndpointRoute(
+        routeId,
+        apiDomain,
+        api,
+        baseDomain,
+        authServiceUrl
+      ));
+    }
+
+    // Backward compatibility: support old 'api' field if apis[] not present
+    if (envEndpoints.api && (!envEndpoints.apis || envEndpoints.apis.length === 0)) {
+      const apiDomain = getAppDomain(app, 'api', env, baseDomain);
+      routes.push(generateEndpointRoute(
+        `${app.id}-api-${envId}`,
+        apiDomain,
+        envEndpoints.api,
+        baseDomain,
+        authServiceUrl
+      ));
+    }
+  }
+
+  return routes;
+}
+
+// Generate a single endpoint route
+function generateEndpointRoute(id, domain, endpoint, baseDomain, authServiceUrl) {
+  const reverseProxyHandler = {
+    handler: 'reverse_proxy',
+    upstreams: [{
+      dial: `${endpoint.targetHost}:${endpoint.targetPort}`
+    }]
+  };
+
+  if (endpoint.requireAuth) {
+    const authCheckRoute = {
+      '@id': id,
+      match: [{ host: [domain] }],
+      handle: [{
+        handler: 'subroute',
+        routes: [{
+          handle: [{
+            handler: 'reverse_proxy',
+            upstreams: [{ dial: authServiceUrl.replace('http://', '') }],
+            rewrite: { uri: '/api/authz/forward-auth' },
+            handle_response: [
+              {
+                match: { status_code: [401, 403] },
+                routes: [{
+                  handle: [{
+                    handler: 'static_response',
+                    status_code: 302,
+                    headers: {
+                      'Location': [`https://auth.${baseDomain}/login?rd=https://${domain}{http.request.uri}`]
+                    }
+                  }]
+                }]
+              },
+              {
+                match: { status_code: [200] },
+                routes: [{ handle: [reverseProxyHandler] }]
+              }
+            ]
+          }]
+        }]
+      }],
+      terminal: true
+    };
+
+    if (endpoint.localOnly) {
+      authCheckRoute.handle = [{
+        handler: 'subroute',
+        routes: [
+          { match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }], handle: authCheckRoute.handle },
+          { handle: [{ handler: 'error', status_code: 403 }] }
+        ]
+      }];
+    }
+
+    return authCheckRoute;
+  }
+
+  // Without requireAuth: direct proxy
+  const subrouteHandler = {
+    handler: 'subroute',
+    routes: [{ handle: [reverseProxyHandler] }]
+  };
+
+  if (endpoint.localOnly) {
+    return {
+      '@id': id,
+      match: [{ host: [domain] }],
+      handle: [{
+        handler: 'subroute',
+        routes: [
+          { match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }], handle: [subrouteHandler] },
+          { handle: [{ handler: 'error', status_code: 403 }] }
+        ]
+      }],
+      terminal: true
+    };
+  }
+
+  return {
+    '@id': id,
+    match: [{ host: [domain] }],
+    handle: [subrouteHandler],
+    terminal: true
+  };
+}
 
 function generateCaddyRoute(host, baseDomain) {
   const domain = host.customDomain || `${host.subdomain}.${baseDomain}`;
@@ -441,10 +1185,18 @@ function generateCaddyConfig(config) {
   const { DASHBOARD_PORT } = getEnv();
   const authServiceUrl = process.env.AUTH_SERVICE_URL || 'http://localhost:9100';
 
-  // Filtrer les hosts activés
-  const enabledHosts = config.hosts.filter(h => h.enabled);
+  const routes = [];
 
-  const routes = enabledHosts.map(h => generateCaddyRoute(h, config.baseDomain));
+  // Generate routes for applications
+  const enabledApps = (config.applications || []).filter(a => a.enabled);
+  for (const app of enabledApps) {
+    const appRoutes = generateAppRoutes(app, config.environments || [], config.baseDomain);
+    routes.push(...appRoutes);
+  }
+
+  // Generate routes for standalone hosts
+  const enabledHosts = config.hosts.filter(h => h.enabled);
+  routes.push(...enabledHosts.map(h => generateCaddyRoute(h, config.baseDomain)));
 
   // Add system route for dashboard (proxy.<baseDomain>)
   // Note: L'authentification est gérée côté API via le middleware (cookie auth_session)
@@ -487,17 +1239,40 @@ function generateCaddyConfig(config) {
     }
   };
 
-  // Add default TLS automation (Let's Encrypt with HTTP challenge)
+  // TLS configuration
   if (routes.length > 0) {
-    caddyConfig.apps.tls = {
-      automation: {
-        policies: [{
-          issuers: [{
-            module: 'acme'
+    if (config.cloudflare?.enabled && process.env.CF_API_TOKEN) {
+      // Cloudflare DNS challenge for wildcard certificates
+      caddyConfig.apps.tls = {
+        automation: {
+          policies: [{
+            subjects: config.cloudflare.wildcardDomains || [],
+            issuers: [{
+              module: 'acme',
+              challenges: {
+                dns: {
+                  provider: {
+                    name: 'cloudflare',
+                    api_token: process.env.CF_API_TOKEN
+                  }
+                }
+              }
+            }]
           }]
-        }]
-      }
-    };
+        }
+      };
+    } else {
+      // Default: Let's Encrypt with HTTP challenge (individual certs)
+      caddyConfig.apps.tls = {
+        automation: {
+          policies: [{
+            issuers: [{
+              module: 'acme'
+            }]
+          }]
+        }
+      };
+    }
   }
 
   return caddyConfig;
@@ -654,6 +1429,41 @@ export async function getCertificatesStatus() {
         statuses[host.id] = await checkCertificate(domain);
       } else {
         statuses[host.id] = { valid: false, error: 'Host disabled' };
+      }
+    }
+
+    // Check all applications
+    for (const app of config.applications || []) {
+      if (!app.enabled || !app.endpoints) continue;
+
+      for (const [envId, envEndpoints] of Object.entries(app.endpoints)) {
+        const env = config.environments.find(e => e.id === envId);
+        if (!env || !envEndpoints) continue;
+
+        // Check frontend certificate
+        if (envEndpoints.frontend) {
+          const frontendDomain = getAppDomain(app, 'frontend', env, config.baseDomain);
+          const key = `${app.id}-frontend-${envId}`;
+          statuses[key] = await checkCertificate(frontendDomain);
+        }
+
+        // Check API certificates (multiple APIs supported)
+        const apis = envEndpoints.apis || [];
+        for (const api of apis) {
+          const apiSlug = api.slug || '';
+          const apiDomain = getAppDomain(app, 'api', env, config.baseDomain, apiSlug);
+          const key = apiSlug
+            ? `${app.id}-api-${apiSlug}-${envId}`
+            : `${app.id}-api-${envId}`;
+          statuses[key] = await checkCertificate(apiDomain);
+        }
+
+        // Backward compatibility: check old 'api' field if apis[] not present
+        if (envEndpoints.api && (!envEndpoints.apis || envEndpoints.apis.length === 0)) {
+          const apiDomain = getAppDomain(app, 'api', env, config.baseDomain);
+          const key = `${app.id}-api-${envId}`;
+          statuses[key] = await checkCertificate(apiDomain);
+        }
       }
     }
 
