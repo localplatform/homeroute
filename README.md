@@ -1,6 +1,6 @@
 # Server Dashboard
 
-A comprehensive web-based dashboard for managing home server infrastructure. Monitor and configure network services, DNS/DHCP, ad-blocking, reverse proxy, backups, and file sharing from a single unified interface.
+A comprehensive web-based dashboard for managing home server infrastructure. Monitor and configure network services, DNS/DHCP, ad-blocking, reverse proxy, and file sharing from a single unified interface.
 
 ## Features
 
@@ -8,9 +8,7 @@ A comprehensive web-based dashboard for managing home server infrastructure. Mon
 - **DNS/DHCP** - Dnsmasq integration with DHCP lease tracking
 - **Ad-Blocking** - Host-based ad-blocking with whitelist management and blocklist updates
 - **Dynamic DNS** - Cloudflare DDNS integration for automatic IPv6 updates
-- **Backup** - SMB/CIFS backup to network storage with scheduling and history
 - **Reverse Proxy** - Caddy management with HTTPS certificates and authentication
-- **File Sharing** - Samba/SMB configuration, user management, and session monitoring
 
 ## Tech Stack
 
@@ -30,7 +28,6 @@ A comprehensive web-based dashboard for managing home server infrastructure. Mon
 **Infrastructure**
 - Caddy (reverse proxy)
 - Dnsmasq (DNS/DHCP)
-- Samba (SMB/CIFS)
 - Cloudflare (DDNS)
 
 ## Installation
@@ -42,7 +39,6 @@ A comprehensive web-based dashboard for managing home server infrastructure. Mon
 - Linux server with:
   - Dnsmasq configured
   - Caddy installed
-  - Samba installed (for file sharing features)
 
 ### Setup
 
@@ -91,12 +87,6 @@ DDNS_CONFIG=/etc/cloudflare-ddns.conf
 # Reverse Proxy
 CADDY_API_URL=http://localhost:2019
 REVERSEPROXY_CONFIG=/var/lib/server-dashboard/reverseproxy-config.json
-
-# SMB Backup
-SMB_SERVER=10.10.10.100
-SMB_SHARE=backups
-SMB_USERNAME=user
-SMB_PASSWORD=password
 ```
 
 ## NPM Scripts
@@ -139,9 +129,7 @@ server-dashboard/
 | `/api/nat` | NAT and firewall rules |
 | `/api/adblock` | Ad-blocking stats and whitelist |
 | `/api/ddns` | Dynamic DNS status and updates |
-| `/api/backup` | SMB backup configuration and execution |
 | `/api/reverseproxy` | Caddy reverse proxy management |
-| `/api/samba` | Samba shares and user management |
 
 ## License
 

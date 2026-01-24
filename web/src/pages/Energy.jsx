@@ -1,21 +1,16 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { Zap, Thermometer, Cpu, Fan, Clock, Moon, Rocket, Play, Square, Activity } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { Zap, Thermometer, Cpu, Clock, Moon, Rocket, Play, Square, Activity } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
-import FanCurveEditor from '../components/FanCurveEditor';
-import MiniCurveGraph from '../components/MiniCurveGraph';
 import {
   getCpuInfo,
   getCurrentEnergyMode,
   setEnergyMode,
-  getFansStatus,
-  getFanProfiles,
-  saveFanProfile,
-  applyFanProfile,
   getEnergySchedule,
   saveEnergySchedule,
   getAutoSelectConfig,
   saveAutoSelectConfig,
+  getSelectableInterfaces,
   getBenchmarkStatus,
   startBenchmark,
   stopBenchmark
@@ -34,22 +29,15 @@ const MODE_LABELS = {
 };
 
 const MODE_DESCRIPTIONS = {
-  economy: 'CPU lent + ventilos silencieux',
+  economy: 'CPU en mode économie',
   auto: 'Adaptatif selon la charge',
-  performance: 'CPU max + ventilos actifs'
+  performance: 'CPU en mode performance'
 };
 
 const MODE_COLORS = {
   economy: { bg: 'bg-indigo-600', ring: 'ring-indigo-400', hover: 'hover:bg-indigo-700' },
   auto: { bg: 'bg-blue-600', ring: 'ring-blue-400', hover: 'hover:bg-blue-700' },
   performance: { bg: 'bg-orange-600', ring: 'ring-orange-400', hover: 'hover:bg-orange-700' }
-};
-
-// Mode to fan profile mapping
-const MODE_FAN_PROFILES = {
-  economy: 'silent',
-  auto: 'balanced',
-  performance: 'performance'
 };
 
 function Energy() {
@@ -59,12 +47,6 @@ function Energy() {
   // Mode state
   const [currentMode, setCurrentMode] = useState('auto');
   const [changingMode, setChangingMode] = useState(false);
-
-  // Fans state
-  const [fans, setFans] = useState([]);
-  const [fansAvailable, setFansAvailable] = useState(false);
-  const [fanProfiles, setFanProfiles] = useState([]);
-  const [editingProfile, setEditingProfile] = useState(null); // Will be set based on current mode
 
   // Schedule state
   const [schedule, setSchedule] = useState({
@@ -86,6 +68,8 @@ function Energy() {
   const [savingAutoSelect, setSavingAutoSelect] = useState(false);
   const [autoSelectMessage, setAutoSelectMessage] = useState(null);
   const [networkRps, setNetworkRps] = useState({ current: 0, averaged: 0, appliedMode: null });
+  const [interfaces, setInterfaces] = useState([]);
+  const [interfaceError, setInterfaceError] = useState(null);
 
   // Benchmark state
   const [benchmark, setBenchmark] = useState({ running: false, elapsed: 0 });
@@ -97,27 +81,15 @@ function Energy() {
   useEffect(() => {
     async function fetchInitialData() {
       try {
-        const [modeRes, fansRes, profilesRes, scheduleRes, autoSelectRes] = await Promise.all([
+        const [modeRes, scheduleRes, autoSelectRes, interfacesRes] = await Promise.all([
           getCurrentEnergyMode(),
-          getFansStatus(),
-          getFanProfiles(),
           getEnergySchedule(),
-          getAutoSelectConfig()
+          getAutoSelectConfig(),
+          getSelectableInterfaces()
         ]);
 
         if (modeRes.data.success) {
           setCurrentMode(modeRes.data.mode);
-          // Set editing profile to match current mode
-          setEditingProfile(MODE_FAN_PROFILES[modeRes.data.mode] || 'balanced');
-        }
-
-        if (fansRes.data.success) {
-          setFans(fansRes.data.fans);
-          setFansAvailable(fansRes.data.available);
-        }
-
-        if (profilesRes.data.success) {
-          setFanProfiles(profilesRes.data.profiles);
         }
 
         if (scheduleRes.data.success) {
@@ -126,6 +98,10 @@ function Energy() {
 
         if (autoSelectRes.data.success) {
           setAutoSelect(autoSelectRes.data.config);
+        }
+
+        if (interfacesRes.data.success) {
+          setInterfaces(interfacesRes.data.interfaces);
         }
       } catch (error) {
         console.error('Error fetching initial data:', error);
@@ -153,6 +129,7 @@ function Energy() {
         averaged: data.averagedRps || 0,
         appliedMode: data.appliedMode || null
       });
+      setInterfaceError(data.interfaceError || null);
     });
 
     eventSource.onerror = () => {
@@ -164,13 +141,12 @@ function Energy() {
     };
   }, []);
 
-  // CPU, fans and benchmark polling (less frequent, SSE handles mode/RPS)
+  // CPU and benchmark polling (less frequent, SSE handles mode/RPS)
   useEffect(() => {
     async function pollData() {
       try {
-        const [cpuRes, fansRes, benchRes] = await Promise.all([
+        const [cpuRes, benchRes] = await Promise.all([
           getCpuInfo(),
-          getFansStatus(),
           getBenchmarkStatus()
         ]);
 
@@ -180,10 +156,6 @@ function Energy() {
             frequency: cpuRes.data.frequency,
             usage: cpuRes.data.usage
           });
-        }
-
-        if (fansRes.data.success) {
-          setFans(fansRes.data.fans);
         }
 
         if (benchRes.data.success) {
@@ -244,43 +216,6 @@ function Energy() {
       console.error('Error stopping benchmark:', error);
     }
   }
-
-  // Fan curve change handler
-  const handleCurveChange = useCallback((profileName, fanId, newCurve) => {
-    setFanProfiles(prev => prev.map(p => {
-      if (p.name !== profileName) return p;
-      return {
-        ...p,
-        fans: {
-          ...p.fans,
-          [fanId]: {
-            ...p.fans[fanId],
-            curve: newCurve
-          }
-        }
-      };
-    }));
-  }, []);
-
-  // Handle drag end - save and apply profile if it's active
-  const handleDragEnd = useCallback(async (profileName) => {
-    // Find the modified profile
-    const profile = fanProfiles.find(p => p.name === profileName);
-    if (!profile) return;
-
-    try {
-      // Save the profile
-      await saveFanProfile(profile);
-
-      // If this profile is the one used by the current mode, re-apply it
-      const currentModeProfile = MODE_FAN_PROFILES[currentMode];
-      if (profileName === currentModeProfile) {
-        await applyFanProfile(profileName);
-      }
-    } catch (error) {
-      console.error('Error saving/applying profile:', error);
-    }
-  }, [fanProfiles, currentMode]);
 
   // Schedule save handler
   async function handleSaveSchedule() {
@@ -470,71 +405,16 @@ function Energy() {
             })}
           </div>
 
-          {/* Mode details and mini graph on the right */}
-          <div className="flex-1 bg-gray-900 rounded-lg p-4 flex flex-col justify-center">
-            <div className="flex items-center gap-4">
-              {/* Mini curve graph */}
-              {fansAvailable && fanProfiles.length > 0 && (
-                <div className="flex-shrink-0 w-32 h-16">
-                  <MiniCurveGraph
-                    profile={fanProfiles.find(p => p.name === MODE_FAN_PROFILES[currentMode])}
-                    currentTemp={cpuInfo.temperature}
-                  />
-                </div>
-              )}
-              <div className="flex-1">
-                <p className="text-gray-300 font-medium">{MODE_DESCRIPTIONS[currentMode]}</p>
-                {fansAvailable && fans.length > 0 && (
-                  <div className="mt-2 flex flex-wrap gap-4 text-sm text-gray-400">
-                    {fans.map(fan => (
-                      <div key={fan.id} className="flex items-center gap-2">
-                        <Fan size={14} className={fan.rpm > 0 ? 'text-blue-400' : 'text-gray-500'} />
-                        <span>{fan.name}: <span className="text-white font-mono">{fan.rpm}</span> RPM</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
+          {/* Mode details */}
+          <div className="flex-1 bg-gray-900 rounded-lg p-4 flex items-center">
+            <p className="text-gray-300 font-medium">{MODE_DESCRIPTIONS[currentMode]}</p>
           </div>
         </div>
       </Card>
       </div>
 
-      {/* Fan Curves + Programmation side by side */}
+      {/* Programmation Card */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-        {/* Fan Curves Card */}
-        {fansAvailable && (
-          <Card title="Courbes ventilateurs" icon={Fan}>
-            <div className="space-y-4">
-              {/* Profile tabs */}
-              <div className="flex gap-2">
-                {fanProfiles.map(profile => (
-                  <button
-                    key={profile.name}
-                    onClick={() => setEditingProfile(profile.name)}
-                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-                      editingProfile === profile.name
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                    }`}
-                  >
-                    {profile.label}
-                  </button>
-                ))}
-              </div>
-
-              {/* Curve editor */}
-              <FanCurveEditor
-                profiles={fanProfiles}
-                activeProfile={editingProfile}
-                onCurveChange={handleCurveChange}
-                onDragEnd={handleDragEnd}
-              />
-            </div>
-          </Card>
-        )}
-
         {/* Programmation Card */}
         <Card title="Programmation" icon={Clock}>
           <div className="space-y-6">
@@ -603,12 +483,24 @@ function Energy() {
             <div className="flex items-center gap-3">
               <button
                 onClick={async () => {
+                  // Prevent enabling without interface
+                  if (!autoSelect.enabled && !autoSelect.networkInterface) {
+                    setAutoSelectMessage({ type: 'error', text: 'Sélectionnez d\'abord une interface' });
+                    setTimeout(() => setAutoSelectMessage(null), 3000);
+                    return;
+                  }
                   const newAutoSelect = { ...autoSelect, enabled: !autoSelect.enabled };
                   setAutoSelect(newAutoSelect);
                   // Auto-save when toggling
                   try {
-                    await saveAutoSelectConfig(newAutoSelect);
+                    const res = await saveAutoSelectConfig(newAutoSelect);
+                    if (!res.data.success) {
+                      setAutoSelect(autoSelect); // Revert
+                      setAutoSelectMessage({ type: 'error', text: res.data.error });
+                      setTimeout(() => setAutoSelectMessage(null), 3000);
+                    }
                   } catch (error) {
+                    setAutoSelect(autoSelect); // Revert
                     console.error('Error saving auto-select config:', error);
                   }
                 }}
@@ -623,28 +515,69 @@ function Energy() {
                 />
               </button>
               <span className="text-gray-300 font-medium">Sélection automatique</span>
+              {autoSelectMessage && !autoSelect.enabled && (
+                <span className={autoSelectMessage.type === 'success' ? 'text-green-400 text-sm' : 'text-red-400 text-sm'}>
+                  {autoSelectMessage.text}
+                </span>
+              )}
             </div>
 
-            {/* Current RPS indicator - always visible */}
-            <div className="bg-gray-900 rounded-lg p-3">
-              <div className="flex items-center gap-2 text-sm text-gray-400 mb-2">
-                <Activity size={14} />
-                <span>Réseau SFP (10.0.0.10)</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-gray-400 text-sm">Charge (moy. {autoSelect.averagingTime}s):</span>
-                <span className="text-white font-mono font-bold text-lg">{networkRps.averaged.toLocaleString()} req/s</span>
-              </div>
-              {autoSelect.enabled && currentMode && (
-                <div className="flex items-center justify-between mt-1">
-                  <span className="text-gray-400 text-sm">Mode appliqué:</span>
-                  <span className={`font-medium ${
-                    currentMode === 'economy' ? 'text-indigo-400' :
-                    currentMode === 'performance' ? 'text-orange-400' : 'text-blue-400'
-                  }`}>
-                    {MODE_LABELS[currentMode]}
-                  </span>
+            {/* Interface selector and RPS indicator */}
+            <div className="bg-gray-900 rounded-lg p-3 space-y-3">
+              <div>
+                <div className="flex items-center gap-2 text-sm text-gray-400 mb-2">
+                  <Activity size={14} />
+                  <span>Interface réseau</span>
                 </div>
+                {interfaces.length === 0 ? (
+                  <p className="text-gray-500 text-sm">Aucune interface réseau détectée</p>
+                ) : (
+                  <select
+                    value={autoSelect.networkInterface || ''}
+                    onChange={e => setAutoSelect(prev => ({
+                      ...prev,
+                      networkInterface: e.target.value || null
+                    }))}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
+                  >
+                    <option value="">Sélectionner une interface...</option>
+                    {interfaces.map(iface => (
+                      <option key={iface.name} value={iface.name}>
+                        {iface.name} ({iface.primaryIp}){iface.state !== 'UP' ? ' - DOWN' : ''}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {interfaceError === 'not_configured' && (
+                  <p className="text-yellow-400 text-xs mt-1">
+                    Sélectionnez une interface pour activer l'auto-select
+                  </p>
+                )}
+                {interfaceError === 'not_found' && (
+                  <p className="text-red-400 text-xs mt-1">
+                    L'interface configurée n'existe plus
+                  </p>
+                )}
+              </div>
+
+              {autoSelect.networkInterface && !interfaceError && (
+                <>
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-400 text-sm">Charge (moy. {autoSelect.averagingTime}s):</span>
+                    <span className="text-white font-mono font-bold text-lg">{networkRps.averaged.toLocaleString()} req/s</span>
+                  </div>
+                  {autoSelect.enabled && currentMode && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-gray-400 text-sm">Mode appliqué:</span>
+                      <span className={`font-medium ${
+                        currentMode === 'economy' ? 'text-indigo-400' :
+                        currentMode === 'performance' ? 'text-orange-400' : 'text-blue-400'
+                      }`}>
+                        {MODE_LABELS[currentMode]}
+                      </span>
+                    </div>
+                  )}
+                </>
               )}
             </div>
 

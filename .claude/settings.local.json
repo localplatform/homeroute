@@ -158,7 +158,9 @@
       "Bash(docker kill:*)",
       "Bash(docker start:*)",
       "Read(//ssd_pool/**)",
-      "Bash(pm2 jlist:*)"
+      "Bash(pm2 jlist:*)",
+      "Bash(sudo dpkg:*)",
+      "Bash(code-server --version:*)"
     ]
   }
 }

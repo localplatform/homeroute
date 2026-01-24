@@ -3,11 +3,6 @@ import {
   getCpuInfo,
   getGovernorStatus,
   setGovernor,
-  getFanStatus,
-  setFanSpeed,
-  getFanProfiles,
-  saveFanProfile,
-  applyFanProfile,
   getScheduleConfig,
   saveScheduleConfig,
   applyMode,
@@ -20,6 +15,7 @@ import {
   saveAutoSelectConfig,
   getNetworkRps,
   getAutoSelectStatus,
+  getSelectableInterfaces,
   energyEvents
 } from '../services/energy.js';
 
@@ -94,51 +90,6 @@ router.post('/governor', async (req, res) => {
   res.json(result);
 });
 
-// ============ FANS ============
-
-// GET /api/energy/fans - État des ventilateurs
-router.get('/fans', async (req, res) => {
-  const result = await getFanStatus();
-  res.json(result);
-});
-
-// ============ FAN PROFILES ============
-// NOTE: Ces routes doivent être AVANT /fans/:id pour éviter que :id matche "profiles"
-
-// GET /api/energy/fans/profiles - Liste des profils
-router.get('/fans/profiles', async (req, res) => {
-  const result = await getFanProfiles();
-  res.json(result);
-});
-
-// POST /api/energy/fans/profiles - Créer/modifier un profil
-router.post('/fans/profiles', async (req, res) => {
-  const profile = req.body;
-
-  if (!profile || !profile.name) {
-    return res.status(400).json({ success: false, error: 'Profile name is required' });
-  }
-
-  const result = await saveFanProfile(profile);
-  res.json(result);
-});
-
-// POST /api/energy/fans/profiles/:name/apply - Appliquer un profil
-router.post('/fans/profiles/:name/apply', async (req, res) => {
-  const { name } = req.params;
-  const result = await applyFanProfile(name);
-  res.json(result);
-});
-
-// POST /api/energy/fans/:id - Modifier un ventilateur (doit être APRÈS /fans/profiles)
-router.post('/fans/:id', async (req, res) => {
-  const { id } = req.params;
-  const { pwm, mode } = req.body;
-
-  const result = await setFanSpeed(id, pwm, mode);
-  res.json(result);
-});
-
 // ============ SCHEDULE ============
 
 // GET /api/energy/schedule - Config de programmation
@@ -155,6 +106,12 @@ router.post('/schedule', async (req, res) => {
 });
 
 // ============ AUTO-SELECT ============
+
+// GET /api/energy/interfaces - Liste des interfaces réseau sélectionnables
+router.get('/interfaces', async (req, res) => {
+  const result = await getSelectableInterfaces();
+  res.json(result);
+});
 
 // GET /api/energy/autoselect - Config de sélection automatique
 router.get('/autoselect', async (req, res) => {

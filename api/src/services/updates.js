@@ -102,105 +102,6 @@ function parseNeedrestart(output) {
   return result;
 }
 
-// Determine Docker image risk level based on tag
-function getDockerRiskLevel(tag) {
-  if (!tag || tag === 'latest') return 'high';
-  if (tag.includes('stable') || tag.includes('lts')) return 'medium';
-  // Check if it looks like a semver (e.g., 1.2.3, v1.2.3, 18.6.2-ce.0)
-  if (/^v?\d+\.\d+(\.\d+)?/.test(tag)) return 'low';
-  if (/^\d+-/.test(tag)) return 'medium'; // e.g., 16-alpine
-  return 'medium';
-}
-
-// Check single Docker image for updates (with short timeout)
-async function checkSingleDockerImage(container) {
-  const imageName = container.image;
-  const [imageBase, tag = 'latest'] = imageName.includes(':')
-    ? imageName.split(':')
-    : [imageName, 'latest'];
-
-  // Get local digest (fast, local operation)
-  let localDigest = null;
-  try {
-    const { stdout } = await execAsync(
-      `docker inspect --format='{{index .RepoDigests 0}}' ${imageName} 2>/dev/null`,
-      { timeout: 5000 }
-    );
-    const match = stdout.match(/@(sha256:[a-f0-9]+)/);
-    if (match) localDigest = match[1];
-  } catch {
-    // Image might not have repo digest
-  }
-
-  // Get remote digest (can be slow due to network/rate limits)
-  let remoteDigest = null;
-  let hasUpdate = false;
-
-  try {
-    const { stdout } = await execAsync(
-      `timeout 8 docker manifest inspect ${imageName} 2>/dev/null | grep -m1 '"digest"' | cut -d'"' -f4`,
-      { timeout: 10000 }
-    );
-    remoteDigest = stdout.trim() || null;
-
-    if (localDigest && remoteDigest && localDigest !== remoteDigest) {
-      hasUpdate = true;
-    }
-  } catch {
-    // Manifest inspect may fail for private registries, rate limits, or timeout
-  }
-
-  return {
-    name: imageBase,
-    tag,
-    fullName: imageName,
-    containerId: container.id,
-    containerName: container.name,
-    localDigest,
-    remoteDigest,
-    hasUpdate,
-    riskLevel: getDockerRiskLevel(tag)
-  };
-}
-
-// Check for Docker image updates (parallel with timeout)
-async function checkDockerUpdates() {
-  const io = getIO();
-
-  try {
-    // Get running containers with their images
-    const { stdout: psOutput } = await execAsync(
-      'docker ps --format "{{.ID}}|{{.Names}}|{{.Image}}"',
-      { timeout: 10000 }
-    );
-
-    const containers = psOutput.trim().split('\n').filter(Boolean).map(line => {
-      const [id, name, image] = line.split('|');
-      return { id, name, image };
-    });
-
-    if (containers.length === 0) {
-      return [];
-    }
-
-    io.emit('updates:output', { phase: 'docker', line: `Verification de ${containers.length} images Docker...` });
-
-    // Check all images in parallel with individual timeouts
-    const results = await Promise.allSettled(
-      containers.map(container => checkSingleDockerImage(container))
-    );
-
-    const images = results
-      .filter(r => r.status === 'fulfilled')
-      .map(r => r.value);
-
-    return images;
-  } catch (err) {
-    console.error('Error listing Docker containers:', err.message);
-    return [];
-  }
-}
-
 // Run apt update with streaming output
 function runAptUpdate() {
   return new Promise((resolve, reject) => {
@@ -258,7 +159,6 @@ export async function runFullCheck() {
     duration: 0,
     apt: { packages: [], securityCount: 0, normalCount: 0 },
     snap: { packages: [] },
-    docker: { images: [], outdatedCount: 0 },
     needrestart: { services: [], kernelRebootNeeded: false },
     summary: { totalUpdates: 0, securityUpdates: 0, servicesNeedingRestart: 0 }
   };
@@ -310,22 +210,7 @@ export async function runFullCheck() {
 
     if (checkCancelled) throw new Error('Check cancelled');
 
-    // Phase 4: Docker updates
-    io.emit('updates:phase', { phase: 'docker', message: 'Verification des images Docker...' });
-    try {
-      result.docker.images = await checkDockerUpdates();
-      result.docker.outdatedCount = result.docker.images.filter(i => i.hasUpdate).length;
-      io.emit('updates:docker-complete', {
-        images: result.docker.images,
-        outdatedCount: result.docker.outdatedCount
-      });
-    } catch (err) {
-      console.error('docker check error:', err.message);
-    }
-
-    if (checkCancelled) throw new Error('Check cancelled');
-
-    // Phase 5: Needrestart
+    // Phase 4: Needrestart
     io.emit('updates:phase', { phase: 'needrestart', message: 'Detection des services a redemarrer...' });
     try {
       // Check if needrestart is available
@@ -355,7 +240,6 @@ export async function runFullCheck() {
     result.summary = {
       totalUpdates: result.apt.packages.length + result.snap.packages.length,
       securityUpdates: result.apt.securityCount,
-      dockerOutdated: result.docker.outdatedCount,
       servicesNeedingRestart: result.needrestart.services.length,
       kernelRebootNeeded: result.needrestart.kernelRebootNeeded
     };

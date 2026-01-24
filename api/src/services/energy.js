@@ -14,14 +14,13 @@ const execAsync = promisify(exec);
 // Config paths
 const CONFIG_DIR = process.env.ENERGY_CONFIG_DIR || '/var/lib/server-dashboard';
 const SCHEDULE_CONFIG_FILE = path.join(CONFIG_DIR, 'energy-schedule.json');
-const FAN_PROFILES_FILE = path.join(CONFIG_DIR, 'fan-profiles.json');
 const AUTOSELECT_CONFIG_FILE = path.join(CONFIG_DIR, 'energy-autoselect.json');
 
 // Unified energy modes
 export const ENERGY_MODES = {
-  economy: { governor: 'powersave', fanProfile: 'silent', label: 'Économie', icon: 'Moon' },
-  auto: { governor: 'schedutil', fanProfile: 'balanced', label: 'Auto', icon: 'Zap' },
-  performance: { governor: 'performance', fanProfile: 'performance', label: 'Performance', icon: 'Rocket' }
+  economy: { governor: 'powersave', label: 'Économie', icon: 'Moon' },
+  auto: { governor: 'schedutil', label: 'Auto', icon: 'Zap' },
+  performance: { governor: 'performance', label: 'Performance', icon: 'Rocket' }
 };
 
 // CPU sysfs paths
@@ -29,7 +28,6 @@ const CPU_FREQ_PATH = '/sys/devices/system/cpu/cpu0/cpufreq';
 const HWMON_PATH = '/sys/class/hwmon';
 
 // Cache for hwmon paths (they can change between boots)
-let it87HwmonPath = null;
 let k10tempHwmonPath = null;
 
 // Previous CPU stats for usage calculation
@@ -58,23 +56,6 @@ async function findHwmonByName(name) {
     // Ignore errors
   }
   return null;
-}
-
-// Get IT87 hwmon path (cached)
-async function getIt87Path() {
-  if (!it87HwmonPath) {
-    it87HwmonPath = await findHwmonByName('it8686');
-    if (!it87HwmonPath) {
-      // Try finding by platform device
-      try {
-        const { stdout } = await execAsync('ls -d /sys/devices/platform/it87.*/hwmon/hwmon* 2>/dev/null | head -1');
-        it87HwmonPath = stdout.trim() || null;
-      } catch {
-        it87HwmonPath = null;
-      }
-    }
-  }
-  return it87HwmonPath;
 }
 
 // Get k10temp hwmon path (cached)
@@ -268,245 +249,6 @@ export function getEnergyModes() {
   return { success: true, modes: ENERGY_MODES };
 }
 
-// ============ FANS ============
-
-export async function getFanStatus() {
-  try {
-    const it87Path = await getIt87Path();
-    if (!it87Path) {
-      return { success: false, error: 'IT87 driver not loaded', available: false };
-    }
-
-    const fans = [];
-
-    // Check fan1 and fan2
-    for (let i = 1; i <= 2; i++) {
-      const rpmPath = path.join(it87Path, `fan${i}_input`);
-      const pwmPath = path.join(it87Path, `pwm${i}`);
-      const enablePath = path.join(it87Path, `pwm${i}_enable`);
-
-      if (existsSync(rpmPath)) {
-        const rpm = await readSysfs(rpmPath);
-        const pwm = await readSysfs(pwmPath);
-        const enable = await readSysfs(enablePath);
-
-        fans.push({
-          id: `fan${i}`,
-          name: i === 1 ? 'CPU_FAN' : 'SYS_FAN',
-          rpm: rpm ? parseInt(rpm) : 0,
-          pwm: pwm ? parseInt(pwm) : 0,
-          pwmPercent: pwm ? Math.round((parseInt(pwm) / 255) * 100) : 0,
-          mode: enable === '1' ? 'manual' : (enable === '2' ? 'auto' : 'off')
-        });
-      }
-    }
-
-    return { success: true, fans, available: true };
-  } catch (error) {
-    return { success: false, error: error.message, available: false };
-  }
-}
-
-export async function setFanSpeed(fanId, pwm, mode) {
-  try {
-    const it87Path = await getIt87Path();
-    if (!it87Path) {
-      return { success: false, error: 'IT87 driver not loaded' };
-    }
-
-    const fanNum = fanId.replace('fan', '');
-    const pwmPath = path.join(it87Path, `pwm${fanNum}`);
-    const enablePath = path.join(it87Path, `pwm${fanNum}_enable`);
-
-    if (!existsSync(pwmPath)) {
-      return { success: false, error: `Fan ${fanId} not found` };
-    }
-
-    // Set mode if provided
-    if (mode !== undefined) {
-      const modeValue = mode === 'manual' ? '1' : (mode === 'auto' ? '2' : '0');
-      await writeSysfs(enablePath, modeValue);
-    }
-
-    // Set PWM if provided and mode is manual
-    if (pwm !== undefined) {
-      // Ensure mode is manual before setting PWM
-      const currentMode = await readSysfs(enablePath);
-      if (currentMode !== '1') {
-        await writeSysfs(enablePath, '1');
-      }
-
-      const pwmValue = Math.min(255, Math.max(0, Math.round(pwm)));
-      await writeSysfs(pwmPath, String(pwmValue));
-    }
-
-    return { success: true, message: `Fan ${fanId} updated` };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-}
-
-// ============ FAN PROFILES ============
-
-const DEFAULT_PROFILES = [
-  {
-    name: 'silent',
-    label: 'Économie',
-    fans: {
-      fan1: {
-        mode: 'manual',
-        pwm: 70,   // ~27% - silencieux
-        curve: [[30, 20], [50, 35], [70, 100]]
-      },
-      fan2: {
-        mode: 'manual',
-        pwm: 50,   // ~20%
-        curve: [[30, 15], [50, 30], [70, 80]]
-      }
-    }
-  },
-  {
-    name: 'balanced',
-    label: 'Auto',
-    fans: {
-      fan1: {
-        mode: 'manual',
-        pwm: 120,  // ~47% - équilibré
-        curve: [[30, 35], [50, 55], [70, 100]]
-      },
-      fan2: {
-        mode: 'manual',
-        pwm: 100,  // ~39%
-        curve: [[30, 30], [50, 50], [70, 90]]
-      }
-    }
-  },
-  {
-    name: 'performance',
-    label: 'Performance',
-    fans: {
-      fan1: {
-        mode: 'manual',
-        pwm: 200,  // ~78% - performance
-        curve: [[30, 50], [50, 75], [70, 100]]
-      },
-      fan2: {
-        mode: 'manual',
-        pwm: 170,  // ~67%
-        curve: [[30, 45], [50, 70], [70, 100]]
-      }
-    }
-  }
-];
-
-export async function getFanProfiles() {
-  try {
-    await ensureConfigDir();
-
-    if (!existsSync(FAN_PROFILES_FILE)) {
-      // Return default profiles
-      return { success: true, profiles: DEFAULT_PROFILES };
-    }
-
-    const content = await readFile(FAN_PROFILES_FILE, 'utf-8');
-    const profiles = JSON.parse(content);
-    return { success: true, profiles };
-  } catch (error) {
-    return { success: false, error: error.message, profiles: DEFAULT_PROFILES };
-  }
-}
-
-export async function saveFanProfile(profile) {
-  try {
-    await ensureConfigDir();
-
-    let profiles = [];
-    if (existsSync(FAN_PROFILES_FILE)) {
-      const content = await readFile(FAN_PROFILES_FILE, 'utf-8');
-      profiles = JSON.parse(content);
-    } else {
-      profiles = [...DEFAULT_PROFILES];
-    }
-
-    // Update or add profile
-    const existingIndex = profiles.findIndex(p => p.name === profile.name);
-    if (existingIndex >= 0) {
-      profiles[existingIndex] = profile;
-    } else {
-      profiles.push(profile);
-    }
-
-    await writeFile(FAN_PROFILES_FILE, JSON.stringify(profiles, null, 2));
-    return { success: true, message: 'Profile saved' };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-}
-
-// Interpolate PWM value from curve based on temperature
-function interpolateCurve(curve, temp) {
-  if (!curve || curve.length === 0) return 128; // Default 50%
-
-  // If temp is below first point, use first point's PWM
-  if (temp <= curve[0][0]) {
-    return Math.round((curve[0][1] / 100) * 255);
-  }
-
-  // If temp is above last point, use last point's PWM
-  if (temp >= curve[curve.length - 1][0]) {
-    return Math.round((curve[curve.length - 1][1] / 100) * 255);
-  }
-
-  // Find surrounding points and interpolate
-  for (let i = 0; i < curve.length - 1; i++) {
-    if (temp >= curve[i][0] && temp <= curve[i + 1][0]) {
-      const [t1, p1] = curve[i];
-      const [t2, p2] = curve[i + 1];
-      const pwmPercent = p1 + ((temp - t1) / (t2 - t1)) * (p2 - p1);
-      return Math.round((pwmPercent / 100) * 255);
-    }
-  }
-
-  return 128;
-}
-
-export async function applyFanProfile(profileName) {
-  try {
-    const { profiles } = await getFanProfiles();
-    const profile = profiles.find(p => p.name === profileName);
-
-    if (!profile) {
-      return { success: false, error: `Profile ${profileName} not found` };
-    }
-
-    // Get current CPU temperature for curve interpolation
-    const tempResult = await getCpuTemperature();
-    const currentTemp = tempResult.success ? tempResult.temperature : 40;
-
-    // Apply each fan setting using curve interpolation
-    for (const [fanId, settings] of Object.entries(profile.fans)) {
-      let pwmValue;
-
-      if (settings.curve && settings.curve.length > 0) {
-        // Use curve interpolation based on current temperature
-        pwmValue = interpolateCurve(settings.curve, currentTemp);
-      } else {
-        // Fallback to fixed PWM value
-        pwmValue = settings.pwm || 128;
-      }
-
-      await setFanSpeed(fanId, pwmValue, settings.mode);
-    }
-
-    // Start the continuous fan control loop for this profile
-    startFanControl(profileName);
-
-    return { success: true, message: `Profile ${profileName} applied`, temperature: currentTemp };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-}
-
 // ============ SCHEDULE ============
 
 const DEFAULT_SCHEDULE = {
@@ -614,9 +356,6 @@ export async function applyMode(mode) {
     // Apply governor
     await setGovernor(modeConfig.governor);
 
-    // Apply fan profile
-    await applyFanProfile(modeConfig.fanProfile);
-
     // Emit event for real-time updates
     energyEvents.emit('modeChange', { mode, config: modeConfig });
 
@@ -624,84 +363,6 @@ export async function applyMode(mode) {
   } catch (error) {
     return { success: false, error: error.message };
   }
-}
-
-// ============ FAN CONTROL LOOP ============
-
-let activeFanProfile = null;
-let fanControlInterval = null;
-const FAN_CONTROL_INTERVAL_MS = 1000; // Check every 1 second
-
-// Update fan speeds based on current temperature and active profile
-async function updateFanSpeeds() {
-  if (!activeFanProfile) return;
-
-  try {
-    const { profiles } = await getFanProfiles();
-    const profile = profiles.find(p => p.name === activeFanProfile);
-
-    if (!profile) {
-      console.error(`Fan profile ${activeFanProfile} not found, stopping control loop`);
-      stopFanControl();
-      return;
-    }
-
-    // Get current CPU temperature
-    const tempResult = await getCpuTemperature();
-    if (!tempResult.success) return;
-
-    const currentTemp = tempResult.temperature;
-
-    // Apply interpolated PWM for each fan
-    for (const [fanId, settings] of Object.entries(profile.fans)) {
-      if (settings.curve && settings.curve.length > 0) {
-        const pwmValue = interpolateCurve(settings.curve, currentTemp);
-        // Only set PWM, don't change mode (already set to manual)
-        const it87Path = await getIt87Path();
-        if (it87Path) {
-          const fanNum = fanId.replace('fan', '');
-          const pwmPath = path.join(it87Path, `pwm${fanNum}`);
-          await writeSysfs(pwmPath, String(pwmValue));
-        }
-      }
-    }
-  } catch (error) {
-    console.error('Fan control loop error:', error);
-  }
-}
-
-// Start the fan control loop
-function startFanControl(profileName) {
-  // Stop any existing loop
-  stopFanControl();
-
-  activeFanProfile = profileName;
-
-  // Start new control loop
-  fanControlInterval = setInterval(updateFanSpeeds, FAN_CONTROL_INTERVAL_MS);
-
-  // Also run immediately
-  updateFanSpeeds();
-
-  console.log(`Fan control loop started for profile: ${profileName}`);
-}
-
-// Stop the fan control loop
-function stopFanControl() {
-  if (fanControlInterval) {
-    clearInterval(fanControlInterval);
-    fanControlInterval = null;
-  }
-  activeFanProfile = null;
-}
-
-// Get current fan control status
-export function getFanControlStatus() {
-  return {
-    active: !!activeFanProfile,
-    profile: activeFanProfile,
-    intervalMs: FAN_CONTROL_INTERVAL_MS
-  };
 }
 
 // ============ AUTO-SELECT (based on network RPS) ============
@@ -748,6 +409,44 @@ async function findInterfaceByIp(targetIp) {
   }
 }
 
+// Get selectable network interfaces (physical interfaces with IPv4)
+export async function getSelectableInterfaces() {
+  try {
+    const { stdout } = await execAsync('ip -j addr show');
+    const interfaces = JSON.parse(stdout);
+
+    const selectable = interfaces
+      .filter(iface => {
+        const name = iface.ifname;
+        // Exclude virtual interfaces
+        if (name === 'lo' ||
+            name.startsWith('veth') ||
+            name.startsWith('docker') ||
+            name.startsWith('br-') ||
+            name.startsWith('virbr')) {
+          return false;
+        }
+        // Must have at least one IPv4 address
+        return iface.addr_info?.some(addr => addr.family === 'inet');
+      })
+      .map(iface => {
+        const ipv4Addresses = iface.addr_info
+          .filter(addr => addr.family === 'inet')
+          .map(addr => addr.local);
+
+        return {
+          name: iface.ifname,
+          primaryIp: ipv4Addresses[0] || null,
+          state: iface.operstate || 'UNKNOWN'
+        };
+      });
+
+    return { success: true, interfaces: selectable };
+  } catch (error) {
+    return { success: false, error: error.message, interfaces: [] };
+  }
+}
+
 // Read network packets from /proc/net/dev
 async function getNetworkPackets(interfaceName) {
   try {
@@ -788,23 +487,32 @@ function calculateAveragedRps(averagingTime) {
   return Math.round(sum / rpsHistory.length);
 }
 
-// Get current RPS (requests per second) for the SFP interface
+// Get current RPS (requests per second) for the configured network interface
 export async function getNetworkRps() {
   try {
     const { config } = await getAutoSelectConfig();
 
-    // Find interface if not cached
-    let interfaceName = config.networkInterface;
+    // Use configured interface
+    const interfaceName = config.networkInterface;
     if (!interfaceName) {
-      interfaceName = await findInterfaceByIp('10.0.0.10');
-      if (!interfaceName) {
-        return { success: false, error: 'SFP interface (10.0.0.10) not found', rps: 0, averagedRps: 0 };
-      }
+      return {
+        success: false,
+        error: 'Aucune interface configurée',
+        rps: 0,
+        averagedRps: 0,
+        interfaceError: 'not_configured'
+      };
     }
 
     const stats = await getNetworkPackets(interfaceName);
     if (!stats.success) {
-      return { success: false, error: stats.error, rps: 0, averagedRps: 0 };
+      return {
+        success: false,
+        error: `Interface ${interfaceName} introuvable`,
+        rps: 0,
+        averagedRps: 0,
+        interfaceError: 'not_found'
+      };
     }
 
     const now = Date.now();
@@ -859,8 +567,24 @@ export async function saveAutoSelectConfig(config) {
 
     const newConfig = { ...DEFAULT_AUTOSELECT, ...config };
 
-    // Schedule and auto-select can now work together
-    // Night mode from schedule will force economy, overriding auto-select
+    // Validate interface if enabling auto-select
+    if (newConfig.enabled && !newConfig.networkInterface) {
+      return {
+        success: false,
+        error: 'Une interface doit être sélectionnée pour activer l\'auto-select'
+      };
+    }
+
+    // Validate interface exists if specified
+    if (newConfig.networkInterface) {
+      const stats = await getNetworkPackets(newConfig.networkInterface);
+      if (!stats.success) {
+        return {
+          success: false,
+          error: `Interface ${newConfig.networkInterface} introuvable`
+        };
+      }
+    }
 
     await writeFile(AUTOSELECT_CONFIG_FILE, JSON.stringify(newConfig, null, 2));
 
@@ -871,7 +595,7 @@ export async function saveAutoSelectConfig(config) {
       stopAutoSelect();
     }
 
-    return { success: true, message: 'Auto-select config saved' };
+    return { success: true, message: 'Configuration enregistrée' };
   } catch (error) {
     return { success: false, error: error.message };
   }

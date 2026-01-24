@@ -6,9 +6,7 @@ import Dns from './pages/Dns';
 import Network from './pages/Network';
 import Adblock from './pages/Adblock';
 import Ddns from './pages/Ddns';
-import Backup from './pages/Backup';
 import ReverseProxy from './pages/ReverseProxy';
-import Samba from './pages/Samba';
 import Updates from './pages/Updates';
 import Energy from './pages/Energy';
 import Users from './pages/Users';
@@ -25,10 +23,8 @@ function App() {
               <Route path="/network" element={<Network />} />
               <Route path="/adblock" element={<Adblock />} />
               <Route path="/ddns" element={<Ddns />} />
-              <Route path="/backup" element={<Backup />} />
               <Route path="/reverseproxy" element={<ReverseProxy />} />
               <Route path="/users" element={<Users />} />
-              <Route path="/samba" element={<Samba />} />
               <Route path="/updates" element={<Updates />} />
               <Route path="/energy" element={<Energy />} />
             </Routes>

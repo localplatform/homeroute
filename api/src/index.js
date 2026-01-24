@@ -9,6 +9,7 @@ import { Server } from 'socket.io';
 import { connectDB } from './config/db.js';
 import { setIO } from './socket.js';
 import { autheliaAuth } from './middleware/authelia.js';
+import { startScheduler as startDdnsScheduler } from './services/cloudflare.js';
 
 // Routes
 import dnsRoutes from './routes/dns.js';
@@ -16,9 +17,7 @@ import networkRoutes from './routes/network.js';
 import natRoutes from './routes/nat.js';
 import adblockRoutes from './routes/adblock.js';
 import ddnsRoutes from './routes/ddns.js';
-import backupRoutes from './routes/backup.js';
 import reverseproxyRoutes from './routes/reverseproxy.js';
-import sambaRoutes from './routes/samba.js';
 import authRoutes from './routes/auth.js';
 import updatesRoutes from './routes/updates.js';
 import energyRoutes from './routes/energy.js';
@@ -70,9 +69,7 @@ async function startServer() {
   app.use('/api/nat', natRoutes);
   app.use('/api/adblock', adblockRoutes);
   app.use('/api/ddns', ddnsRoutes);
-  app.use('/api/backup', backupRoutes);
   app.use('/api/reverseproxy', reverseproxyRoutes);
-  app.use('/api/samba', sambaRoutes);
   app.use('/api/updates', updatesRoutes);
   app.use('/api/energy', energyRoutes);
   app.use('/api/users', usersRoutes);
@@ -95,6 +92,9 @@ async function startServer() {
   httpServer.listen(PORT, () => {
     console.log(`API server running on http://localhost:${PORT}`);
   });
+
+  // Démarrer le scheduler DDNS Cloudflare
+  startDdnsScheduler();
 }
 
 startServer();

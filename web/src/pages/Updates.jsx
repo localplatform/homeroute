@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { RefreshCw, Package, Box, AlertTriangle, Server, Shield, CheckCircle, Play, Square, ChevronDown, ChevronUp, Download } from 'lucide-react';
+import { RefreshCw, Package, AlertTriangle, Server, Shield, CheckCircle, Play, Square, ChevronDown, ChevronUp, Download } from 'lucide-react';
 import { io } from 'socket.io-client';
 import Card from '../components/Card';
 import Button from '../components/Button';
@@ -33,7 +33,6 @@ function Updates() {
   const [lastCheck, setLastCheck] = useState(null);
   const [aptPackages, setAptPackages] = useState([]);
   const [snapPackages, setSnapPackages] = useState([]);
-  const [dockerImages, setDockerImages] = useState([]);
   const [needrestart, setNeedrestart] = useState(null);
   const [summary, setSummary] = useState(null);
 
@@ -73,10 +72,6 @@ function Updates() {
 
     socket.on('updates:snap-complete', (data) => {
       setSnapPackages(data.snaps || []);
-    });
-
-    socket.on('updates:docker-complete', (data) => {
-      setDockerImages(data.images || []);
     });
 
     socket.on('updates:needrestart-complete', (data) => {
@@ -181,7 +176,6 @@ function Updates() {
         setLastCheck(result.timestamp);
         setAptPackages(result.apt?.packages || []);
         setSnapPackages(result.snap?.packages || []);
-        setDockerImages(result.docker?.images || []);
         setNeedrestart(result.needrestart || null);
         setSummary(result.summary || null);
       }
@@ -245,19 +239,6 @@ function Updates() {
     return new Date(isoString).toLocaleString('fr-FR');
   }
 
-  function getRiskBadge(level) {
-    switch (level) {
-      case 'high':
-        return <StatusBadge status="down">Risque eleve</StatusBadge>;
-      case 'medium':
-        return <StatusBadge status="unknown">Risque moyen</StatusBadge>;
-      case 'low':
-        return <StatusBadge status="up">Risque faible</StatusBadge>;
-      default:
-        return null;
-    }
-  }
-
   function getUpgradeDescription(type) {
     switch (type) {
       case 'apt':
@@ -293,7 +274,6 @@ function Updates() {
   }
 
   const securityCount = aptPackages.filter(p => p.isSecurity).length;
-  const dockerOutdated = dockerImages.filter(i => i.hasUpdate).length;
   const isRunningAny = running || upgrading;
 
   return (
@@ -401,7 +381,7 @@ function Updates() {
       )}
 
       {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {/* Total Updates */}
         <Card title="Total mises a jour" icon={Package}>
           <div className="text-3xl font-bold text-blue-400">
@@ -422,19 +402,6 @@ function Updates() {
           </div>
           <p className="text-sm text-gray-400">
             {securityCount > 0 ? 'mises a jour critiques' : 'systeme a jour'}
-          </p>
-        </Card>
-
-        {/* Docker */}
-        <Card title="Docker" icon={Box}>
-          <div className={`text-3xl font-bold ${dockerOutdated > 0 ? 'text-yellow-400' : 'text-green-400'}`}>
-            {dockerOutdated}
-          </div>
-          <p className="text-sm text-gray-400">
-            images avec mises a jour
-          </p>
-          <p className="text-xs text-gray-500 mt-2">
-            {dockerImages.length} images totales
           </p>
         </Card>
 
@@ -565,49 +532,6 @@ function Updates() {
         </Card>
       )}
 
-      {/* Docker Images */}
-      {dockerImages.length > 0 && (
-        <Card title={`Images Docker (${dockerImages.length})`} icon={Box}>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-gray-400 border-b border-gray-700">
-                  <th className="pb-2">Image</th>
-                  <th className="pb-2">Tag</th>
-                  <th className="pb-2">Container</th>
-                  <th className="pb-2">Mise a jour</th>
-                  <th className="pb-2">Risque</th>
-                </tr>
-              </thead>
-              <tbody>
-                {dockerImages.map((img, i) => (
-                  <tr key={i} className="border-b border-gray-700/50">
-                    <td className="py-2 font-mono">{img.name}</td>
-                    <td className="py-2 font-mono text-gray-400">{img.tag}</td>
-                    <td className="py-2 text-gray-400">{img.containerName}</td>
-                    <td className="py-2">
-                      {img.hasUpdate ? (
-                        <StatusBadge status="down">Disponible</StatusBadge>
-                      ) : img.remoteDigest ? (
-                        <StatusBadge status="up">A jour</StatusBadge>
-                      ) : (
-                        <StatusBadge status="unknown">Inconnu</StatusBadge>
-                      )}
-                    </td>
-                    <td className="py-2">
-                      {getRiskBadge(img.riskLevel)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <p className="text-xs text-gray-500 mt-4">
-            Les mises a jour Docker doivent etre effectuees manuellement (docker pull + recreation du container)
-          </p>
-        </Card>
-      )}
-
       {/* Services needing restart */}
       {needrestart && (needrestart.kernelRebootNeeded || needrestart.services?.length > 0) && (
         <Card title="Services a redemarrer" icon={AlertTriangle}>
@@ -643,7 +567,7 @@ function Updates() {
       )}
 
       {/* Empty state */}
-      {!running && !upgrading && aptPackages.length === 0 && snapPackages.length === 0 && dockerImages.length === 0 && !needrestart && (
+      {!running && !upgrading && aptPackages.length === 0 && snapPackages.length === 0 && !needrestart && (
         <Card>
           <div className="text-center py-8 text-gray-400">
             <RefreshCw className="w-12 h-12 mx-auto mb-4 opacity-50" />
