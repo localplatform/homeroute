@@ -144,4 +144,30 @@ export const changeUserPassword = (username, password) => api.put(`/users/${user
 // Users - Groups
 export const getUserGroups = () => api.get('/users/groups');
 
+// ========== Traffic Analytics ==========
+
+export const getTrafficOverview = (timeRange) =>
+  api.get('/traffic/overview', { params: { timeRange } }).then(res => res.data);
+
+export const getTrafficTimeseries = (params) =>
+  api.get('/traffic/timeseries', { params }).then(res => res.data);
+
+export const getTopDevices = (timeRange) =>
+  api.get('/traffic/by-device', { params: { timeRange, limit: 10 } }).then(res => res.data);
+
+export const getTopEndpoints = (timeRange) =>
+  api.get('/traffic/by-endpoint', { params: { timeRange, limit: 10 } }).then(res => res.data);
+
+export const getApplicationBreakdown = (timeRange) =>
+  api.get('/traffic/by-application', { params: { timeRange } }).then(res => res.data);
+
+export const getDeviceTraffic = (mac, timeRange) =>
+  api.get(`/traffic/device/${mac}`, { params: { timeRange } }).then(res => res.data);
+
 export default api;
+
+export const getTopDomains = (timeRange, limit = 20) =>
+  api.get('/traffic/dns/top-domains', { params: { timeRange, limit } }).then(res => res.data);
+
+export const getDnsByCategory = (timeRange) =>
+  api.get('/traffic/dns/by-category', { params: { timeRange } }).then(res => res.data);

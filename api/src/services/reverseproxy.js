@@ -850,6 +850,20 @@ function getAppDomain(app, endpointType, env, baseDomain, apiSlug = '') {
   }
 }
 
+// Generate CSP header handler
+function getCspHeaderHandler(baseDomain) {
+  return {
+    handler: 'headers',
+    response: {
+      set: {
+        'Content-Security-Policy': [
+          `default-src 'self'; connect-src 'self' https://auth.${baseDomain}; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:`
+        ]
+      }
+    }
+  };
+}
+
 // Generate routes for an application across all its environments
 function generateAppRoutes(app, environments, baseDomain) {
   const { DASHBOARD_PORT } = getEnv();
@@ -873,7 +887,8 @@ function generateAppRoutes(app, environments, baseDomain) {
         frontendDomain,
         envEndpoints.frontend,
         baseDomain,
-        authServiceUrl
+        authServiceUrl,
+        envId
       ));
     }
 
@@ -890,7 +905,8 @@ function generateAppRoutes(app, environments, baseDomain) {
         apiDomain,
         api,
         baseDomain,
-        authServiceUrl
+        authServiceUrl,
+        envId
       ));
     }
 
@@ -902,7 +918,8 @@ function generateAppRoutes(app, environments, baseDomain) {
         apiDomain,
         envEndpoints.api,
         baseDomain,
-        authServiceUrl
+        authServiceUrl,
+        envId
       ));
     }
   }
@@ -911,7 +928,8 @@ function generateAppRoutes(app, environments, baseDomain) {
 }
 
 // Generate a single endpoint route
-function generateEndpointRoute(id, domain, endpoint, baseDomain, authServiceUrl) {
+function generateEndpointRoute(id, domain, endpoint, baseDomain, authServiceUrl, envId = null) {
+  const cspHandler = getCspHeaderHandler(baseDomain);
   const reverseProxyHandler = {
     handler: 'reverse_proxy',
     upstreams: [{
@@ -919,38 +937,60 @@ function generateEndpointRoute(id, domain, endpoint, baseDomain, authServiceUrl)
     }]
   };
 
+  // Detect if this is a development environment
+  const isDevelopment = envId && envId.toLowerCase().includes('dev');
+
   if (endpoint.requireAuth) {
+    // Build routes array for subroute
+    const routes = [];
+
+    // Add WebSocket bypass ONLY for development environments
+    if (isDevelopment) {
+      routes.push({
+        // WebSocket bypass in dev: pass directly without auth check (for Vite HMR)
+        match: [{ header: { 'Upgrade': ['websocket'] } }],
+        handle: [reverseProxyHandler]
+      });
+    }
+
+    // Add normal auth check route
+    routes.push({
+      // Normal requests: auth check
+      handle: [{
+        handler: 'reverse_proxy',
+        upstreams: [{ dial: authServiceUrl.replace('http://', '') }],
+        rewrite: { uri: '/api/authz/forward-auth' },
+        handle_response: [
+          {
+            match: { status_code: [401, 403] },
+            routes: [{
+              handle: [{
+                handler: 'static_response',
+                status_code: 302,
+                headers: {
+                  'Location': [`https://auth.${baseDomain}/login?rd=https://${domain}{http.request.uri}`]
+                }
+              }]
+            }]
+          },
+          {
+            match: { status_code: [200] },
+            routes: [{ handle: [reverseProxyHandler] }]
+          }
+        ]
+      }]
+    });
+
     const authCheckRoute = {
       '@id': id,
       match: [{ host: [domain] }],
-      handle: [{
-        handler: 'subroute',
-        routes: [{
-          handle: [{
-            handler: 'reverse_proxy',
-            upstreams: [{ dial: authServiceUrl.replace('http://', '') }],
-            rewrite: { uri: '/api/authz/forward-auth' },
-            handle_response: [
-              {
-                match: { status_code: [401, 403] },
-                routes: [{
-                  handle: [{
-                    handler: 'static_response',
-                    status_code: 302,
-                    headers: {
-                      'Location': [`https://auth.${baseDomain}/login?rd=https://${domain}{http.request.uri}`]
-                    }
-                  }]
-                }]
-              },
-              {
-                match: { status_code: [200] },
-                routes: [{ handle: [reverseProxyHandler] }]
-              }
-            ]
-          }]
-        }]
-      }],
+      handle: [
+        cspHandler,
+        {
+          handler: 'subroute',
+          routes
+        }
+      ],
       terminal: true
     };
 
@@ -958,7 +998,7 @@ function generateEndpointRoute(id, domain, endpoint, baseDomain, authServiceUrl)
       authCheckRoute.handle = [{
         handler: 'subroute',
         routes: [
-          { match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }], handle: authCheckRoute.handle },
+          { match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }], handle: [cspHandler, ...authCheckRoute.handle.slice(1)] },
           { handle: [{ handler: 'error', status_code: 403 }] }
         ]
       }];
@@ -968,11 +1008,6 @@ function generateEndpointRoute(id, domain, endpoint, baseDomain, authServiceUrl)
   }
 
   // Without requireAuth: direct proxy
-  const subrouteHandler = {
-    handler: 'subroute',
-    routes: [{ handle: [reverseProxyHandler] }]
-  };
-
   if (endpoint.localOnly) {
     return {
       '@id': id,
@@ -980,7 +1015,7 @@ function generateEndpointRoute(id, domain, endpoint, baseDomain, authServiceUrl)
       handle: [{
         handler: 'subroute',
         routes: [
-          { match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }], handle: [subrouteHandler] },
+          { match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }], handle: [cspHandler, reverseProxyHandler] },
           { handle: [{ handler: 'error', status_code: 403 }] }
         ]
       }],
@@ -991,7 +1026,7 @@ function generateEndpointRoute(id, domain, endpoint, baseDomain, authServiceUrl)
   return {
     '@id': id,
     match: [{ host: [domain] }],
-    handle: [subrouteHandler],
+    handle: [cspHandler, reverseProxyHandler],
     terminal: true
   };
 }
@@ -1000,6 +1035,7 @@ function generateCaddyRoute(host, baseDomain) {
   const domain = host.customDomain || `${host.subdomain}.${baseDomain}`;
   const { DASHBOARD_PORT } = getEnv();
   const authServiceUrl = `http://localhost:${DASHBOARD_PORT}`;
+  const cspHandler = getCspHeaderHandler(baseDomain);
 
   // Proxy direct vers la cible
   const reverseProxyHandler = {
@@ -1009,50 +1045,70 @@ function generateCaddyRoute(host, baseDomain) {
     }]
   };
 
+  // Detect if this is a development environment (domain contains .dev.)
+  const isDevelopment = domain.includes('.dev.');
+
   // Si requireAuth est activé, on utilise intercept pour vérifier l'auth
   // via une sous-requête à l'auth-service
   if (host.requireAuth) {
+    // Build routes array for subroute
+    const routes = [];
+
+    // Add WebSocket bypass ONLY for development environments
+    if (isDevelopment) {
+      routes.push({
+        // WebSocket bypass in dev: pass directly without auth check (for Vite HMR)
+        match: [{ header: { 'Upgrade': ['websocket'] } }],
+        handle: [reverseProxyHandler]
+      });
+    }
+
+    // Add normal auth check route
+    routes.push({
+      // Normal requests: auth check
+      // Faire une sous-requête à l'auth-service pour vérifier le cookie
+      handle: [{
+        handler: 'reverse_proxy',
+        upstreams: [{ dial: authServiceUrl.replace('http://', '') }],
+        rewrite: {
+          uri: '/api/authz/forward-auth'
+        },
+        handle_response: [
+          {
+            // Si auth-service retourne 401, rediriger vers login
+            match: { status_code: [401, 403] },
+            routes: [{
+              handle: [{
+                handler: 'static_response',
+                status_code: 302,
+                headers: {
+                  'Location': [`https://auth.${baseDomain}/login?rd=https://${domain}{http.request.uri}`]
+                }
+              }]
+            }]
+          },
+          {
+            // Si auth OK (200), proxy vers l'app cible
+            match: { status_code: [200] },
+            routes: [{
+              handle: [reverseProxyHandler]
+            }]
+          }
+        ]
+      }]
+    });
+
     // Route avec vérification d'auth via intercept
     const authCheckRoute = {
       '@id': host.id,
       match: [{ host: [domain] }],
-      handle: [{
-        handler: 'subroute',
-        routes: [
-          {
-            // Faire une sous-requête à l'auth-service pour vérifier le cookie
-            handle: [{
-              handler: 'reverse_proxy',
-              upstreams: [{ dial: authServiceUrl.replace('http://', '') }],
-              rewrite: {
-                uri: '/api/authz/forward-auth'
-              },
-              handle_response: [
-                {
-                  // Si auth-service retourne 401, rediriger vers login
-                  match: { status_code: [401, 403] },
-                  routes: [{
-                    handle: [{
-                      handler: 'static_response',
-                      status_code: 302,
-                      headers: {
-                        'Location': [`https://auth.${baseDomain}/login?rd=https://${domain}{http.request.uri}`]
-                      }
-                    }]
-                  }]
-                },
-                {
-                  // Si auth OK (200), proxy vers l'app cible
-                  match: { status_code: [200] },
-                  routes: [{
-                    handle: [reverseProxyHandler]
-                  }]
-                }
-              ]
-            }]
-          }
-        ]
-      }],
+      handle: [
+        cspHandler,
+        {
+          handler: 'subroute',
+          routes
+        }
+      ],
       terminal: true
     };
 
@@ -1063,7 +1119,7 @@ function generateCaddyRoute(host, baseDomain) {
         routes: [
           {
             match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }],
-            handle: authCheckRoute.handle
+            handle: [cspHandler, ...authCheckRoute.handle.slice(1)]
           },
           {
             handle: [{
@@ -1079,16 +1135,6 @@ function generateCaddyRoute(host, baseDomain) {
   }
 
   // Sans requireAuth : proxy direct
-  const handlers = [reverseProxyHandler];
-
-  const subrouteHandler = {
-    handler: 'subroute',
-    routes: [{
-      handle: handlers
-    }]
-  };
-
-  // If localOnly, wrap everything in IP restriction
   if (host.localOnly) {
     return {
       '@id': host.id,
@@ -1098,7 +1144,7 @@ function generateCaddyRoute(host, baseDomain) {
         routes: [
           {
             match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }],
-            handle: [subrouteHandler]
+            handle: [cspHandler, reverseProxyHandler]
           },
           {
             handle: [{
@@ -1115,7 +1161,7 @@ function generateCaddyRoute(host, baseDomain) {
   return {
     '@id': host.id,
     match: [{ host: [domain] }],
-    handle: [subrouteHandler],
+    handle: [cspHandler, reverseProxyHandler],
     terminal: true
   };
 }
@@ -1140,13 +1186,18 @@ function generateCaddyConfig(config) {
   // Add system route for dashboard (proxy.<baseDomain>)
   // Note: L'authentification est gérée côté API via le middleware (cookie auth_session)
   if (config.baseDomain) {
+    const cspHandler = getCspHeaderHandler(config.baseDomain);
+
     routes.unshift({
       '@id': 'system-dashboard',
       match: [{ host: [`proxy.${config.baseDomain}`] }],
-      handle: [{
-        handler: 'reverse_proxy',
-        upstreams: [{ dial: `localhost:${DASHBOARD_PORT}` }]
-      }],
+      handle: [
+        cspHandler,
+        {
+          handler: 'reverse_proxy',
+          upstreams: [{ dial: `localhost:${DASHBOARD_PORT}` }]
+        }
+      ],
       terminal: true
     });
 
@@ -1154,10 +1205,13 @@ function generateCaddyConfig(config) {
     routes.unshift({
       '@id': 'system-auth',
       match: [{ host: [`auth.${config.baseDomain}`] }],
-      handle: [{
-        handler: 'reverse_proxy',
-        upstreams: [{ dial: authServiceUrl.replace('http://', '').replace('https://', '') }]
-      }],
+      handle: [
+        cspHandler,
+        {
+          handler: 'reverse_proxy',
+          upstreams: [{ dial: authServiceUrl.replace('http://', '').replace('https://', '') }]
+        }
+      ],
       terminal: true
     });
   }
@@ -1171,7 +1225,10 @@ function generateCaddyConfig(config) {
         servers: {
           srv0: {
             listen: [':80', ':443'],
-            routes
+            routes,
+            logs: {
+              default_logger_name: 'homeroute_access'
+            }
           }
         }
       }
@@ -1213,6 +1270,21 @@ function generateCaddyConfig(config) {
       };
     }
   }
+
+  // Add access logging for traffic analytics
+  caddyConfig.logging = {
+    logs: {
+      homeroute_access: {
+        writer: {
+          output: 'file',
+          filename: process.env.CADDY_ACCESS_LOG || '/var/log/caddy/homeroute-access.json'
+        },
+        encoder: {
+          format: 'json'
+        }
+      }
+    }
+  };
 
   return caddyConfig;
 }

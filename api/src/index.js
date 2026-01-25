@@ -18,6 +18,13 @@ import { authMiddleware } from './middleware/auth.js';
 import { startScheduler as startDdnsScheduler } from './services/cloudflare.js';
 import { initDatabase } from './services/authdb.js';
 
+// Traffic Analytics
+import { initMongoDB } from './services/mongodb.js';
+import { startHttpCapture } from './services/trafficHttpCapture.js';
+import { startNetworkCapture } from './services/trafficNetworkCapture.js';
+import { startDnsCapture } from './services/trafficDnsCapture.js';
+import { startAggregation } from './services/trafficAggregation.js';
+
 // Routes
 import dnsRoutes from './routes/dns.js';
 import networkRoutes from './routes/network.js';
@@ -31,6 +38,7 @@ import updatesRoutes from './routes/updates.js';
 import energyRoutes from './routes/energy.js';
 import usersRoutes from './routes/users.js';
 import authproxyRoutes from './routes/authproxy.js';
+import trafficRoutes from './routes/traffic.js';
 
 const app = express();
 const httpServer = createServer(app);
@@ -61,6 +69,13 @@ async function startServer() {
   // Initialiser la base de donnees SQLite pour les sessions
   await initDatabase();
 
+  // Initialiser MongoDB pour l'analytics
+  try {
+    await initMongoDB();
+  } catch (error) {
+    console.error('⚠ MongoDB initialization failed, traffic analytics will be unavailable:', error.message);
+  }
+
   // Middleware Auth - verifie le cookie auth_session localement
   app.use(authMiddleware);
 
@@ -77,6 +92,7 @@ async function startServer() {
   app.use('/api/energy', energyRoutes);
   app.use('/api/users', usersRoutes);
   app.use('/api/authproxy', authproxyRoutes);
+  app.use('/api/traffic', trafficRoutes);
 
   // Health check
   app.get('/api/health', (req, res) => {
@@ -98,6 +114,17 @@ async function startServer() {
 
   // Démarrer le scheduler DDNS Cloudflare
   startDdnsScheduler();
+
+  // Démarrer les services de capture de trafic
+  try {
+    await startHttpCapture();
+    await startNetworkCapture();
+    await startDnsCapture();
+    startAggregation();
+    console.log('✓ Traffic analytics services started');
+  } catch (error) {
+    console.error('⚠ Traffic analytics services failed to start:', error.message);
+  }
 }
 
 startServer();

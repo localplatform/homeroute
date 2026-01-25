@@ -10,6 +10,7 @@ import {
   RefreshCw,
   Zap,
   Users,
+  BarChart3,
   LogOut,
   User
 } from 'lucide-react';
@@ -25,6 +26,7 @@ const navItems = [
   { to: '/users', icon: Users, label: 'Utilisateurs' },
   { to: '/updates', icon: RefreshCw, label: 'Mises a jour' },
   { to: '/energy', icon: Zap, label: 'Énergie' },
+  { to: '/traffic', icon: BarChart3, label: 'Trafic' },
 ];
 
 function Sidebar() {

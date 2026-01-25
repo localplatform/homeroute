@@ -10,6 +10,7 @@ import ReverseProxy from './pages/ReverseProxy';
 import Updates from './pages/Updates';
 import Energy from './pages/Energy';
 import Users from './pages/Users';
+import Traffic from './pages/Traffic';
 import Login from './pages/Login';
 import Profile from './pages/Profile';
 
@@ -88,6 +89,7 @@ function AppRoutes() {
               <Route path="/users" element={<Users />} />
               <Route path="/updates" element={<Updates />} />
               <Route path="/energy" element={<Energy />} />
+              <Route path="/traffic" element={<Traffic />} />
             </Routes>
           </Layout>
         </ProtectedRoute>
