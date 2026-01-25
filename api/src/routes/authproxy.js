@@ -1,82 +1,51 @@
 /**
- * Routes d'authentification pour les applications proxifiées
+ * Routes d'authentification pour les applications proxifiees
  *
- * Ces endpoints permettent aux apps proxifiées de vérifier
+ * Ces endpoints permettent aux apps proxifiees de verifier
  * le cookie auth_session et l'appartenance aux groupes
  */
 
 import { Router } from 'express';
-import http from 'http';
+import { validateSession } from '../services/sessions.js';
+import { getUser } from '../services/authUsers.js';
 
 const router = Router();
-const AUTH_SERVICE_URL = process.env.AUTH_SERVICE_URL || 'http://localhost:9100';
 
 /**
- * Vérifie un cookie auth_session auprès de auth-service
+ * Verifie un cookie auth_session localement
  * @param {string} sessionCookie - Valeur du cookie auth_session
- * @returns {Promise<object|null>} - User info ou null si invalide
+ * @returns {object|null} - User info ou null si invalide
  */
-async function verifySession(sessionCookie) {
-  return new Promise((resolve) => {
-    const url = new URL('/api/authz/forward-auth', AUTH_SERVICE_URL);
+function verifySessionLocal(sessionCookie) {
+  const session = validateSession(sessionCookie);
+  if (!session) {
+    return null;
+  }
 
-    const options = {
-      hostname: url.hostname,
-      port: url.port || 9100,
-      path: url.pathname,
-      method: 'GET',
-      headers: {
-        'Cookie': `auth_session=${sessionCookie}`,
-        'X-Forwarded-Host': 'proxy.mynetwk.biz',
-        'X-Forwarded-Proto': 'https'
-      },
-      timeout: 5000
-    };
+  const user = getUser(session.userId);
+  if (!user || user.disabled) {
+    return null;
+  }
 
-    const req = http.request(options, (res) => {
-      let body = '';
-      res.on('data', chunk => body += chunk);
-      res.on('end', () => {
-        if (res.statusCode === 200) {
-          const user = {
-            username: res.headers['remote-user'],
-            email: res.headers['remote-email'] || '',
-            displayName: res.headers['remote-name'] || res.headers['remote-user'],
-            groups: res.headers['remote-groups'] ? res.headers['remote-groups'].split(',').map(g => g.trim()) : []
-          };
-
-          if (user.username) {
-            user.isAdmin = user.groups.includes('admins');
-            user.isPowerUser = user.groups.includes('power_users');
-            resolve(user);
-          } else {
-            resolve(null);
-          }
-        } else {
-          resolve(null);
-        }
-      });
-    });
-
-    req.on('error', () => resolve(null));
-    req.on('timeout', () => {
-      req.destroy();
-      resolve(null);
-    });
-
-    req.end();
-  });
+  return {
+    username: user.username,
+    email: user.email || '',
+    displayName: user.displayname || user.username,
+    groups: user.groups || [],
+    isAdmin: user.groups?.includes('admins') || false,
+    isPowerUser: user.groups?.includes('power_users') || false
+  };
 }
 
 /**
  * POST /api/authproxy/verify
  *
- * Vérifie un cookie auth_session et retourne les infos utilisateur
+ * Verifie un cookie auth_session et retourne les infos utilisateur
  *
  * Body: { cookie: "auth_session_value" }
  * Response: { valid: true, user: {...} } ou { valid: false }
  */
-router.post('/verify', async (req, res) => {
+router.post('/verify', (req, res) => {
   const { cookie } = req.body;
 
   if (!cookie) {
@@ -87,7 +56,7 @@ router.post('/verify', async (req, res) => {
   }
 
   try {
-    const user = await verifySession(cookie);
+    const user = verifySessionLocal(cookie);
 
     if (user) {
       res.json({
@@ -116,12 +85,12 @@ router.post('/verify', async (req, res) => {
 /**
  * POST /api/authproxy/check-group
  *
- * Vérifie si un utilisateur appartient à un ou plusieurs groupes
+ * Verifie si un utilisateur appartient a un ou plusieurs groupes
  *
  * Body: { cookie: "auth_session_value", groups: ["admins", "power_users"] }
  * Response: { valid: true, hasAccess: true, matchedGroups: ["admins"] }
  */
-router.post('/check-group', async (req, res) => {
+router.post('/check-group', (req, res) => {
   const { cookie, groups } = req.body;
 
   if (!cookie) {
@@ -139,7 +108,7 @@ router.post('/check-group', async (req, res) => {
   }
 
   try {
-    const user = await verifySession(cookie);
+    const user = verifySessionLocal(cookie);
 
     if (user) {
       const matchedGroups = groups.filter(g => user.groups.includes(g));

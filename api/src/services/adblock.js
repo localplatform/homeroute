@@ -7,7 +7,7 @@ const execAsync = promisify(exec);
 
 const ADBLOCK_HOSTS = process.env.ADBLOCK_HOSTS || '/var/lib/dnsmasq/adblock-hosts.txt';
 const ADBLOCK_WHITELIST = process.env.ADBLOCK_WHITELIST || '/var/lib/dnsmasq/adblock-whitelist.txt';
-const ADBLOCK_LOG = process.env.ADBLOCK_LOG || '/var/log/adblock-update.log';
+const ADBLOCK_LOG = process.env.ADBLOCK_LOG || '/var/log/homeroute/adblock.log';
 const ADBLOCK_SCRIPT = process.env.ADBLOCK_SCRIPT || '/usr/local/bin/update-adblock-lists.sh';
 
 export async function getStats() {

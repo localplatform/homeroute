@@ -10,7 +10,7 @@ import {
   getGroups,
   bootstrapAdmin,
   getInstallationInstructions
-} from '../services/authelia.js';
+} from '../services/userManagement.js';
 
 const router = Router();
 

@@ -1,0 +1,10 @@
+users:
+  admin:
+    displayname: Administrateur
+    email: admin@localhost
+    password: $argon2id$v=19$m=65536,t=3,p=4$ykVmqeKeYljWDo7ktXulEQ$cfH4zjFQCozsO3Y3/MXtzHi8XPtDHPHfEY/tdihscrw
+    groups:
+      - admins
+    disabled: false
+    created: 2026-01-25T09:30:00.000Z
+    last_login: '2026-01-25T16:19:57.763Z'

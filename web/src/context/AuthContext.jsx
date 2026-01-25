@@ -1,14 +1,13 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { getMe, logout as apiLogout } from '../api/client';
+import { getMe, logout as apiLogout, login as apiLogin } from '../api/client';
 
 const AuthContext = createContext(null);
-
-const AUTH_URL = 'https://auth.mynetwk.biz';
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
 
   const checkAuth = useCallback(async () => {
     try {
@@ -16,19 +15,23 @@ export function AuthProvider({ children }) {
 
       if (res.data.success && res.data.user) {
         setUser(res.data.user);
+        setIsAuthenticated(true);
         setError(null);
       } else {
-        // Pas d'utilisateur connecté - rediriger vers auth-service
-        const currentUrl = window.location.href;
-        window.location.href = `${AUTH_URL}/login?rd=${encodeURIComponent(currentUrl)}`;
-        return; // Ne pas continuer
+        // Session expired or invalid - ensure clean state
+        setUser(null);
+        setIsAuthenticated(false);
+
+        // If session expired, the interceptor already cleared the cookie
+        // but we log it for debugging
+        if (res.data.error === 'Session expiree') {
+          console.log('Session expired, cookie cleared');
+        }
       }
     } catch (err) {
       console.error('Auth check failed:', err);
-      // En cas d'erreur, rediriger vers auth-service
-      const currentUrl = window.location.href;
-      window.location.href = `${AUTH_URL}/login?rd=${encodeURIComponent(currentUrl)}`;
-      return;
+      setUser(null);
+      setIsAuthenticated(false);
     } finally {
       setLoading(false);
     }
@@ -38,48 +41,49 @@ export function AuthProvider({ children }) {
     checkAuth();
   }, [checkAuth]);
 
-  const logout = useCallback(async () => {
+  const login = useCallback(async (username, password, rememberMe = false) => {
     try {
-      const res = await apiLogout();
-      if (res.data.logoutUrl) {
-        window.location.href = res.data.logoutUrl;
+      const res = await apiLogin(username, password, rememberMe);
+
+      if (res.data.success) {
+        setUser(res.data.user);
+        setIsAuthenticated(true);
+        setError(null);
+        return { success: true };
       } else {
-        // Fallback si pas d'URL retournée
-        window.location.href = `${AUTH_URL}/logout`;
+        const errorMsg = res.data.error || 'Identifiants invalides';
+        setError(errorMsg);
+        throw new Error(errorMsg);
       }
     } catch (err) {
-      console.error('Logout failed:', err);
-      // Fallback direct vers auth-service logout
-      window.location.href = `${AUTH_URL}/logout`;
+      const errorMsg = err.response?.data?.error || err.message || 'Erreur de connexion';
+      setError(errorMsg);
+      throw new Error(errorMsg);
     }
   }, []);
 
-  // Pendant le chargement, afficher un spinner simple
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-gray-900 flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto"></div>
-          <p className="mt-4 text-gray-400">Chargement...</p>
-        </div>
-      </div>
-    );
-  }
+  const logout = useCallback(async () => {
+    try {
+      await apiLogout();
+      setUser(null);
+      setIsAuthenticated(false);
+    } catch (err) {
+      console.error('Logout failed:', err);
+    }
+  }, []);
 
-  // Si pas d'utilisateur après le chargement, ne rien afficher (redirection en cours)
-  if (!user) {
-    return (
-      <div className="min-h-screen bg-gray-900 flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto"></div>
-          <p className="mt-4 text-gray-400">Redirection vers l'authentification...</p>
-        </div>
-      </div>
-    );
-  }
+  const value = {
+    user,
+    loading,
+    error,
+    isAuthenticated,
+    login,
+    logout,
+    checkAuth
+  };
 
   return (
-    <AuthContext.Provider value={{ user, loading, error, logout, checkAuth }}>
+    <AuthContext.Provider value={value}>
       {children}
     </AuthContext.Provider>
   );

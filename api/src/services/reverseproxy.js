@@ -545,6 +545,12 @@ export async function addApplication(appConfig) {
         return { success: false, error: `Frontend target is required for environment ${envId}` };
       }
 
+      // Validate frontend port
+      const frontendPort = parseInt(envEndpoints.frontend.targetPort);
+      if (isNaN(frontendPort) || frontendPort < 1 || frontendPort > 65535) {
+        return { success: false, error: `Invalid frontend port for environment ${envId}` };
+      }
+
       // Process APIs (new format: apis[] array)
       let apis = [];
       if (envEndpoints.apis && Array.isArray(envEndpoints.apis)) {
@@ -557,19 +563,30 @@ export async function addApplication(appConfig) {
         }));
       } else if (envEndpoints.api) {
         // Backward compatibility: convert single api to apis[]
+        const apiPort = parseInt(envEndpoints.api.targetPort);
+        if (envEndpoints.api.targetPort && (isNaN(apiPort) || apiPort < 1 || apiPort > 65535)) {
+          return { success: false, error: `Invalid API port for environment ${envId}` };
+        }
         apis = [{
           slug: '',
           targetHost: envEndpoints.api.targetHost || 'localhost',
-          targetPort: parseInt(envEndpoints.api.targetPort) || 3001,
+          targetPort: apiPort || 3001,
           localOnly: !!envEndpoints.api.localOnly,
           requireAuth: !!envEndpoints.api.requireAuth
         }];
       }
 
+      // Validate API ports
+      for (const api of apis) {
+        if (isNaN(api.targetPort) || api.targetPort < 1 || api.targetPort > 65535) {
+          return { success: false, error: `Invalid API port for environment ${envId}` };
+        }
+      }
+
       validEndpoints[envId] = {
         frontend: {
           targetHost: envEndpoints.frontend.targetHost,
-          targetPort: parseInt(envEndpoints.frontend.targetPort),
+          targetPort: frontendPort,
           localOnly: !!envEndpoints.frontend.localOnly,
           requireAuth: !!envEndpoints.frontend.requireAuth
         },
@@ -616,6 +633,24 @@ export async function updateApplication(appId, updates) {
       app.name = updates.name;
     }
 
+    // Update slug if provided
+    if (updates.slug) {
+      const newSlug = updates.slug.toLowerCase();
+
+      // Validate slug format
+      const slugRegex = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+      if (!slugRegex.test(newSlug)) {
+        return { success: false, error: 'Invalid slug format' };
+      }
+
+      // Check for duplicate slug (excluding current app)
+      if (config.applications.some(a => a.id !== appId && a.slug === newSlug)) {
+        return { success: false, error: 'Application with this slug already exists' };
+      }
+
+      app.slug = newSlug;
+    }
+
     // Update enabled if provided
     if (typeof updates.enabled === 'boolean') {
       app.enabled = updates.enabled;
@@ -638,6 +673,14 @@ export async function updateApplication(appId, updates) {
           // Remove environment
           delete app.endpoints[envId];
         } else {
+          // Validate frontend port if frontend is being updated
+          if (envEndpoints.frontend && envEndpoints.frontend.targetPort) {
+            const frontendPort = parseInt(envEndpoints.frontend.targetPort);
+            if (isNaN(frontendPort) || frontendPort < 1 || frontendPort > 65535) {
+              return { success: false, error: `Invalid frontend port for environment ${envId}` };
+            }
+          }
+
           // Process APIs (new format: apis[] array)
           let apis;
           if (envEndpoints.apis !== undefined) {
@@ -655,10 +698,14 @@ export async function updateApplication(appId, updates) {
           } else if (envEndpoints.api !== undefined) {
             // Backward compatibility: convert single api to apis[]
             if (envEndpoints.api) {
+              const apiPort = parseInt(envEndpoints.api.targetPort);
+              if (envEndpoints.api.targetPort && (isNaN(apiPort) || apiPort < 1 || apiPort > 65535)) {
+                return { success: false, error: `Invalid API port for environment ${envId}` };
+              }
               apis = [{
                 slug: '',
                 targetHost: envEndpoints.api.targetHost || 'localhost',
-                targetPort: parseInt(envEndpoints.api.targetPort) || 3001,
+                targetPort: apiPort || 3001,
                 localOnly: !!envEndpoints.api.localOnly,
                 requireAuth: !!envEndpoints.api.requireAuth
               }];
@@ -668,6 +715,13 @@ export async function updateApplication(appId, updates) {
           } else {
             // Keep existing apis
             apis = app.endpoints[envId]?.apis || [];
+          }
+
+          // Validate API ports
+          for (const api of apis) {
+            if (isNaN(api.targetPort) || api.targetPort < 1 || api.targetPort > 65535) {
+              return { success: false, error: `Invalid API port for environment ${envId}` };
+            }
           }
 
           // Update or add environment endpoints
@@ -721,123 +775,6 @@ export async function toggleApplication(appId, enabled) {
 }
 
 // ========== Migration ==========
-
-export async function getMigrationSuggestions() {
-  try {
-    const config = await loadConfig();
-    const suggestions = [];
-    const processed = new Set();
-
-    // Patterns to detect API hosts
-    const apiPatterns = (slug) => [
-      `${slug}api`,
-      `${slug}-api`,
-      `api-${slug}`
-    ];
-
-    // Hosts to exclude from migration (keep standalone)
-    const excludeFromMigration = ['code', 'code-api'];
-
-    for (const host of config.hosts) {
-      if (processed.has(host.id)) continue;
-      if (excludeFromMigration.includes(host.subdomain)) {
-        suggestions.push({ type: 'standalone', host });
-        processed.add(host.id);
-        continue;
-      }
-
-      const slug = host.subdomain;
-      const patterns = apiPatterns(slug);
-
-      // Find matching API host
-      const apiHost = config.hosts.find(h =>
-        !processed.has(h.id) &&
-        patterns.includes(h.subdomain) &&
-        !excludeFromMigration.includes(h.subdomain)
-      );
-
-      if (apiHost) {
-        suggestions.push({
-          type: 'application',
-          name: slug.charAt(0).toUpperCase() + slug.slice(1),
-          slug,
-          frontend: host,
-          api: apiHost
-        });
-        processed.add(host.id);
-        processed.add(apiHost.id);
-      }
-    }
-
-    // Remaining hosts become standalone
-    for (const host of config.hosts) {
-      if (!processed.has(host.id)) {
-        suggestions.push({ type: 'standalone', host });
-        processed.add(host.id);
-      }
-    }
-
-    return { success: true, suggestions };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-}
-
-export async function executeMigration(suggestions) {
-  try {
-    const config = await loadConfig();
-    const migratedApps = [];
-    const standaloneHosts = [];
-    const hostsToRemove = new Set();
-
-    for (const suggestion of suggestions) {
-      if (suggestion.type === 'application') {
-        const newApp = {
-          id: crypto.randomUUID(),
-          name: suggestion.name,
-          slug: suggestion.slug,
-          frontend: {
-            targetHost: suggestion.frontend.targetHost,
-            targetPort: suggestion.frontend.targetPort,
-            localOnly: !!suggestion.frontend.localOnly,
-            requireAuth: !!suggestion.frontend.requireAuth
-          },
-          api: {
-            targetHost: suggestion.api.targetHost,
-            targetPort: suggestion.api.targetPort,
-            localOnly: !!suggestion.api.localOnly,
-            requireAuth: !!suggestion.api.requireAuth
-          },
-          environments: ['prod'],
-          enabled: suggestion.frontend.enabled && suggestion.api.enabled,
-          createdAt: new Date().toISOString()
-        };
-
-        migratedApps.push(newApp);
-        hostsToRemove.add(suggestion.frontend.id);
-        hostsToRemove.add(suggestion.api.id);
-      } else {
-        standaloneHosts.push(suggestion.host);
-      }
-    }
-
-    // Update config
-    config.applications = [...config.applications, ...migratedApps];
-    config.hosts = config.hosts.filter(h => !hostsToRemove.has(h.id));
-
-    await saveConfigFile(config);
-    await applyCaddyConfig();
-
-    return {
-      success: true,
-      migratedApps: migratedApps.length,
-      standaloneHosts: standaloneHosts.length,
-      message: `Migration completed: ${migratedApps.length} applications created, ${standaloneHosts.length} standalone hosts kept`
-    };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-}
 
 // ========== Cloudflare Configuration ==========
 
@@ -901,7 +838,7 @@ function getAppDomain(app, endpointType, env, baseDomain, apiSlug = '') {
 
   if (endpointType === 'api') {
     // API domain format: {app}-{slug}.{apiPrefix}.{baseDomain} or {app}.{apiPrefix}.{baseDomain}
-    // e.g., www.api.dev.mynetwk.biz (default) or www-cdn.api.dev.mynetwk.biz
+    // e.g., www.api.dev.example.com (default) or www-cdn.api.dev.example.com
     const hostPart = apiSlug ? `${app.slug}-${apiSlug}` : app.slug;
     return `${hostPart}.${env.apiPrefix}.${baseDomain}`;
   } else {
@@ -915,7 +852,8 @@ function getAppDomain(app, endpointType, env, baseDomain, apiSlug = '') {
 
 // Generate routes for an application across all its environments
 function generateAppRoutes(app, environments, baseDomain) {
-  const authServiceUrl = process.env.AUTH_SERVICE_URL || 'http://localhost:9100';
+  const { DASHBOARD_PORT } = getEnv();
+  const authServiceUrl = `http://localhost:${DASHBOARD_PORT}`;
   const routes = [];
 
   // New structure: app.endpoints is an object { envId: { frontend, apis: [] } }
@@ -1060,7 +998,8 @@ function generateEndpointRoute(id, domain, endpoint, baseDomain, authServiceUrl)
 
 function generateCaddyRoute(host, baseDomain) {
   const domain = host.customDomain || `${host.subdomain}.${baseDomain}`;
-  const authServiceUrl = process.env.AUTH_SERVICE_URL || 'http://localhost:9100';
+  const { DASHBOARD_PORT } = getEnv();
+  const authServiceUrl = `http://localhost:${DASHBOARD_PORT}`;
 
   // Proxy direct vers la cible
   const reverseProxyHandler = {
@@ -1183,7 +1122,7 @@ function generateCaddyRoute(host, baseDomain) {
 
 function generateCaddyConfig(config) {
   const { DASHBOARD_PORT } = getEnv();
-  const authServiceUrl = process.env.AUTH_SERVICE_URL || 'http://localhost:9100';
+  const authServiceUrl = `http://localhost:${DASHBOARD_PORT}`;
 
   const routes = [];
 

@@ -2,9 +2,9 @@
 
 ## Gestion du serveur
 
-- **NE PAS utiliser PM2** - L'utilisateur gère le serveur lui-même
-- Ne pas essayer de démarrer/redémarrer l'API automatiquement
-- Le build frontend (`npm run build`) peut être lancé, mais pas le démarrage des services
+- L'API backend est gérée avec PM2
+- Le redémarrage de l'API via PM2 est autorisé après modifications du code backend
+- Le build frontend (`npm run build`) peut être lancé
 
 ## Architecture
 

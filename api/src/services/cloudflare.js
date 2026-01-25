@@ -28,7 +28,7 @@ function getConfig() {
     apiToken: process.env.CF_API_TOKEN,
     zoneId: process.env.CF_ZONE_ID,
     recordName: process.env.CF_RECORD_NAME,
-    interface: process.env.CF_INTERFACE || 'enp5s0',
+    interface: process.env.CF_INTERFACE || 'eno1',
     cronExpression: process.env.DDNS_CRON || '*/2 * * * *'
   };
 }
@@ -58,7 +58,7 @@ async function log(message, level = 'INFO') {
 async function getCurrentIPv6(interfaceName) {
   try {
     const { stdout } = await execAsync(
-      `ip -6 addr show ${interfaceName} scope global | grep -oP '2a0d:[0-9a-f:]+(?=/)' | head -1`
+      `ip -6 addr show ${interfaceName} scope global | grep -oP '(?<=inet6 )[0-9a-f:]+(?=/)' | grep -v '^f[cd]' | head -1`
     );
     return stdout.trim() || null;
   } catch {

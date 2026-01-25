@@ -112,3 +112,94 @@ export async function getPortForwards() {
     return { success: false, error: error.message };
   }
 }
+
+export async function getFirewallStatus() {
+  try {
+    // Detect firewall framework
+    let framework = 'iptables';
+    try {
+      await execAsync('nft list tables 2>/dev/null');
+      framework = 'nftables';
+    } catch {
+      // nftables not available, use iptables
+    }
+
+    // Check if firewall is active by listing rules
+    const { stdout } = await execAsync('iptables -L -n 2>/dev/null | head -5');
+    const active = stdout.includes('Chain');
+
+    return {
+      success: true,
+      status: {
+        active,
+        framework,
+        timestamp: new Date().toISOString()
+      }
+    };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function getRoutingRules() {
+  try {
+    const { stdout } = await execAsync('ip -j rule show 2>/dev/null');
+    const rules = JSON.parse(stdout);
+
+    // Format rules for display
+    const formatted = rules.map(rule => ({
+      priority: rule.priority,
+      src: rule.src || 'all',
+      dst: rule.dst || 'all',
+      table: rule.table || 'main',
+      fwmark: rule.fwmark || null,
+      action: rule.action || 'lookup'
+    }));
+
+    return { success: true, rules: formatted };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function getChainStats() {
+  try {
+    const { stdout } = await execAsync('iptables -L -n -v -x 2>/dev/null');
+    const stats = {};
+    let currentChain = null;
+    let totalPackets = 0;
+    let totalBytes = 0;
+
+    const lines = stdout.split('\n');
+    for (const line of lines) {
+      // Parse chain header with packet/byte counts
+      const chainMatch = line.match(/^Chain (\S+) \(policy (\S+) (\d+) packets, (\d+) bytes\)/);
+      if (chainMatch) {
+        currentChain = chainMatch[1];
+        const packets = parseInt(chainMatch[3]);
+        const bytes = parseInt(chainMatch[4]);
+        stats[currentChain] = { policy: chainMatch[2], packets, bytes };
+        totalPackets += packets;
+        totalBytes += bytes;
+        continue;
+      }
+
+      // Also handle chains without policy stats (user-defined)
+      const userChainMatch = line.match(/^Chain (\S+) \((\d+) references\)/);
+      if (userChainMatch) {
+        currentChain = userChainMatch[1];
+        stats[currentChain] = { references: parseInt(userChainMatch[2]), packets: 0, bytes: 0 };
+      }
+    }
+
+    return {
+      success: true,
+      stats: {
+        chains: stats,
+        total: { packets: totalPackets, bytes: totalBytes }
+      }
+    };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}

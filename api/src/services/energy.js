@@ -18,9 +18,27 @@ const AUTOSELECT_CONFIG_FILE = path.join(CONFIG_DIR, 'energy-autoselect.json');
 
 // Unified energy modes
 export const ENERGY_MODES = {
-  economy: { governor: 'powersave', label: 'Économie', icon: 'Moon' },
-  auto: { governor: 'schedutil', label: 'Auto', icon: 'Zap' },
-  performance: { governor: 'performance', label: 'Performance', icon: 'Rocket' }
+  economy: {
+    governor: 'powersave',
+    epp: 'power',
+    maxFreqPercent: 60,
+    label: 'Économie',
+    icon: 'Moon'
+  },
+  auto: {
+    governor: 'powersave',
+    epp: 'balance_power',
+    maxFreqPercent: 85,
+    label: 'Auto',
+    icon: 'Zap'
+  },
+  performance: {
+    governor: 'performance',
+    epp: 'performance',
+    maxFreqPercent: 100,
+    label: 'Performance',
+    icon: 'Rocket'
+  }
 };
 
 // CPU sysfs paths
@@ -28,7 +46,8 @@ const CPU_FREQ_PATH = '/sys/devices/system/cpu/cpu0/cpufreq';
 const HWMON_PATH = '/sys/class/hwmon';
 
 // Cache for hwmon paths (they can change between boots)
-let k10tempHwmonPath = null;
+let cpuSensorPath = null;
+let cpuSensorName = null;
 
 // Previous CPU stats for usage calculation
 let prevCpuStats = null;
@@ -58,12 +77,48 @@ async function findHwmonByName(name) {
   return null;
 }
 
-// Get k10temp hwmon path (cached)
-async function getK10tempPath() {
-  if (!k10tempHwmonPath) {
-    k10tempHwmonPath = await findHwmonByName('k10temp');
+// Find first valid CPU temperature sensor (supports AMD and Intel)
+async function findFirstValidCpuSensor() {
+  // Try cached path first
+  if (cpuSensorPath && cpuSensorName) {
+    return { path: cpuSensorPath, name: cpuSensorName };
   }
-  return k10tempHwmonPath;
+
+  // List of CPU temperature sensors to try (in order of preference)
+  const sensorNames = ['k10temp', 'coretemp', 'zenpower'];
+
+  for (const name of sensorNames) {
+    const hwmonPath = await findHwmonByName(name);
+    if (hwmonPath) {
+      // Verify temp1_input exists and is readable
+      const tempPath = path.join(hwmonPath, 'temp1_input');
+      const temp = await readSysfs(tempPath);
+      if (temp !== null) {
+        // Cache the result
+        cpuSensorPath = hwmonPath;
+        cpuSensorName = name;
+        console.log(`CPU temperature sensor detected: ${name} at ${hwmonPath}`);
+        return { path: hwmonPath, name };
+      }
+    }
+  }
+
+  // No sensor found - log available hwmon devices for debugging
+  console.error('No CPU temperature sensor found. Available hwmon devices:');
+  try {
+    const hwmons = await readdir(HWMON_PATH);
+    for (const hwmon of hwmons) {
+      const namePath = path.join(HWMON_PATH, hwmon, 'name');
+      if (existsSync(namePath)) {
+        const hwmonName = (await readFile(namePath, 'utf-8')).trim();
+        console.error(`  - ${hwmon}: ${hwmonName}`);
+      }
+    }
+  } catch (error) {
+    console.error('  Error reading hwmon devices:', error.message);
+  }
+
+  return null;
 }
 
 // Read a sysfs file safely
@@ -90,19 +145,22 @@ async function writeSysfs(filePath, value) {
 
 export async function getCpuTemperature() {
   try {
-    const k10tempPath = await getK10tempPath();
-    if (!k10tempPath) {
-      return { success: false, error: 'k10temp not found' };
+    const sensor = await findFirstValidCpuSensor();
+    if (!sensor) {
+      return { success: false, error: 'No CPU temperature sensor found (tried: k10temp, coretemp, zenpower)' };
     }
 
-    const tempRaw = await readSysfs(path.join(k10tempPath, 'temp1_input'));
+    const tempPath = path.join(sensor.path, 'temp1_input');
+    const tempRaw = await readSysfs(tempPath);
     if (!tempRaw) {
-      return { success: false, error: 'Cannot read temperature' };
+      console.error(`Failed to read temperature from ${tempPath}`);
+      return { success: false, error: `Cannot read temperature from ${sensor.name}` };
     }
 
     const tempC = parseInt(tempRaw) / 1000;
-    return { success: true, temperature: tempC };
+    return { success: true, temperature: tempC, sensor: sensor.name };
   } catch (error) {
+    console.error('Error reading CPU temperature:', error);
     return { success: false, error: error.message };
   }
 }
@@ -155,18 +213,40 @@ export async function getCpuUsage() {
   }
 }
 
+export async function getCpuModel() {
+  try {
+    const cpuinfo = await readFile('/proc/cpuinfo', 'utf-8');
+    const match = cpuinfo.match(/model name\s*:\s*(.+)/);
+    if (match) {
+      // Clean up CPU model name (remove trademark symbols and extra spaces)
+      const model = match[1]
+        .trim()
+        .replace(/\(R\)/g, '')
+        .replace(/\(TM\)/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      return { success: true, model };
+    }
+    return { success: false, error: 'CPU model not found in /proc/cpuinfo' };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
 export async function getCpuInfo() {
-  const [tempResult, freqResult, usageResult] = await Promise.all([
+  const [tempResult, freqResult, usageResult, modelResult] = await Promise.all([
     getCpuTemperature(),
     getCpuFrequency(),
-    getCpuUsage()
+    getCpuUsage(),
+    getCpuModel()
   ]);
 
   return {
     success: true,
     temperature: tempResult.success ? tempResult.temperature : null,
     frequency: freqResult.success ? freqResult : null,
-    usage: usageResult.success ? usageResult.usage : null
+    usage: usageResult.success ? usageResult.usage : null,
+    model: modelResult.success ? modelResult.model : 'CPU'
   };
 }
 
@@ -207,6 +287,87 @@ export async function setGovernor(governor) {
     }
 
     return { success: true, message: `Governor set to ${governor}` };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// ============ EPP (Energy Performance Preference) Functions ============
+
+// Get hardware max frequency
+async function getHwMaxFreq() {
+  try {
+    const freq = await readSysfs('/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq');
+    return freq ? parseInt(freq) : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+// Check if EPP is available (Intel P-State)
+async function isEppAvailable() {
+  return existsSync('/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference');
+}
+
+// Set Energy Performance Preference
+async function setEpp(preference) {
+  if (!await isEppAvailable()) {
+    return { success: false, error: 'EPP not supported on this CPU' };
+  }
+
+  try {
+    const { stdout } = await execAsync('ls /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference');
+    const files = stdout.trim().split('\n');
+
+    for (const file of files) {
+      await writeSysfs(file, preference);
+    }
+
+    return { success: true, message: `EPP set to ${preference}` };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// Set CPU frequency limits
+async function setFrequencyLimits(maxFreqPercent) {
+  try {
+    const hwMaxFreq = await getHwMaxFreq();
+    if (!hwMaxFreq) {
+      return { success: false, error: 'Cannot determine hardware max frequency' };
+    }
+
+    const targetMaxFreq = Math.round(hwMaxFreq * (maxFreqPercent / 100));
+
+    const { stdout } = await execAsync('ls /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq');
+    const files = stdout.trim().split('\n');
+
+    for (const file of files) {
+      await writeSysfs(file, targetMaxFreq.toString());
+    }
+
+    return { success: true, message: `Max frequency set to ${maxFreqPercent}% (${targetMaxFreq} kHz)` };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// Reset frequency limits to hardware defaults
+async function resetFrequencyLimits() {
+  try {
+    const hwMaxFreq = await getHwMaxFreq();
+    if (!hwMaxFreq) {
+      return { success: false, error: 'Cannot determine hardware max frequency' };
+    }
+
+    const { stdout } = await execAsync('ls /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq');
+    const files = stdout.trim().split('\n');
+
+    for (const file of files) {
+      await writeSysfs(file, hwMaxFreq.toString());
+    }
+
+    return { success: true };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -356,6 +517,22 @@ export async function applyMode(mode) {
     // Apply governor
     await setGovernor(modeConfig.governor);
 
+    // Apply EPP if available
+    if (modeConfig.epp && await isEppAvailable()) {
+      const eppResult = await setEpp(modeConfig.epp);
+      if (!eppResult.success) {
+        console.warn('EPP not applied:', eppResult.error);
+      }
+    }
+
+    // Apply frequency limits
+    if (modeConfig.maxFreqPercent) {
+      const freqResult = await setFrequencyLimits(modeConfig.maxFreqPercent);
+      if (!freqResult.success) {
+        console.warn('Frequency limits not applied:', freqResult.error);
+      }
+    }
+
     // Emit event for real-time updates
     energyEvents.emit('modeChange', { mode, config: modeConfig });
 
@@ -371,8 +548,8 @@ const DEFAULT_AUTOSELECT = {
   enabled: false,
   networkInterface: null,  // Auto-detected via IP 10.0.0.10
   thresholds: {
-    low: 1000,    // Below this -> economy (req/s)
-    high: 10000   // Above this -> performance (req/s)
+    low: 500,     // Below this -> economy (req/s)
+    high: 15000   // Above this -> performance (req/s)
   },
   averagingTime: 3,      // Averaging window in seconds (replaces hysteresis)
   sampleInterval: 500    // Sampling interval (ms) - 500ms for smooth updates

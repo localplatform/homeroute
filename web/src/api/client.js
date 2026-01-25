@@ -6,6 +6,28 @@ const api = axios.create({
   withCredentials: true  // Enable cookies for session-based auth
 });
 
+// Interceptor to handle session expiration
+api.interceptors.response.use(
+  (response) => {
+    // Check if response indicates session expired
+    if (response.data && response.data.success === false && response.data.error === 'Session expiree') {
+      // Force cookie deletion by setting it to expire immediately
+      document.cookie = 'auth_session=; path=/; expires=Thu, 01 Jan 1970 00:00:00 UTC; domain=' + window.location.hostname;
+      document.cookie = 'auth_session=; path=/; expires=Thu, 01 Jan 1970 00:00:00 UTC';
+    }
+    return response;
+  },
+  (error) => {
+    // Handle 401 errors
+    if (error.response && error.response.status === 401) {
+      // Force cookie deletion
+      document.cookie = 'auth_session=; path=/; expires=Thu, 01 Jan 1970 00:00:00 UTC; domain=' + window.location.hostname;
+      document.cookie = 'auth_session=; path=/; expires=Thu, 01 Jan 1970 00:00:00 UTC';
+    }
+    return Promise.reject(error);
+  }
+);
+
 // DNS/DHCP
 export const getDnsConfig = () => api.get('/dns');
 export const getDhcpLeases = () => api.get('/dns/leases');
@@ -20,6 +42,9 @@ export const getNatRules = () => api.get('/nat/rules');
 export const getFilterRules = () => api.get('/nat/filter');
 export const getMasqueradeRules = () => api.get('/nat/masquerade');
 export const getPortForwards = () => api.get('/nat/forwards');
+export const getFirewallStatus = () => api.get('/nat/status');
+export const getRoutingRules = () => api.get('/nat/routing-rules');
+export const getChainStats = () => api.get('/nat/stats');
 
 // AdBlock
 export const getAdblockStats = () => api.get('/adblock/stats');
@@ -56,16 +81,12 @@ export const updateReverseProxyApplication = (id, updates) => api.put(`/reversep
 export const deleteReverseProxyApplication = (id) => api.delete(`/reverseproxy/applications/${id}`);
 export const toggleReverseProxyApplication = (id, enabled) => api.post(`/reverseproxy/applications/${id}/toggle`, { enabled });
 
-// Reverse Proxy - Migration
-export const getMigrationSuggestions = () => api.get('/reverseproxy/migration/suggestions');
-export const executeMigration = (suggestions) => api.post('/reverseproxy/migrate', { suggestions });
-
 // Reverse Proxy - Cloudflare
 export const getCloudflareConfig = () => api.get('/reverseproxy/cloudflare');
 export const updateCloudflareConfig = (config) => api.put('/reverseproxy/cloudflare', config);
 
 // Auth - Session (login page)
-export const login = (username, password) => api.post('/auth/login', { username, password });
+export const login = (username, password, remember_me = false) => api.post('/auth/login', { username, password, remember_me });
 export const logout = () => api.post('/auth/logout');
 export const checkAuth = () => api.get('/auth/check');
 export const getMe = () => api.get('/auth/me');

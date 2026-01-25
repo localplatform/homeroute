@@ -21,8 +21,7 @@ import {
   ChevronDown,
   ChevronUp,
   Layers,
-  Cloud,
-  ArrowRightLeft
+  Cloud
 } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
@@ -45,8 +44,6 @@ import {
   updateReverseProxyApplication,
   deleteReverseProxyApplication,
   toggleReverseProxyApplication,
-  getMigrationSuggestions,
-  executeMigration,
   getCloudflareConfig,
   updateCloudflareConfig
 } from '../api/client';
@@ -67,10 +64,6 @@ function ReverseProxy() {
   // Certificate statuses
   const [certStatuses, setCertStatuses] = useState({});
 
-  // Migration state
-  const [migrationSuggestions, setMigrationSuggestions] = useState(null);
-  const [showMigrationBanner, setShowMigrationBanner] = useState(false);
-
   // Modal states
   const [showAddModal, setShowAddModal] = useState(false);
   const [showAddAppModal, setShowAddAppModal] = useState(false);
@@ -78,7 +71,6 @@ function ReverseProxy() {
   const [showEditModal, setShowEditModal] = useState(false);
   const [showEditAppModal, setShowEditAppModal] = useState(false);
   const [showDomainRequiredModal, setShowDomainRequiredModal] = useState(false);
-  const [showMigrationModal, setShowMigrationModal] = useState(false);
   const [editingHost, setEditingHost] = useState(null);
   const [editingApp, setEditingApp] = useState(null);
 
@@ -105,7 +97,6 @@ function ReverseProxy() {
   const [saving, setSaving] = useState(false);
   const [renewing, setRenewing] = useState(false);
   const [reloading, setReloading] = useState(false);
-  const [migrating, setMigrating] = useState(false);
 
   // Integration section state
   const [showIntegration, setShowIntegration] = useState(false);
@@ -113,19 +104,19 @@ function ReverseProxy() {
 
   const authInstructions = `# Authentification
 
-Le cookie \`auth_session\` est partage sur \`*.mynetwk.biz\`.
+Le cookie \`auth_session\` est partage sur votre domaine de base.
 
 ## Connexion / Deconnexion
 
 Pour connecter un utilisateur, redirige vers :
-\`https://auth.mynetwk.biz/login?rd=URL_RETOUR\`
+\`https://proxy.<votre-domaine>/login?rd=URL_RETOUR\`
 
 Pour deconnecter un utilisateur, redirige vers :
-\`https://auth.mynetwk.biz/logout?rd=URL_RETOUR\`
+\`https://proxy.<votre-domaine>/logout?rd=URL_RETOUR\`
 
 ## Verifier l'utilisateur connecte
 
-### GET https://auth.mynetwk.biz/api/auth/me
+### GET /api/auth/me
 
 **Entree :** Cookie \`auth_session\` (envoye automatiquement)
 
@@ -140,7 +131,7 @@ Pour deconnecter un utilisateur, redirige vers :
 
 ---
 
-### GET https://auth.mynetwk.biz/api/auth/check
+### GET /api/auth/check
 
 Verification rapide (sans les details utilisateur).
 
@@ -191,10 +182,6 @@ Verification rapide (sans les details utilisateur).
       if (statusRes.data.success) setStatus(statusRes.data);
       if (hostsRes.data.success) {
         setHosts(hostsRes.data.hosts || []);
-        // Show migration banner if there are hosts that could be migrated
-        if ((hostsRes.data.hosts || []).length > 0 && (appsRes.data.applications || []).length === 0) {
-          setShowMigrationBanner(true);
-        }
       }
       if (certsRes.data.success) setCertStatuses(certsRes.data.certificates || {});
       if (envsRes.data.success) setEnvironments(envsRes.data.environments || []);
@@ -327,6 +314,22 @@ Verification rapide (sans les details utilisateur).
         setMessage({ type: 'error', text: `Cible frontend requise pour ${envId}` });
         return;
       }
+
+      // Validate frontend port
+      const frontendPort = parseInt(envData.frontend.targetPort);
+      if (isNaN(frontendPort) || frontendPort < 1 || frontendPort > 65535) {
+        setMessage({ type: 'error', text: `Port frontend invalide pour ${envId} (1-65535)` });
+        return;
+      }
+
+      // Validate API port if API is enabled
+      if (envData.hasApi && envData.api?.targetPort) {
+        const apiPort = parseInt(envData.api.targetPort);
+        if (isNaN(apiPort) || apiPort < 1 || apiPort > 65535) {
+          setMessage({ type: 'error', text: `Port API invalide pour ${envId} (1-65535)` });
+          return;
+        }
+      }
     }
 
     setSaving(true);
@@ -444,12 +447,24 @@ Verification rapide (sans les details utilisateur).
     }
     setEditAppForm({
       name: app.name,
+      slug: app.slug,
       endpoints: formEndpoints
     });
     setShowEditAppModal(true);
   }
 
   async function handleEditApp() {
+    // Validate slug
+    if (!editAppForm.slug) {
+      setMessage({ type: 'error', text: 'Slug requis' });
+      return;
+    }
+    const slugRegex = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+    if (!slugRegex.test(editAppForm.slug)) {
+      setMessage({ type: 'error', text: 'Slug invalide (lettres minuscules, chiffres et tirets uniquement)' });
+      return;
+    }
+
     // Validate at least one environment is enabled with frontend
     const enabledEnvs = Object.entries(editAppForm.endpoints).filter(([, e]) => e.enabled);
     if (enabledEnvs.length === 0) {
@@ -460,6 +475,26 @@ Verification rapide (sans les details utilisateur).
       if (!envData.frontend.targetHost || !envData.frontend.targetPort) {
         setMessage({ type: 'error', text: `Cible frontend requise pour ${envId}` });
         return;
+      }
+
+      // Validate frontend port
+      const frontendPort = parseInt(envData.frontend.targetPort);
+      if (isNaN(frontendPort) || frontendPort < 1 || frontendPort > 65535) {
+        setMessage({ type: 'error', text: `Port frontend invalide pour ${envId} (1-65535)` });
+        return;
+      }
+
+      // Validate API ports
+      if (envData.apis && Array.isArray(envData.apis)) {
+        for (const api of envData.apis) {
+          if (api.targetPort) {
+            const apiPort = parseInt(api.targetPort);
+            if (isNaN(apiPort) || apiPort < 1 || apiPort > 65535) {
+              setMessage({ type: 'error', text: `Port API invalide pour ${envId} (1-65535)` });
+              return;
+            }
+          }
+        }
       }
     }
 
@@ -496,6 +531,7 @@ Verification rapide (sans les details utilisateur).
 
       const payload = {
         name: editAppForm.name,
+        slug: editAppForm.slug,
         endpoints
       };
 
@@ -512,40 +548,6 @@ Verification rapide (sans les details utilisateur).
       setMessage({ type: 'error', text: error.response?.data?.error || 'Erreur' });
     } finally {
       setSaving(false);
-    }
-  }
-
-  // ========== Migration handlers ==========
-  async function loadMigrationSuggestions() {
-    try {
-      const res = await getMigrationSuggestions();
-      if (res.data.success) {
-        setMigrationSuggestions(res.data.suggestions);
-        setShowMigrationModal(true);
-      }
-    } catch (error) {
-      setMessage({ type: 'error', text: 'Erreur chargement suggestions' });
-    }
-  }
-
-  async function handleMigration() {
-    if (!migrationSuggestions) return;
-    setMigrating(true);
-    try {
-      const res = await executeMigration(migrationSuggestions);
-      if (res.data.success) {
-        setMessage({ type: 'success', text: res.data.message });
-        setShowMigrationModal(false);
-        setShowMigrationBanner(false);
-        setMigrationSuggestions(null);
-        fetchData();
-      } else {
-        setMessage({ type: 'error', text: res.data.error });
-      }
-    } catch (error) {
-      setMessage({ type: 'error', text: 'Erreur migration' });
-    } finally {
-      setMigrating(false);
     }
   }
 
@@ -677,22 +679,6 @@ Verification rapide (sans les details utilisateur).
         </div>
       )}
 
-      {/* Migration Banner */}
-      {showMigrationBanner && hosts.length > 0 && applications.length === 0 && (
-        <div className="bg-blue-900/30 border border-blue-700 rounded-lg p-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <ArrowRightLeft className="w-5 h-5 text-blue-400" />
-            <div>
-              <p className="font-medium text-blue-300">Migration disponible</p>
-              <p className="text-sm text-blue-400/70">Groupez vos hosts existants en applications (frontend + API)</p>
-            </div>
-          </div>
-          <Button onClick={loadMigrationSuggestions} variant="secondary">
-            Voir les suggestions
-          </Button>
-        </div>
-      )}
-
       {/* Status Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <Card title="Caddy" icon={Server}>
@@ -759,11 +745,6 @@ Verification rapide (sans les details utilisateur).
                 <Layers className="w-12 h-12 mx-auto mb-2 opacity-50" />
                 <p>Aucune application configuree</p>
                 <p className="text-xs mt-2">Les applications groupent un frontend et son API</p>
-                {hosts.length > 0 && (
-                  <Button onClick={loadMigrationSuggestions} variant="secondary" className="mt-4">
-                    Migrer depuis les hosts existants
-                  </Button>
-                )}
               </div>
             </Card>
           ) : (
@@ -1079,22 +1060,58 @@ Verification rapide (sans les details utilisateur).
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm text-gray-400 mb-1">Nom</label>
-                  <input type="text" placeholder="Mon App" value={newApp.name} onChange={e => setNewApp({ ...newApp, name: e.target.value, slug: newApp.slug || e.target.value.toLowerCase().replace(/[^a-z0-9]/g, '') })} className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm" />
+                  <input
+                    type="text"
+                    placeholder="Mon App"
+                    value={newApp.name}
+                    onChange={e => {
+                      const name = e.target.value;
+                      const autoSlug = newApp.slug || name
+                        .toLowerCase()
+                        .replace(/[\s_]+/g, '-')
+                        .replace(/[^a-z0-9-]/g, '')
+                        .replace(/-+/g, '-')
+                        .replace(/^-|-$/g, '');
+                      setNewApp({ ...newApp, name, slug: autoSlug });
+                    }}
+                    className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm"
+                  />
                 </div>
                 <div>
                   <label className="block text-sm text-gray-400 mb-1">Slug</label>
-                  <input type="text" placeholder="monapp" value={newApp.slug} onChange={e => setNewApp({ ...newApp, slug: e.target.value.toLowerCase() })} className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm font-mono" />
+                  <input
+                    type="text"
+                    placeholder="mon-app"
+                    value={newApp.slug}
+                    onChange={e => setNewApp({ ...newApp, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })}
+                    className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm font-mono"
+                  />
                 </div>
               </div>
 
               {/* Endpoints par environnement */}
               {environments.map(env => {
                 // Initialize env endpoint if not exists
-                const envData = newApp.endpoints[env.id] || {
+                const defaultEnvData = {
                   enabled: false,
                   frontend: { targetHost: 'localhost', targetPort: '', localOnly: false, requireAuth: false },
                   hasApi: false,
                   api: { targetHost: 'localhost', targetPort: '', localOnly: false, requireAuth: false }
+                };
+                const envData = newApp.endpoints[env.id] || defaultEnvData;
+
+                // Helper to update env endpoint with functional setState (avoids stale closure)
+                const updateEnv = (updater) => {
+                  setNewApp(prev => {
+                    const currentEnvData = prev.endpoints[env.id] || defaultEnvData;
+                    return {
+                      ...prev,
+                      endpoints: {
+                        ...prev.endpoints,
+                        [env.id]: updater(currentEnvData)
+                      }
+                    };
+                  });
                 };
 
                 return (
@@ -1104,13 +1121,7 @@ Verification rapide (sans les details utilisateur).
                         <input
                           type="checkbox"
                           checked={envData.enabled}
-                          onChange={e => setNewApp({
-                            ...newApp,
-                            endpoints: {
-                              ...newApp.endpoints,
-                              [env.id]: { ...envData, enabled: e.target.checked }
-                            }
-                          })}
+                          onChange={e => updateEnv(data => ({ ...data, enabled: e.target.checked }))}
                           className="rounded"
                         />
                         <Layers className="w-4 h-4" />
@@ -1132,13 +1143,7 @@ Verification rapide (sans les details utilisateur).
                               <input
                                 type="text"
                                 value={envData.frontend.targetHost}
-                                onChange={e => setNewApp({
-                                  ...newApp,
-                                  endpoints: {
-                                    ...newApp.endpoints,
-                                    [env.id]: { ...envData, frontend: { ...envData.frontend, targetHost: e.target.value } }
-                                  }
-                                })}
+                                onChange={e => updateEnv(data => ({ ...data, frontend: { ...data.frontend, targetHost: e.target.value } }))}
                                 className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-sm"
                               />
                             </div>
@@ -1148,13 +1153,7 @@ Verification rapide (sans les details utilisateur).
                                 type="number"
                                 placeholder="3000"
                                 value={envData.frontend.targetPort}
-                                onChange={e => setNewApp({
-                                  ...newApp,
-                                  endpoints: {
-                                    ...newApp.endpoints,
-                                    [env.id]: { ...envData, frontend: { ...envData.frontend, targetPort: e.target.value } }
-                                  }
-                                })}
+                                onChange={e => updateEnv(data => ({ ...data, frontend: { ...data.frontend, targetPort: e.target.value } }))}
                                 className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-sm"
                               />
                             </div>
@@ -1164,13 +1163,7 @@ Verification rapide (sans les details utilisateur).
                               <input
                                 type="checkbox"
                                 checked={envData.frontend.requireAuth}
-                                onChange={e => setNewApp({
-                                  ...newApp,
-                                  endpoints: {
-                                    ...newApp.endpoints,
-                                    [env.id]: { ...envData, frontend: { ...envData.frontend, requireAuth: e.target.checked } }
-                                  }
-                                })}
+                                onChange={e => updateEnv(data => ({ ...data, frontend: { ...data.frontend, requireAuth: e.target.checked } }))}
                                 className="rounded"
                               />
                               <Key className="w-3 h-3 text-purple-400" /> Auth
@@ -1179,13 +1172,7 @@ Verification rapide (sans les details utilisateur).
                               <input
                                 type="checkbox"
                                 checked={envData.frontend.localOnly}
-                                onChange={e => setNewApp({
-                                  ...newApp,
-                                  endpoints: {
-                                    ...newApp.endpoints,
-                                    [env.id]: { ...envData, frontend: { ...envData.frontend, localOnly: e.target.checked } }
-                                  }
-                                })}
+                                onChange={e => updateEnv(data => ({ ...data, frontend: { ...data.frontend, localOnly: e.target.checked } }))}
                                 className="rounded"
                               />
                               <Shield className="w-3 h-3 text-yellow-400" /> Local
@@ -1199,13 +1186,7 @@ Verification rapide (sans les details utilisateur).
                             <input
                               type="checkbox"
                               checked={envData.hasApi}
-                              onChange={e => setNewApp({
-                                ...newApp,
-                                endpoints: {
-                                  ...newApp.endpoints,
-                                  [env.id]: { ...envData, hasApi: e.target.checked }
-                                }
-                              })}
+                              onChange={e => updateEnv(data => ({ ...data, hasApi: e.target.checked }))}
                               className="rounded"
                             />
                             <Server className="w-4 h-4" />
@@ -1223,13 +1204,7 @@ Verification rapide (sans les details utilisateur).
                                   <input
                                     type="text"
                                     value={envData.api.targetHost}
-                                    onChange={e => setNewApp({
-                                      ...newApp,
-                                      endpoints: {
-                                        ...newApp.endpoints,
-                                        [env.id]: { ...envData, api: { ...envData.api, targetHost: e.target.value } }
-                                      }
-                                    })}
+                                    onChange={e => updateEnv(data => ({ ...data, api: { ...data.api, targetHost: e.target.value } }))}
                                     className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-sm"
                                   />
                                 </div>
@@ -1239,13 +1214,7 @@ Verification rapide (sans les details utilisateur).
                                     type="number"
                                     placeholder="3001"
                                     value={envData.api.targetPort}
-                                    onChange={e => setNewApp({
-                                      ...newApp,
-                                      endpoints: {
-                                        ...newApp.endpoints,
-                                        [env.id]: { ...envData, api: { ...envData.api, targetPort: e.target.value } }
-                                      }
-                                    })}
+                                    onChange={e => updateEnv(data => ({ ...data, api: { ...data.api, targetPort: e.target.value } }))}
                                     className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-sm"
                                   />
                                 </div>
@@ -1255,13 +1224,7 @@ Verification rapide (sans les details utilisateur).
                                   <input
                                     type="checkbox"
                                     checked={envData.api.requireAuth}
-                                    onChange={e => setNewApp({
-                                      ...newApp,
-                                      endpoints: {
-                                        ...newApp.endpoints,
-                                        [env.id]: { ...envData, api: { ...envData.api, requireAuth: e.target.checked } }
-                                      }
-                                    })}
+                                    onChange={e => updateEnv(data => ({ ...data, api: { ...data.api, requireAuth: e.target.checked } }))}
                                     className="rounded"
                                   />
                                   <Key className="w-3 h-3 text-purple-400" /> Auth
@@ -1270,13 +1233,7 @@ Verification rapide (sans les details utilisateur).
                                   <input
                                     type="checkbox"
                                     checked={envData.api.localOnly}
-                                    onChange={e => setNewApp({
-                                      ...newApp,
-                                      endpoints: {
-                                        ...newApp.endpoints,
-                                        [env.id]: { ...envData, api: { ...envData.api, localOnly: e.target.checked } }
-                                      }
-                                    })}
+                                    onChange={e => updateEnv(data => ({ ...data, api: { ...data.api, localOnly: e.target.checked } }))}
                                     className="rounded"
                                   />
                                   <Shield className="w-3 h-3 text-yellow-400" /> Local
@@ -1349,9 +1306,31 @@ Verification rapide (sans les details utilisateur).
               </span>
             </div>
             <div className="space-y-4">
-              <div>
-                <label className="block text-sm text-gray-400 mb-1">Nom</label>
-                <input type="text" value={editAppForm.name} onChange={e => setEditAppForm({ ...editAppForm, name: e.target.value })} className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm" />
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm text-gray-400 mb-1">Nom d&apos;affichage</label>
+                  <input
+                    type="text"
+                    placeholder="Mon Application"
+                    value={editAppForm.name}
+                    onChange={e => setEditAppForm({ ...editAppForm, name: e.target.value })}
+                    className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-400 mb-1">Slug (URL)</label>
+                  <input
+                    type="text"
+                    placeholder="mon-app"
+                    value={editAppForm.slug}
+                    onChange={e => setEditAppForm({ ...editAppForm, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })}
+                    className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm font-mono"
+                  />
+                  <p className="text-xs text-yellow-400 mt-1 flex items-center gap-1">
+                    <AlertTriangle className="w-3 h-3" />
+                    Changer le slug cassera les URLs existantes
+                  </p>
+                </div>
               </div>
 
               {/* Endpoints par environnement - Layout optimise */}
@@ -1359,16 +1338,27 @@ Verification rapide (sans les details utilisateur).
                 const envData = editAppForm.endpoints[env.id];
                 if (!envData) return null;
 
+                // Helper to update env endpoint with functional setState (avoids stale closure)
+                const updateEditEnv = (updater) => {
+                  setEditAppForm(prev => {
+                    const currentEnvData = prev.endpoints[env.id];
+                    if (!currentEnvData) return prev;
+                    return {
+                      ...prev,
+                      endpoints: {
+                        ...prev.endpoints,
+                        [env.id]: updater(currentEnvData)
+                      }
+                    };
+                  });
+                };
+
                 // Helper to update an API in the apis array
                 const updateApi = (apiIndex, updates) => {
-                  const newApis = [...envData.apis];
-                  newApis[apiIndex] = { ...newApis[apiIndex], ...updates };
-                  setEditAppForm({
-                    ...editAppForm,
-                    endpoints: {
-                      ...editAppForm.endpoints,
-                      [env.id]: { ...envData, apis: newApis }
-                    }
+                  updateEditEnv(data => {
+                    const newApis = [...data.apis];
+                    newApis[apiIndex] = { ...newApis[apiIndex], ...updates };
+                    return { ...data, apis: newApis };
                   });
                 };
 
@@ -1376,16 +1366,10 @@ Verification rapide (sans les details utilisateur).
                 const addApi = () => {
                   // If no APIs exist, create default API (empty slug) directly
                   if (envData.apis.length === 0) {
-                    setEditAppForm({
-                      ...editAppForm,
-                      endpoints: {
-                        ...editAppForm.endpoints,
-                        [env.id]: {
-                          ...envData,
-                          apis: [{ slug: '', targetHost: 'localhost', targetPort: '', localOnly: false, requireAuth: false }]
-                        }
-                      }
-                    });
+                    updateEditEnv(data => ({
+                      ...data,
+                      apis: [{ slug: '', targetHost: 'localhost', targetPort: '', localOnly: false, requireAuth: false }]
+                    }));
                     return;
                   }
                   // Otherwise ask for slug
@@ -1397,28 +1381,18 @@ Verification rapide (sans les details utilisateur).
                     setMessage({ type: 'error', text: cleanSlug ? `API "${cleanSlug}" existe deja` : 'API par defaut existe deja' });
                     return;
                   }
-                  setEditAppForm({
-                    ...editAppForm,
-                    endpoints: {
-                      ...editAppForm.endpoints,
-                      [env.id]: {
-                        ...envData,
-                        apis: [...envData.apis, { slug: cleanSlug, targetHost: 'localhost', targetPort: '', localOnly: false, requireAuth: false }]
-                      }
-                    }
-                  });
+                  updateEditEnv(data => ({
+                    ...data,
+                    apis: [...data.apis, { slug: cleanSlug, targetHost: 'localhost', targetPort: '', localOnly: false, requireAuth: false }]
+                  }));
                 };
 
                 // Helper to remove an API
                 const removeApi = (apiIndex) => {
-                  const newApis = envData.apis.filter((_, i) => i !== apiIndex);
-                  setEditAppForm({
-                    ...editAppForm,
-                    endpoints: {
-                      ...editAppForm.endpoints,
-                      [env.id]: { ...envData, apis: newApis }
-                    }
-                  });
+                  updateEditEnv(data => ({
+                    ...data,
+                    apis: data.apis.filter((_, i) => i !== apiIndex)
+                  }));
                 };
 
                 return (
@@ -1428,13 +1402,7 @@ Verification rapide (sans les details utilisateur).
                         <input
                           type="checkbox"
                           checked={envData.enabled}
-                          onChange={e => setEditAppForm({
-                            ...editAppForm,
-                            endpoints: {
-                              ...editAppForm.endpoints,
-                              [env.id]: { ...envData, enabled: e.target.checked }
-                            }
-                          })}
+                          onChange={e => updateEditEnv(data => ({ ...data, enabled: e.target.checked }))}
                           className="rounded"
                         />
                         <Layers className="w-4 h-4" />
@@ -1456,26 +1424,14 @@ Verification rapide (sans les details utilisateur).
                               <input
                                 type="text"
                                 value={envData.frontend.targetHost}
-                                onChange={e => setEditAppForm({
-                                  ...editAppForm,
-                                  endpoints: {
-                                    ...editAppForm.endpoints,
-                                    [env.id]: { ...envData, frontend: { ...envData.frontend, targetHost: e.target.value } }
-                                  }
-                                })}
+                                onChange={e => updateEditEnv(data => ({ ...data, frontend: { ...data.frontend, targetHost: e.target.value } }))}
                                 placeholder="localhost"
                                 className="flex-1 px-2 py-1 bg-gray-900 border border-gray-700 rounded text-sm"
                               />
                               <input
                                 type="number"
                                 value={envData.frontend.targetPort}
-                                onChange={e => setEditAppForm({
-                                  ...editAppForm,
-                                  endpoints: {
-                                    ...editAppForm.endpoints,
-                                    [env.id]: { ...envData, frontend: { ...envData.frontend, targetPort: e.target.value } }
-                                  }
-                                })}
+                                onChange={e => updateEditEnv(data => ({ ...data, frontend: { ...data.frontend, targetPort: e.target.value } }))}
                                 placeholder="3000"
                                 className="w-20 px-2 py-1 bg-gray-900 border border-gray-700 rounded text-sm"
                               />
@@ -1485,13 +1441,7 @@ Verification rapide (sans les details utilisateur).
                                 <input
                                   type="checkbox"
                                   checked={envData.frontend.requireAuth}
-                                  onChange={e => setEditAppForm({
-                                    ...editAppForm,
-                                    endpoints: {
-                                      ...editAppForm.endpoints,
-                                      [env.id]: { ...envData, frontend: { ...envData.frontend, requireAuth: e.target.checked } }
-                                    }
-                                  })}
+                                  onChange={e => updateEditEnv(data => ({ ...data, frontend: { ...data.frontend, requireAuth: e.target.checked } }))}
                                   className="rounded"
                                 />
                                 <Key className="w-3 h-3 text-purple-400" />
@@ -1500,13 +1450,7 @@ Verification rapide (sans les details utilisateur).
                                 <input
                                   type="checkbox"
                                   checked={envData.frontend.localOnly}
-                                  onChange={e => setEditAppForm({
-                                    ...editAppForm,
-                                    endpoints: {
-                                      ...editAppForm.endpoints,
-                                      [env.id]: { ...envData, frontend: { ...envData.frontend, localOnly: e.target.checked } }
-                                    }
-                                  })}
+                                  onChange={e => updateEditEnv(data => ({ ...data, frontend: { ...data.frontend, localOnly: e.target.checked } }))}
                                   className="rounded"
                                 />
                                 <Shield className="w-3 h-3 text-yellow-400" />
@@ -1608,55 +1552,6 @@ Verification rapide (sans les details utilisateur).
             </div>
             <div className="flex justify-end gap-2 mt-6">
               <Button onClick={handleSaveConfig} loading={saving} disabled={!configForm.baseDomain}>Configurer</Button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Migration Modal */}
-      {showMigrationModal && migrationSuggestions && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-2xl border border-gray-700 max-h-[90vh] overflow-y-auto">
-            <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
-              <ArrowRightLeft className="w-5 h-5 text-blue-400" />
-              Migration des hosts
-            </h2>
-            <p className="text-gray-400 mb-4">Ces hosts seront groupes en applications:</p>
-
-            <div className="space-y-3 mb-6">
-              {migrationSuggestions.filter(s => s.type === 'application').map((s, i) => (
-                <div key={i} className="bg-gray-900/50 rounded-lg p-4 border border-gray-700">
-                  <div className="font-medium text-blue-400 mb-2">{s.name}</div>
-                  <div className="grid grid-cols-2 gap-4 text-sm">
-                    <div>
-                      <span className="text-gray-500">Frontend:</span>
-                      <span className="font-mono ml-2">{s.frontend.subdomain}.{config?.baseDomain}</span>
-                      <span className="text-gray-500 ml-2">:{s.frontend.targetPort}</span>
-                    </div>
-                    <div>
-                      <span className="text-gray-500">API:</span>
-                      <span className="font-mono ml-2">{s.api.subdomain}.{config?.baseDomain}</span>
-                      <span className="text-gray-500 ml-2">:{s.api.targetPort}</span>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {migrationSuggestions.filter(s => s.type === 'standalone').length > 0 && (
-              <>
-                <p className="text-gray-400 mb-2">Ces hosts resteront standalone:</p>
-                <div className="flex flex-wrap gap-2 mb-6">
-                  {migrationSuggestions.filter(s => s.type === 'standalone').map((s, i) => (
-                    <span key={i} className="text-sm font-mono bg-gray-700 px-2 py-1 rounded">{s.host.subdomain}</span>
-                  ))}
-                </div>
-              </>
-            )}
-
-            <div className="flex justify-end gap-2">
-              <Button variant="secondary" onClick={() => setShowMigrationModal(false)}>Annuler</Button>
-              <Button onClick={handleMigration} loading={migrating}>Migrer</Button>
             </div>
           </div>
         </div>

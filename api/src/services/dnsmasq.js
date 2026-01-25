@@ -88,17 +88,32 @@ export async function getDhcpLeases() {
 
 function parseLeases(content) {
   const lines = content.split('\n').filter(l => l.trim());
-  return lines.map(line => {
-    const parts = line.split(' ');
-    return {
-      expiration: new Date(parseInt(parts[0]) * 1000).toISOString(),
-      expirationTimestamp: parseInt(parts[0]),
-      mac: parts[1],
-      ip: parts[2],
-      hostname: parts[3] !== '*' ? parts[3] : null,
-      clientId: parts[4] || null
-    };
-  }).sort((a, b) => {
+  const leases = [];
+
+  for (const line of lines) {
+    try {
+      const parts = line.split(' ');
+
+      // Validate minimum required fields (timestamp, MAC, IP)
+      if (parts.length < 3) {
+        console.warn(`[DHCP] Skipping invalid lease line (not enough parts): ${line}`);
+        continue;
+      }
+
+      leases.push({
+        expiration: new Date(parseInt(parts[0]) * 1000).toISOString(),
+        expirationTimestamp: parseInt(parts[0]),
+        mac: parts[1],
+        ip: parts[2],
+        hostname: parts[3] && parts[3] !== '*' ? parts[3] : null,
+        clientId: parts[4] || null
+      });
+    } catch (error) {
+      console.warn(`[DHCP] Skipping invalid lease line: ${line}`, error.message);
+    }
+  }
+
+  return leases.sort((a, b) => {
     // Sort by IP address
     const ipA = a.ip.split('.').map(Number);
     const ipB = b.ip.split('.').map(Number);

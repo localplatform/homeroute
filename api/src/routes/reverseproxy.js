@@ -23,9 +23,6 @@ import {
   updateApplication,
   deleteApplication,
   toggleApplication,
-  // Migration
-  getMigrationSuggestions,
-  executeMigration,
   // Cloudflare
   getCloudflareConfig,
   updateCloudflareConfig
@@ -168,14 +165,14 @@ router.get('/applications', async (req, res) => {
 
 // POST /api/reverseproxy/applications - Ajouter une application
 router.post('/applications', async (req, res) => {
-  const { name, slug, frontend, api, environments } = req.body;
+  const { name, slug, endpoints } = req.body;
   if (!name || !slug) {
     return res.status(400).json({ success: false, error: 'Name and slug are required' });
   }
-  if (!frontend?.targetHost || !frontend?.targetPort) {
-    return res.status(400).json({ success: false, error: 'Frontend target is required' });
+  if (!endpoints || typeof endpoints !== 'object' || Object.keys(endpoints).length === 0) {
+    return res.status(400).json({ success: false, error: 'At least one environment endpoint is required' });
   }
-  const result = await addApplication({ name, slug, frontend, api, environments });
+  const result = await addApplication({ name, slug, endpoints });
   res.json(result);
 });
 
@@ -195,24 +192,6 @@ router.delete('/applications/:id', async (req, res) => {
 router.post('/applications/:id/toggle', async (req, res) => {
   const { enabled } = req.body;
   const result = await toggleApplication(req.params.id, enabled);
-  res.json(result);
-});
-
-// ========== Migration Endpoints ==========
-
-// GET /api/reverseproxy/migration/suggestions - Suggestions de migration
-router.get('/migration/suggestions', async (req, res) => {
-  const result = await getMigrationSuggestions();
-  res.json(result);
-});
-
-// POST /api/reverseproxy/migrate - Exécuter la migration
-router.post('/migrate', async (req, res) => {
-  const { suggestions } = req.body;
-  if (!suggestions || !Array.isArray(suggestions)) {
-    return res.status(400).json({ success: false, error: 'Suggestions array is required' });
-  }
-  const result = await executeMigration(suggestions);
   res.json(result);
 });
 

@@ -18,7 +18,7 @@ import { useAuth } from '../context/AuthContext';
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/dns', icon: Server, label: 'DNS / DHCP' },
-  { to: '/network', icon: Network, label: 'Réseau' },
+  { to: '/network', icon: Network, label: 'Réseau / Firewall' },
   { to: '/adblock', icon: Shield, label: 'AdBlock' },
   { to: '/ddns', icon: Globe, label: 'Dynamic DNS' },
   { to: '/reverseproxy', icon: ArrowLeftRight, label: 'Reverse Proxy' },
@@ -35,7 +35,7 @@ function Sidebar() {
       <div className="p-4 border-b border-gray-700">
         <h1 className="text-xl font-bold flex items-center gap-2">
           <Settings className="w-6 h-6 text-blue-400" />
-          Server Dashboard
+          HomeRoute
         </h1>
         <p className="text-xs text-gray-400 mt-1">cloudmaster</p>
       </div>
@@ -85,7 +85,7 @@ function Sidebar() {
             </button>
           </div>
         )}
-        <p className="text-xs text-gray-500 mt-2">mynetwk.biz</p>
+        <p className="text-xs text-gray-500 mt-2">HomeRoute</p>
       </div>
     </aside>
   );

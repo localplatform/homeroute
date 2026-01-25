@@ -29,9 +29,9 @@ const MODE_LABELS = {
 };
 
 const MODE_DESCRIPTIONS = {
-  economy: 'CPU en mode économie',
-  auto: 'Adaptatif selon la charge',
-  performance: 'CPU en mode performance'
+  economy: 'CPU limité à 60% + économie maximale',
+  auto: 'CPU limité à 85% + équilibré',
+  performance: 'CPU pleine puissance'
 };
 
 const MODE_COLORS = {
@@ -43,6 +43,7 @@ const MODE_COLORS = {
 function Energy() {
   // CPU state
   const [cpuInfo, setCpuInfo] = useState({ temperature: null, frequency: null, usage: null });
+  const [cpuModel, setCpuModel] = useState('CPU');
 
   // Mode state
   const [currentMode, setCurrentMode] = useState('auto');
@@ -156,6 +157,9 @@ function Energy() {
             frequency: cpuRes.data.frequency,
             usage: cpuRes.data.usage
           });
+          if (cpuRes.data.model) {
+            setCpuModel(cpuRes.data.model);
+          }
         }
 
         if (benchRes.data.success) {
@@ -288,7 +292,7 @@ function Energy() {
       {/* CPU Info + Mode side by side */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
         {/* CPU Info Card */}
-        <Card title="Infos CPU (Ryzen 9 3900X)" icon={Cpu}>
+        <Card title={`Infos CPU (${cpuModel})`} icon={Cpu}>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           {/* Temperature */}
           <div className="bg-gray-900 rounded-lg p-4">
