@@ -1,12 +1,17 @@
 import { readFile } from 'fs/promises';
 import { existsSync } from 'fs';
 
-const DNSMASQ_CONFIG = process.env.DNSMASQ_CONFIG || '/etc/dnsmasq.d/lan.conf';
-const DNSMASQ_LEASES = process.env.DNSMASQ_LEASES || '/var/lib/misc/dnsmasq.leases';
+function getConfigPath() {
+  return process.env.DNSMASQ_CONFIG || '/etc/dnsmasq.d/lan.conf';
+}
+
+function getLeasesPath() {
+  return process.env.DNSMASQ_LEASES || '/var/lib/misc/dnsmasq.leases';
+}
 
 export async function getDnsConfig() {
   try {
-    const content = await readFile(DNSMASQ_CONFIG, 'utf-8');
+    const content = await readFile(getConfigPath(), 'utf-8');
     const config = parseConfig(content);
     return { success: true, config, raw: content };
   } catch (error) {
@@ -42,7 +47,7 @@ function parseConfig(content) {
       config.interface = trimmed.split('=')[1];
     } else if (trimmed.startsWith('dhcp-range=')) {
       const value = trimmed.split('=')[1];
-      if (value.startsWith('::')) {
+      if (value.includes(':')) {
         config.ipv6.dhcpRange = value;
       } else {
         config.dhcpRange = value;
@@ -74,11 +79,12 @@ function parseConfig(content) {
 
 export async function getDhcpLeases() {
   try {
-    if (!existsSync(DNSMASQ_LEASES)) {
+    const leasesPath = getLeasesPath();
+    if (!existsSync(leasesPath)) {
       return { success: true, leases: [] };
     }
 
-    const content = await readFile(DNSMASQ_LEASES, 'utf-8');
+    const content = await readFile(leasesPath, 'utf-8');
     const leases = parseLeases(content);
     return { success: true, leases };
   } catch (error) {
