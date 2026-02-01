@@ -21,7 +21,6 @@ import {
   ChevronDown,
   ChevronUp,
   Layers,
-  Cloud
 } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
@@ -36,7 +35,7 @@ import {
   toggleReverseProxyHost,
   updateBaseDomain,
   renewCertificates,
-  reloadCaddy,
+  reloadProxy,
   getCertificatesStatus,
   getReverseProxyEnvironments,
   getReverseProxyApplications,
@@ -44,10 +43,7 @@ import {
   updateReverseProxyApplication,
   deleteReverseProxyApplication,
   toggleReverseProxyApplication,
-  getCloudflareConfig,
-  updateCloudflareConfig,
-  getRustProxyStatus,
-  reloadRustProxy
+  getRustProxyStatus
 } from '../api/client';
 
 function ReverseProxy() {
@@ -56,7 +52,6 @@ function ReverseProxy() {
   const [hosts, setHosts] = useState([]);
   const [applications, setApplications] = useState([]);
   const [environments, setEnvironments] = useState([]);
-  const [cloudflare, setCloudflare] = useState(null);
   const [rustProxy, setRustProxy] = useState(null);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState(null);
@@ -165,14 +160,13 @@ Verification rapide (sans les details utilisateur).
 
   async function fetchData() {
     try {
-      const [configRes, statusRes, hostsRes, certsRes, envsRes, appsRes, cfRes, rustRes] = await Promise.all([
+      const [configRes, statusRes, hostsRes, certsRes, envsRes, appsRes, rustRes] = await Promise.all([
         getReverseProxyConfig(),
         getReverseProxyStatus(),
         getReverseProxyHosts(),
         getCertificatesStatus(),
         getReverseProxyEnvironments(),
         getReverseProxyApplications(),
-        getCloudflareConfig(),
         getRustProxyStatus().catch(() => ({ data: { success: false } }))
       ]);
 
@@ -190,7 +184,6 @@ Verification rapide (sans les details utilisateur).
       if (certsRes.data.success) setCertStatuses(certsRes.data.certificates || {});
       if (envsRes.data.success) setEnvironments(envsRes.data.environments || []);
       if (appsRes.data.success) setApplications(appsRes.data.applications || []);
-      if (cfRes.data.success) setCloudflare(cfRes.data.cloudflare);
       if (rustRes.data.success) setRustProxy(rustRes.data);
     } catch (error) {
       console.error('Error:', error);
@@ -269,7 +262,7 @@ Verification rapide (sans les details utilisateur).
 
   function openEditModal(host) {
     setEditingHost(host);
-    setEditForm({ targetHost: host.targetHost, targetPort: String(host.targetPort), localOnly: !!host.localOnly, requireAuth: !!host.requireAuth, backend: host.backend || 'caddy' });
+    setEditForm({ targetHost: host.targetHost, targetPort: String(host.targetPort), localOnly: !!host.localOnly, requireAuth: !!host.requireAuth });
     setShowEditModal(true);
   }
 
@@ -284,8 +277,7 @@ Verification rapide (sans les details utilisateur).
         targetHost: editForm.targetHost,
         targetPort: parseInt(editForm.targetPort),
         localOnly: editForm.localOnly,
-        requireAuth: editForm.requireAuth,
-        backend: editForm.backend
+        requireAuth: editForm.requireAuth
       });
       if (res.data.success) {
         setMessage({ type: 'success', text: 'Hote modifie' });
@@ -349,15 +341,13 @@ Verification rapide (sans les details utilisateur).
               targetHost: envData.frontend.targetHost,
               targetPort: parseInt(envData.frontend.targetPort),
               localOnly: envData.frontend.localOnly || false,
-              requireAuth: envData.frontend.requireAuth || false,
-              ...(envData.frontend.backend === 'rust' ? { backend: 'rust' } : {})
+              requireAuth: envData.frontend.requireAuth || false
             },
             api: envData.hasApi && envData.api?.targetPort ? {
               targetHost: envData.api.targetHost,
               targetPort: parseInt(envData.api.targetPort),
               localOnly: envData.api.localOnly || false,
-              requireAuth: envData.api.requireAuth || false,
-              ...(envData.api.backend === 'rust' ? { backend: 'rust' } : {})
+              requireAuth: envData.api.requireAuth || false
             } : null
           };
         }
@@ -520,8 +510,7 @@ Verification rapide (sans les details utilisateur).
               targetHost: api.targetHost || 'localhost',
               targetPort: parseInt(api.targetPort),
               localOnly: api.localOnly || false,
-              requireAuth: api.requireAuth || false,
-              ...(api.backend === 'rust' ? { backend: 'rust' } : {})
+              requireAuth: api.requireAuth || false
             }));
 
           endpoints[envId] = {
@@ -529,8 +518,7 @@ Verification rapide (sans les details utilisateur).
               targetHost: envData.frontend.targetHost,
               targetPort: parseInt(envData.frontend.targetPort),
               localOnly: envData.frontend.localOnly || false,
-              requireAuth: envData.frontend.requireAuth || false,
-              ...(envData.frontend.backend === 'rust' ? { backend: 'rust' } : {})
+              requireAuth: envData.frontend.requireAuth || false
             },
             apis: validApis
           };
@@ -585,18 +573,6 @@ Verification rapide (sans les details utilisateur).
     }
   }
 
-  async function handleToggleCloudflare(enabled) {
-    try {
-      const res = await updateCloudflareConfig({ enabled });
-      if (res.data.success) {
-        setCloudflare(res.data.cloudflare);
-        setMessage({ type: 'success', text: enabled ? 'Cloudflare active' : 'Cloudflare desactive' });
-      }
-    } catch (error) {
-      setMessage({ type: 'error', text: 'Erreur' });
-    }
-  }
-
   async function handleRenewCerts() {
     setRenewing(true);
     setMessage(null);
@@ -618,9 +594,9 @@ Verification rapide (sans les details utilisateur).
   async function handleReload() {
     setReloading(true);
     try {
-      const res = await reloadCaddy();
+      const res = await reloadProxy();
       if (res.data.success) {
-        setMessage({ type: 'success', text: 'Caddy recharge' });
+        setMessage({ type: 'success', text: 'Proxy recharge' });
         fetchData();
       } else {
         setMessage({ type: 'error', text: res.data.error });
@@ -642,7 +618,6 @@ Verification rapide (sans les details utilisateur).
 
   const activeHosts = hosts.filter(h => h.enabled).length;
   const activeApps = applications.filter(a => a.enabled).length;
-  const caddyRunning = status?.caddy?.running;
 
   const tabs = [
     { id: 'applications', label: 'Applications', icon: Layers, count: applications.length },
@@ -690,21 +665,12 @@ Verification rapide (sans les details utilisateur).
       )}
 
       {/* Status Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
-        <Card title="Caddy" icon={Server}>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <Card title="Proxy" icon={Server}>
           <div className="flex items-center gap-2">
-            <div className={`w-3 h-3 rounded-full ${caddyRunning ? 'bg-green-400' : 'bg-red-400'}`} />
-            <span className={caddyRunning ? 'text-green-400' : 'text-red-400'}>
-              {caddyRunning ? 'En ligne' : 'Hors ligne'}
-            </span>
-          </div>
-        </Card>
-
-        <Card title="Rust Proxy" icon={Server}>
-          <div className="flex items-center gap-2">
-            <div className={`w-3 h-3 rounded-full ${rustProxy?.running ? 'bg-orange-400' : 'bg-gray-500'}`} />
-            <span className={rustProxy?.running ? 'text-orange-400' : 'text-gray-500'}>
-              {rustProxy?.running ? `Port ${rustProxy.httpsPort}` : 'Hors ligne'}
+            <div className={`w-3 h-3 rounded-full ${rustProxy?.running ? 'bg-green-400' : 'bg-red-400'}`} />
+            <span className={rustProxy?.running ? 'text-green-400' : 'text-red-400'}>
+              {rustProxy?.running ? `Port ${rustProxy.httpsPort || 443}` : 'Hors ligne'}
             </span>
           </div>
           {rustProxy?.running && rustProxy.activeRoutes > 0 && (
@@ -720,10 +686,8 @@ Verification rapide (sans les details utilisateur).
 
         <Card title="Certificats" icon={Lock}>
           <div className="flex items-center gap-2">
-            <div className={`w-3 h-3 rounded-full ${cloudflare?.enabled ? 'bg-orange-400' : 'bg-green-400'}`} />
-            <span className={cloudflare?.enabled ? 'text-orange-400' : 'text-green-400'}>
-              {cloudflare?.enabled ? 'Cloudflare Wildcard' : "Let's Encrypt"}
-            </span>
+            <div className="w-3 h-3 rounded-full bg-green-400" />
+            <span className="text-green-400">CA Locale</span>
           </div>
         </Card>
 
@@ -838,13 +802,6 @@ Verification rapide (sans les details utilisateur).
                                     Auth
                                   </span>
                                 )}
-                                <span className={`text-xs px-2 py-0.5 rounded font-medium ${
-                                  host.backend === 'rust'
-                                    ? 'text-orange-400 bg-orange-900/30'
-                                    : 'text-blue-400 bg-blue-900/30'
-                                }`}>
-                                  {host.backend === 'rust' ? 'Rust' : 'Caddy'}
-                                </span>
                               </div>
                             </td>
                             <td className="py-3 font-mono text-sm text-gray-300">
@@ -943,50 +900,6 @@ Verification rapide (sans les details utilisateur).
                 <p>Dashboard: <span className="font-mono text-blue-400">proxy.{configForm.baseDomain || 'domain.com'}</span></p>
                 <p>Auth: <span className="font-mono text-blue-400">auth.{configForm.baseDomain || 'domain.com'}</span></p>
               </div>
-            </div>
-          </Card>
-
-          {/* Cloudflare Config */}
-          <Card title="Certificats Wildcard" icon={Cloud}>
-            <div className="space-y-4">
-              <div
-                onClick={() => handleToggleCloudflare(!cloudflare?.enabled)}
-                className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
-                  cloudflare?.enabled ? 'bg-orange-900/30 border-orange-600 text-orange-400' : 'bg-gray-900/50 border-gray-700 text-gray-400'
-                }`}
-              >
-                <Cloud className={`w-5 h-5 ${cloudflare?.enabled ? 'text-orange-400' : 'text-gray-500'}`} />
-                <div className="flex-1">
-                  <div className="font-medium text-sm">Cloudflare DNS Challenge</div>
-                  <div className="text-xs opacity-75">Certificats wildcard via API Cloudflare</div>
-                </div>
-                <div className={`w-10 h-6 rounded-full transition-colors ${cloudflare?.enabled ? 'bg-orange-600' : 'bg-gray-600'}`}>
-                  <div className={`w-4 h-4 bg-white rounded-full mt-1 transition-transform ${cloudflare?.enabled ? 'translate-x-5' : 'translate-x-1'}`} />
-                </div>
-              </div>
-
-              {cloudflare?.enabled && (
-                <div className="text-xs space-y-2">
-                  <p className={`flex items-center gap-2 ${cloudflare.hasToken ? 'text-green-400' : 'text-red-400'}`}>
-                    {cloudflare.hasToken ? <CheckCircle className="w-4 h-4" /> : <XCircle className="w-4 h-4" />}
-                    {cloudflare.hasToken ? 'CF_API_TOKEN configure' : 'CF_API_TOKEN manquant dans .env'}
-                  </p>
-                  {cloudflare.wildcardDomains?.length > 0 && (
-                    <div className="bg-gray-900 rounded p-2 space-y-1">
-                      <p className="text-gray-500">Domaines wildcard:</p>
-                      {cloudflare.wildcardDomains.map(d => (
-                        <p key={d} className="font-mono text-orange-400">{d}</p>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {!cloudflare?.enabled && (
-                <p className="text-xs text-gray-500">
-                  Mode actuel: certificats individuels Let&apos;s Encrypt via HTTP challenge
-                </p>
-              )}
             </div>
           </Card>
 
@@ -1206,16 +1119,6 @@ Verification rapide (sans les details utilisateur).
                               />
                               <Shield className="w-3 h-3 text-yellow-400" /> Local
                             </label>
-                            <button
-                              onClick={() => updateEnv(data => ({ ...data, frontend: { ...data.frontend, backend: data.frontend.backend === 'rust' ? undefined : 'rust' } }))}
-                              className={`text-xs px-1.5 py-0.5 rounded font-medium transition-colors ${
-                                envData.frontend.backend === 'rust'
-                                  ? 'text-orange-400 bg-orange-900/30'
-                                  : 'text-gray-500 bg-gray-700/30 hover:text-gray-300'
-                              }`}
-                            >
-                              {envData.frontend.backend === 'rust' ? 'Rust' : 'Caddy'}
-                            </button>
                           </div>
                         </div>
 
@@ -1277,16 +1180,6 @@ Verification rapide (sans les details utilisateur).
                                   />
                                   <Shield className="w-3 h-3 text-yellow-400" /> Local
                                 </label>
-                                <button
-                                  onClick={() => updateEnv(data => ({ ...data, api: { ...data.api, backend: data.api.backend === 'rust' ? undefined : 'rust' } }))}
-                                  className={`text-xs px-1.5 py-0.5 rounded font-medium transition-colors ${
-                                    envData.api.backend === 'rust'
-                                      ? 'text-orange-400 bg-orange-900/30'
-                                      : 'text-gray-500 bg-gray-700/30 hover:text-gray-300'
-                                  }`}
-                                >
-                                  {envData.api.backend === 'rust' ? 'Rust' : 'Caddy'}
-                                </button>
                               </div>
                             </>
                           )}
@@ -1336,35 +1229,6 @@ Verification rapide (sans les details utilisateur).
                 <div className={`w-10 h-6 rounded-full ${editForm.requireAuth ? 'bg-purple-600' : 'bg-gray-600'}`}><div className={`w-4 h-4 bg-white rounded-full mt-1 ${editForm.requireAuth ? 'translate-x-5' : 'translate-x-1'}`} /></div>
               </div>
 
-              {/* Backend selector */}
-              <div>
-                <label className="block text-sm text-gray-400 mb-1">Backend proxy</label>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => setEditForm({ ...editForm, backend: 'caddy' })}
-                    className={`flex-1 py-2 rounded text-sm font-medium transition-colors ${
-                      editForm.backend !== 'rust'
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                    }`}
-                  >
-                    Caddy
-                  </button>
-                  <button
-                    onClick={() => setEditForm({ ...editForm, backend: 'rust' })}
-                    className={`flex-1 py-2 rounded text-sm font-medium transition-colors ${
-                      editForm.backend === 'rust'
-                        ? 'bg-orange-600 text-white'
-                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                    }`}
-                  >
-                    Rust
-                  </button>
-                </div>
-                {editForm.backend === 'rust' && (
-                  <p className="text-xs text-orange-400 mt-1">Certificat CA locale (port {rustProxy?.httpsPort || 444})</p>
-                )}
-              </div>
             </div>
             <div className="flex justify-end gap-2 mt-6">
               <Button variant="secondary" onClick={() => { setShowEditModal(false); setEditingHost(null); }}>Annuler</Button>
@@ -1534,17 +1398,6 @@ Verification rapide (sans les details utilisateur).
                                 />
                                 <Shield className="w-3 h-3 text-yellow-400" />
                               </label>
-                              <button
-                                onClick={() => updateEditEnv(data => ({ ...data, frontend: { ...data.frontend, backend: data.frontend.backend === 'rust' ? undefined : 'rust' } }))}
-                                className={`text-xs px-1.5 py-0.5 rounded font-medium transition-colors ${
-                                  envData.frontend.backend === 'rust'
-                                    ? 'text-orange-400 bg-orange-900/30'
-                                    : 'text-gray-500 bg-gray-700/30 hover:text-gray-300'
-                                }`}
-                                title={envData.frontend.backend === 'rust' ? 'Backend: Rust (port 444)' : 'Backend: Caddy (port 443)'}
-                              >
-                                {envData.frontend.backend === 'rust' ? 'Rust' : 'Caddy'}
-                              </button>
                             </div>
                           </div>
 
@@ -1598,17 +1451,6 @@ Verification rapide (sans les details utilisateur).
                                   />
                                   <Shield className="w-3 h-3 text-yellow-400" />
                                 </label>
-                                <button
-                                  onClick={() => updateApi(apiIndex, { backend: api.backend === 'rust' ? undefined : 'rust' })}
-                                  className={`text-xs px-1.5 py-0.5 rounded font-medium transition-colors ${
-                                    api.backend === 'rust'
-                                      ? 'text-orange-400 bg-orange-900/30'
-                                      : 'text-gray-500 bg-gray-700/30 hover:text-gray-300'
-                                  }`}
-                                  title={api.backend === 'rust' ? 'Backend: Rust (port 444)' : 'Backend: Caddy (port 443)'}
-                                >
-                                  {api.backend === 'rust' ? 'Rust' : 'Caddy'}
-                                </button>
                               </div>
                             </div>
                           ))}

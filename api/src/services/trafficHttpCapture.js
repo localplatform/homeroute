@@ -7,7 +7,7 @@ import { getDhcpLeases } from './dnsmasq.js';
 import { getConfig as getReverseProxyConfig } from './reverseproxy.js';
 import { trafficEvents } from './traffic.js';
 
-const CADDY_LOG_PATH = process.env.CADDY_ACCESS_LOG || '/var/log/caddy/homeroute-access.json';
+const ACCESS_LOG_PATH = process.env.PROXY_ACCESS_LOG || '/var/log/rust-proxy/access.json';
 const BATCH_SIZE = parseInt(process.env.TRAFFIC_BATCH_SIZE || '100');
 const BATCH_INTERVAL_MS = parseInt(process.env.TRAFFIC_BATCH_INTERVAL_MS || '5000');
 const POLL_INTERVAL_MS = 2000; // Check for new lines every 2 seconds
@@ -25,21 +25,21 @@ let lastCacheUpdate = 0;
 const CACHE_TTL_MS = 60000; // 1 minute
 
 /**
- * Start HTTP traffic capture from Caddy logs
+ * Start HTTP traffic capture from reverse proxy access logs
  */
 export async function startHttpCapture() {
   console.log('Starting HTTP traffic capture...');
 
   // Check if log file exists
-  if (!existsSync(CADDY_LOG_PATH)) {
-    console.warn(`Caddy access log not found at ${CADDY_LOG_PATH}. HTTP capture will start when log file is created.`);
+  if (!existsSync(ACCESS_LOG_PATH)) {
+    console.warn(`Access log not found at ${ACCESS_LOG_PATH}. HTTP capture will start when log file is created.`);
     // Start polling anyway - file might be created later
   } else {
     // Get initial file size to skip existing logs
     try {
-      const stats = await stat(CADDY_LOG_PATH);
+      const stats = await stat(ACCESS_LOG_PATH);
       lastPosition = stats.size;
-      console.log(`Starting HTTP capture from position ${lastPosition} in ${CADDY_LOG_PATH}`);
+      console.log(`Starting HTTP capture from position ${lastPosition} in ${ACCESS_LOG_PATH}`);
     } catch (error) {
       console.error('Error getting log file stats:', error);
     }
@@ -78,7 +78,7 @@ export function stopHttpCapture() {
  */
 async function pollLogFile() {
   if (isProcessing) return; // Skip if already processing
-  if (!existsSync(CADDY_LOG_PATH)) return; // File doesn't exist yet
+  if (!existsSync(ACCESS_LOG_PATH)) return; // File doesn't exist yet
 
   isProcessing = true;
 
@@ -121,7 +121,7 @@ async function pollLogFile() {
 async function readNewLines(start, end) {
   return new Promise((resolve, reject) => {
     const lines = [];
-    const fileStream = createReadStream(CADDY_LOG_PATH, {
+    const fileStream = createReadStream(ACCESS_LOG_PATH, {
       start,
       end: end - 1,
       encoding: 'utf8'
@@ -174,47 +174,39 @@ async function processLogLine(line) {
 
 /**
  * Enrich HTTP event with metadata
+ * Rust proxy log format: {"timestamp":"...","client_ip":"...","host":"...","method":"GET","path":"/...","status":200,"duration_ms":12,"user_agent":"..."}
  */
 async function enrichHttpEvent(logEntry) {
   // Update cache if needed
   await updateCaches();
 
-  // Extract from Caddy JSON log format
-  const request = logEntry.request || {};
-  const headers = request.headers || {};
-
-  // Extract client IP (prefer X-Forwarded-For for real client IP behind proxy)
-  const xForwardedFor = headers['X-Forwarded-For']?.[0];
-  const clientIp = xForwardedFor || request.client_ip || request.remote_ip;
-
-  // Extract user from Remote-User header (from forward auth)
-  const remoteUser = headers['Remote-User']?.[0] || logEntry.user_id;
+  const clientIp = logEntry.client_ip || '';
 
   // Find device from DHCP leases
   const lease = dhcpLeasesCache.find(l => l.ip === clientIp);
 
   // Find application from reverse proxy config
-  const app = findApplicationByHost(request.host);
+  const app = findApplicationByHost(logEntry.host);
 
   return {
-    timestamp: new Date(logEntry.ts ? logEntry.ts * 1000 : Date.now()),
+    timestamp: new Date(logEntry.timestamp || Date.now()),
     meta: {
       deviceMac: lease?.mac || null,
       deviceIp: clientIp,
       deviceHostname: lease?.hostname || null,
-      userId: remoteUser || null,
-      endpoint: request.host,
+      userId: null,
+      endpoint: logEntry.host || '',
       application: app?.name || null,
       environment: app?.environment || null,
-      path: request.uri || '/',
-      method: request.method || 'GET',
+      path: logEntry.path || '/',
+      method: logEntry.method || 'GET',
       statusCode: logEntry.status || 0
     },
     metrics: {
       requestCount: 1,
-      responseBytes: parseInt(logEntry.size || 0),
-      requestBytes: parseInt(logEntry.bytes_read || 0),
-      responseTimeMs: parseFloat((logEntry.duration || 0) * 1000) // Convert seconds to ms
+      responseBytes: 0,
+      requestBytes: 0,
+      responseTimeMs: logEntry.duration_ms || 0
     }
   };
 }

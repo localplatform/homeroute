@@ -120,7 +120,7 @@ impl TlsManager {
     pub fn reload_certificates(&self, routes: &[crate::config::RouteConfig]) -> Result<()> {
         self.resolver.clear();
         for route in routes {
-            if route.enabled && route.backend == "rust" {
+            if route.enabled {
                 if let Some(cert_id) = &route.cert_id {
                     match self.load_certificate(&route.domain, cert_id) {
                         Ok(_) => info!("Reloaded certificate for: {}", route.domain),
@@ -234,19 +234,19 @@ mod tests {
     }
 
     #[test]
-    fn test_reload_certificates_skips_caddy_and_disabled() {
+    fn test_reload_certificates_skips_disabled() {
         let manager = TlsManager::new(PathBuf::from("/tmp/test-ca"));
         let routes = vec![
             crate::config::RouteConfig {
                 id: "1".to_string(),
-                domain: "caddy.example.com".to_string(),
-                backend: "caddy".to_string(),
+                domain: "enabled.example.com".to_string(),
+                backend: "rust".to_string(),
                 target_host: "localhost".to_string(),
                 target_port: 8080,
                 local_only: false,
                 require_auth: false,
                 enabled: true,
-                cert_id: Some("cert-1".to_string()),
+                cert_id: None, // No cert_id, so loading is skipped
             },
             crate::config::RouteConfig {
                 id: "2".to_string(),
@@ -260,10 +260,9 @@ mod tests {
                 cert_id: Some("cert-2".to_string()),
             },
         ];
-        // Should succeed (cert loading will fail for missing files but that's logged, not returned as error)
+        // Should succeed - disabled route is skipped, enabled route has no cert_id so skipped too
         let result = manager.reload_certificates(&routes);
         assert!(result.is_ok());
-        // No certs actually loaded since files don't exist and routes are caddy/disabled
         assert!(manager.loaded_domains().is_empty());
     }
 }

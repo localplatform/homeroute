@@ -10,22 +10,30 @@
 
 - **Frontend**: React + Vite dans `/web`
 - **Backend**: Express.js dans `/api`
+- **Reverse Proxy**: Rust custom dans `/rust-proxy`
 - Les fichiers buildés du frontend vont dans `/web/dist`
 
-## Reverse Proxy (Caddy)
+## Reverse Proxy (Rust)
 
-- Utilise uniquement des certificats individuels Let's Encrypt (HTTP challenge)
-- Pas de wildcard certificate
-- Le domaine de base sert uniquement de raccourci pour les sous-domaines
-- Caddy API sur `localhost:2019`
-- **IMPORTANT**: Utiliser l'API du projet (`/api/caddy/*`) pour redémarrer Caddy afin de ne pas perdre la configuration
+- Proxy Rust custom sur le port 443 (HTTPS) et 80 (redirection HTTP→HTTPS)
+- Certificats TLS via CA locale (`/var/lib/server-dashboard/ca`)
+- Configuration : `/var/lib/server-dashboard/rust-proxy-config.json`
+- Hot-reload via SIGHUP (`systemctl reload rust-proxy`)
+- Service systemd : `rust-proxy.service`
+- **IMPORTANT** : Utiliser l'API du projet (`/api/reverseproxy/*` ou `/api/rust-proxy/*`) pour gérer les routes et recharger le proxy
 
 ## Commandes utiles
 
 ```bash
 # Build frontend
-cd /ssd_pool/server-dashboard/web && npm run build
+cd /opt/homeroute/web && npm run build
+
+# Build Rust proxy
+cd /opt/homeroute/rust-proxy && cargo build --release
 
 # Test import backend
-cd /ssd_pool/server-dashboard/api && node -e "import('./src/index.js')"
+cd /opt/homeroute/api && node -e "import('./src/index.js')"
+
+# Rust proxy tests
+cd /opt/homeroute/rust-proxy && cargo test
 ```

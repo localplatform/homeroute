@@ -2,6 +2,7 @@ mod config;
 mod tls;
 mod proxy;
 mod auth;
+mod logging;
 
 use config::ProxyConfig;
 use proxy::ProxyState;
@@ -47,13 +48,13 @@ async fn main() -> anyhow::Result<()> {
     info!("Configuration loaded from: {:?}", config_path);
     info!("Base domain: {}", config.base_domain);
     info!("HTTPS port: {}", config.https_port);
-    info!("Active routes: {}", config.active_rust_routes().len());
+    info!("Active routes: {}", config.active_routes().len());
 
     // Initialize TLS manager and load certificates
     let tls_manager = Arc::new(tls::TlsManager::new(config.ca_storage_path.clone()));
 
     info!("Loading TLS certificates...");
-    for route in config.active_rust_routes() {
+    for route in config.active_routes() {
         if let Some(cert_id) = &route.cert_id {
             match tls_manager.load_certificate(&route.domain, cert_id) {
                 Ok(_) => info!("  Loaded certificate for: {}", route.domain),
@@ -101,13 +102,67 @@ async fn main() -> anyhow::Result<()> {
                             Err(e) => error!("Failed to reload certificates: {}", e),
                         }
                         // Reload proxy routes
-                        let route_count = new_config.active_rust_routes().len();
+                        let route_count = new_config.active_routes().len();
                         proxy_state_reload.reload_config(new_config);
                         info!("Configuration reloaded successfully ({} active routes)", route_count);
                     }
                     Err(e) => error!("Failed to reload config: {}", e),
                 }
             }
+        }
+    });
+
+    // Spawn HTTP→HTTPS redirect server on port 80
+    let http_port = config.http_port;
+    tokio::spawn(async move {
+        let http_addr = SocketAddr::from(([0, 0, 0, 0], http_port));
+        let listener = match TcpListener::bind(http_addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                error!("Failed to bind HTTP redirect listener on port {}: {}", http_port, e);
+                return;
+            }
+        };
+        info!("HTTP redirect server listening on {}", http_addr);
+
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    error!("Failed to accept HTTP connection: {}", e);
+                    continue;
+                }
+            };
+
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let service = service_fn(|req: Request<Incoming>| async move {
+                    let host = req.headers()
+                        .get("host")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("localhost")
+                        .split(':').next().unwrap_or("localhost");
+                    let path = req.uri().path_and_query()
+                        .map(|pq| pq.as_str())
+                        .unwrap_or("/");
+                    let location = format!("https://{}{}", host, path);
+
+                    Ok::<_, std::convert::Infallible>(
+                        hyper::Response::builder()
+                            .status(301)
+                            .header("Location", location)
+                            .body(axum::body::Body::empty())
+                            .unwrap()
+                    )
+                });
+
+                if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
+                    let msg = e.to_string();
+                    if !msg.contains("connection closed") && !msg.contains("not connected") {
+                        error!("HTTP redirect error: {}", e);
+                    }
+                }
+            });
         }
     });
 
@@ -181,12 +236,13 @@ fn load_config(path: &PathBuf) -> anyhow::Result<ProxyConfig> {
         info!("Config file not found, creating default configuration");
         let default_config = ProxyConfig {
             http_port: 80,
-            https_port: 444,
+            https_port: 443,
             base_domain: "mynetwk.biz".to_string(),
             tls_mode: "local-ca".to_string(),
             ca_storage_path: PathBuf::from("/var/lib/server-dashboard/ca"),
             auth_service_url: "http://localhost:4000".to_string(),
             routes: vec![],
+            access_log_path: None,
             local_networks: vec![
                 "192.168.0.0/16".to_string(),
                 "10.0.0.0/8".to_string(),

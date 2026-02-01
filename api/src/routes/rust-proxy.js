@@ -57,13 +57,13 @@ router.get('/status', async (req, res) => {
   try {
     const running = isRustProxyRunning();
     const config = await loadRustProxyConfig();
-    const routes = config?.routes?.filter(r => r.enabled && r.backend === 'rust') || [];
+    const routes = config?.routes?.filter(r => r.enabled) || [];
 
     res.json({
       success: true,
       running,
       activeRoutes: routes.length,
-      httpsPort: config?.https_port || 444,
+      httpsPort: config?.https_port || 443,
       pid: getRustProxyPid()
     });
   } catch (error) {
@@ -99,6 +99,24 @@ router.get('/routes', async (req, res) => {
 
 export default router;
 
+// ========== Exported helper functions ==========
+
+export { reloadRustProxy };
+
+export async function getRustProxyStatus() {
+  const running = isRustProxyRunning();
+  const config = await loadRustProxyConfig();
+  const routes = config?.routes?.filter(r => r.enabled) || [];
+
+  return {
+    success: true,
+    running,
+    activeRoutes: routes.length,
+    httpsPort: config?.https_port || 443,
+    pid: getRustProxyPid()
+  };
+}
+
 // ========== Sync function (used by reverseproxy service) ==========
 
 /**
@@ -112,7 +130,7 @@ export async function syncRustProxyRoutes(rustRoutes) {
     if (!config) {
       config = {
         http_port: 80,
-        https_port: 444,
+        https_port: 443,
         base_domain: 'mynetwk.biz',
         tls_mode: 'local-ca',
         ca_storage_path: '/var/lib/server-dashboard/ca',
@@ -126,6 +144,11 @@ export async function syncRustProxyRoutes(rustRoutes) {
         ]
       };
     }
+
+    // Ensure correct ports and access log
+    config.https_port = 443;
+    config.http_port = 80;
+    config.access_log_path = '/var/log/rust-proxy/access.json';
 
     // Build a map of existing routes by domain (to preserve cert_id)
     const existingByDomain = {};
@@ -151,7 +174,6 @@ export async function syncRustProxyRoutes(rustRoutes) {
       newRoutes.push({
         id: existing?.id || route.id,
         domain: route.domain,
-        backend: 'rust',
         target_host: route.target_host,
         target_port: route.target_port,
         local_only: route.local_only || false,

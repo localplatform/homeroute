@@ -179,9 +179,6 @@ function ApplicationCard({ app, environments, baseDomain, certStatuses, onToggle
                           <span className="text-gray-500 text-xs flex-shrink-0">:{envEndpoint.frontend.targetPort}</span>
                           <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 flex-shrink-0" />
                         </a>
-                        {envEndpoint.frontend?.backend === 'rust' && (
-                          <span className="text-xs font-medium text-orange-400 bg-orange-900/30 px-1.5 py-0.5 rounded">Rust</span>
-                        )}
                         <CertBadge type="frontend" envId={env.id} />
                       </div>
                     )}
@@ -200,9 +197,6 @@ function ApplicationCard({ app, environments, baseDomain, certStatuses, onToggle
                           <span className="text-gray-500 text-xs flex-shrink-0">:{api.targetPort}</span>
                           <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 flex-shrink-0" />
                         </a>
-                        {api.backend === 'rust' && (
-                          <span className="text-xs font-medium text-orange-400 bg-orange-900/30 px-1.5 py-0.5 rounded">Rust</span>
-                        )}
                         <CertBadge type="api" envId={env.id} apiSlug={api.slug} />
                       </div>
                     ))}
@@ -221,9 +215,6 @@ function ApplicationCard({ app, environments, baseDomain, certStatuses, onToggle
                           <span className="text-gray-500 text-xs flex-shrink-0">:{envEndpoint.api.targetPort}</span>
                           <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 flex-shrink-0" />
                         </a>
-                        {envEndpoint.api?.backend === 'rust' && (
-                          <span className="text-xs font-medium text-orange-400 bg-orange-900/30 px-1.5 py-0.5 rounded">Rust</span>
-                        )}
                         <CertBadge type="api" envId={env.id} />
                       </div>
                     )}

@@ -46,5 +46,8 @@ tokio-stream = "0.1"
 # IP address parsing
 ipnet = "2.9"
 
+# Timestamps for access logging
+chrono = { version = "0.4", features = ["serde"] }
+
 # Path to ca-service (local dependency)
 ca-service = { path = "../ca-service" }

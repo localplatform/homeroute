@@ -69,7 +69,7 @@ export const deleteReverseProxyHost = (id) => api.delete(`/reverseproxy/hosts/${
 export const toggleReverseProxyHost = (id, enabled) => api.post(`/reverseproxy/hosts/${id}/toggle`, { enabled });
 export const updateBaseDomain = (baseDomain) => api.put('/reverseproxy/config/domain', { baseDomain });
 export const renewCertificates = () => api.post('/reverseproxy/certificates/renew');
-export const reloadCaddy = () => api.post('/reverseproxy/reload');
+export const reloadProxy = () => api.post('/reverseproxy/reload');
 export const getCertificatesStatus = () => api.get('/reverseproxy/certificates/status');
 
 // Reverse Proxy - Environments
@@ -81,10 +81,6 @@ export const addReverseProxyApplication = (app) => api.post('/reverseproxy/appli
 export const updateReverseProxyApplication = (id, updates) => api.put(`/reverseproxy/applications/${id}`, updates);
 export const deleteReverseProxyApplication = (id) => api.delete(`/reverseproxy/applications/${id}`);
 export const toggleReverseProxyApplication = (id, enabled) => api.post(`/reverseproxy/applications/${id}/toggle`, { enabled });
-
-// Reverse Proxy - Cloudflare
-export const getCloudflareConfig = () => api.get('/reverseproxy/cloudflare');
-export const updateCloudflareConfig = (config) => api.put('/reverseproxy/cloudflare', config);
 
 // Rust Proxy
 export const getRustProxyStatus = () => api.get('/rust-proxy/status');

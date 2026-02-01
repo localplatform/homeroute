@@ -8,7 +8,7 @@ A comprehensive web-based dashboard for managing home server infrastructure. Mon
 - **DNS/DHCP** - Dnsmasq integration with DHCP lease tracking
 - **Ad-Blocking** - Host-based ad-blocking with whitelist management and blocklist updates
 - **Dynamic DNS** - Cloudflare DDNS integration for automatic IPv6 updates
-- **Reverse Proxy** - Caddy management with HTTPS certificates and authentication
+- **Reverse Proxy** - Rust reverse proxy with local CA certificates and authentication
 
 ## Tech Stack
 
@@ -26,7 +26,7 @@ A comprehensive web-based dashboard for managing home server infrastructure. Mon
 - Session-based authentication
 
 **Infrastructure**
-- Caddy (reverse proxy)
+- Rust reverse proxy (TLS, local CA)
 - Dnsmasq (DNS/DHCP)
 - Cloudflare (DDNS)
 
@@ -38,7 +38,7 @@ A comprehensive web-based dashboard for managing home server infrastructure. Mon
 - MongoDB (optional)
 - Linux server with:
   - Dnsmasq configured
-  - Caddy installed
+  - Rust proxy built (`rust-proxy/`)
 
 ### Setup
 
@@ -85,8 +85,8 @@ ADBLOCK_WHITELIST=/var/lib/dnsmasq/adblock-whitelist.txt
 DDNS_CONFIG=/etc/cloudflare-ddns.conf
 
 # Reverse Proxy
-CADDY_API_URL=http://localhost:2019
 REVERSEPROXY_CONFIG=/var/lib/server-dashboard/reverseproxy-config.json
+RUST_PROXY_CONFIG=/var/lib/server-dashboard/rust-proxy-config.json
 ```
 
 ## NPM Scripts
@@ -129,7 +129,7 @@ server-dashboard/
 | `/api/nat` | NAT and firewall rules |
 | `/api/adblock` | Ad-blocking stats and whitelist |
 | `/api/ddns` | Dynamic DNS status and updates |
-| `/api/reverseproxy` | Caddy reverse proxy management |
+| `/api/reverseproxy` | Reverse proxy management |
 
 ## License
 

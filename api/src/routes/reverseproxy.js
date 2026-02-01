@@ -7,8 +7,8 @@ import {
   updateHost,
   deleteHost,
   toggleHost,
-  getCaddyStatus,
-  reloadCaddy,
+  getProxyStatus,
+  reloadProxy,
   renewCertificates,
   getSystemRouteStatus,
   getCertificatesStatus,
@@ -22,10 +22,7 @@ import {
   addApplication,
   updateApplication,
   deleteApplication,
-  toggleApplication,
-  // Cloudflare
-  getCloudflareConfig,
-  updateCloudflareConfig
+  toggleApplication
 } from '../services/reverseproxy.js';
 
 const router = Router();
@@ -88,20 +85,17 @@ router.post('/hosts/:id/toggle', async (req, res) => {
   res.json(result);
 });
 
-// ========== Caddy Status Endpoints ==========
+// ========== Proxy Status Endpoints ==========
 
-// GET /api/reverseproxy/status - Statut Caddy
+// GET /api/reverseproxy/status - Statut du proxy Rust
 router.get('/status', async (req, res) => {
-  const caddyStatus = await getCaddyStatus();
-  res.json({
-    success: true,
-    caddy: caddyStatus
-  });
+  const result = await getProxyStatus();
+  res.json(result);
 });
 
-// POST /api/reverseproxy/reload - Recharger Caddy
+// POST /api/reverseproxy/reload - Recharger le proxy
 router.post('/reload', async (req, res) => {
-  const result = await reloadCaddy();
+  const result = await reloadProxy();
   res.json(result);
 });
 
@@ -192,20 +186,6 @@ router.delete('/applications/:id', async (req, res) => {
 router.post('/applications/:id/toggle', async (req, res) => {
   const { enabled } = req.body;
   const result = await toggleApplication(req.params.id, enabled);
-  res.json(result);
-});
-
-// ========== Cloudflare Endpoints ==========
-
-// GET /api/reverseproxy/cloudflare - Configuration Cloudflare
-router.get('/cloudflare', async (req, res) => {
-  const result = await getCloudflareConfig();
-  res.json(result);
-});
-
-// PUT /api/reverseproxy/cloudflare - Modifier configuration Cloudflare
-router.put('/cloudflare', async (req, res) => {
-  const result = await updateCloudflareConfig(req.body);
   res.json(result);
 });
 

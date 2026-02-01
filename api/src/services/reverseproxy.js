@@ -2,24 +2,14 @@ import { readFile, writeFile, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import http from 'http';
 import tls from 'tls';
-import { syncRustProxyRoutes } from '../routes/rust-proxy.js';
+import { syncRustProxyRoutes, reloadRustProxy, getRustProxyStatus as getRustProxyStatusFromRoute } from '../routes/rust-proxy.js';
 
 // Environment configuration
 const getEnv = () => ({
   CONFIG_FILE: process.env.REVERSEPROXY_CONFIG || '/var/lib/server-dashboard/reverseproxy-config.json',
-  CADDY_API: process.env.CADDY_API_URL || 'http://localhost:2019',
   DASHBOARD_PORT: process.env.PORT || '4000'
 });
-
-// RFC 1918 private networks + localhost
-const LOCAL_NETWORKS = [
-  '192.168.0.0/16',
-  '10.0.0.0/8',
-  '172.16.0.0/12',
-  '127.0.0.0/8'
-];
 
 // Default config structure
 const getDefaultConfig = () => ({
@@ -29,11 +19,7 @@ const getDefaultConfig = () => ({
     { id: 'dev', name: 'Development', prefix: 'dev', apiPrefix: 'api.dev', isDefault: false }
   ],
   applications: [],
-  hosts: [],
-  cloudflare: {
-    enabled: false,
-    wildcardDomains: []
-  }
+  hosts: []
 });
 
 async function ensureConfigDir() {
@@ -42,55 +28,6 @@ async function ensureConfigDir() {
   if (!existsSync(configDir)) {
     await mkdir(configDir, { recursive: true });
   }
-}
-
-// ========== Caddy API Interaction ==========
-
-async function caddyApiRequest(method, apiPath, data = null) {
-  const { CADDY_API } = getEnv();
-  const url = new URL(apiPath, CADDY_API);
-
-  return new Promise((resolve, reject) => {
-    const options = {
-      hostname: url.hostname,
-      port: url.port || 2019,
-      path: url.pathname,
-      method,
-      headers: { 'Content-Type': 'application/json' }
-    };
-
-    const req = http.request(options, (res) => {
-      let body = '';
-      res.on('data', chunk => body += chunk);
-      res.on('end', () => {
-        if (res.statusCode >= 200 && res.statusCode < 300) {
-          let data = null;
-          if (body) {
-            try {
-              data = JSON.parse(body);
-            } catch {
-              data = body;
-            }
-          }
-          resolve({ success: true, data, statusCode: res.statusCode });
-        } else {
-          resolve({ success: false, error: `Caddy API error: ${res.statusCode} - ${body}`, statusCode: res.statusCode });
-        }
-      });
-    });
-
-    req.on('error', (err) => {
-      reject(new Error(`Caddy API connection failed: ${err.message}`));
-    });
-
-    req.setTimeout(10000, () => {
-      req.destroy();
-      reject(new Error('Caddy API request timeout'));
-    });
-
-    if (data) req.write(JSON.stringify(data));
-    req.end();
-  });
 }
 
 // ========== Configuration Management ==========
@@ -168,8 +105,9 @@ export async function loadConfig() {
   try {
     const content = await readFile(CONFIG_FILE, 'utf-8');
     const saved = JSON.parse(content);
-    // Migration: remove old wildcardCert field
+    // Migration: remove old fields
     delete saved.wildcardCert;
+    delete saved.cloudflare;
 
     // Merge with defaults to ensure all fields exist
     const defaultConfig = getDefaultConfig();
@@ -178,8 +116,7 @@ export async function loadConfig() {
       ...saved,
       // Ensure nested objects have defaults
       environments: saved.environments || defaultConfig.environments,
-      applications: saved.applications || defaultConfig.applications,
-      cloudflare: { ...defaultConfig.cloudflare, ...(saved.cloudflare || {}) }
+      applications: saved.applications || defaultConfig.applications
     };
 
     // Migrate applications to new structure if needed
@@ -239,8 +176,8 @@ export async function updateBaseDomain(baseDomain) {
     config.baseDomain = baseDomain.toLowerCase();
     await saveConfigFile(config);
 
-    // Regenerate Caddy config with new base domain
-    await applyCaddyConfig();
+    // Sync all routes to Rust proxy
+    await syncAllRoutes(config);
 
     return { success: true, message: 'Base domain updated', baseDomain: config.baseDomain };
   } catch (error) {
@@ -318,10 +255,7 @@ export async function addHost(hostConfig) {
 
     config.hosts.push(newHost);
     await saveConfigFile(config);
-
-    // Apply to Caddy + Rust proxy
-    await applyCaddyConfig();
-    await syncAllRustRoutes(config);
+    await syncAllRoutes(config);
 
     return { success: true, host: newHost };
   } catch (error) {
@@ -338,7 +272,7 @@ export async function updateHost(hostId, updates) {
       return { success: false, error: 'Host not found' };
     }
 
-    const allowedUpdates = ['targetHost', 'targetPort', 'enabled', 'localOnly', 'requireAuth', 'authBackend', 'backend'];
+    const allowedUpdates = ['targetHost', 'targetPort', 'enabled', 'localOnly', 'requireAuth', 'authBackend'];
     for (const key of Object.keys(updates)) {
       if (allowedUpdates.includes(key)) {
         if (key === 'targetPort') {
@@ -359,12 +293,6 @@ export async function updateHost(hostId, updates) {
             return { success: false, error: 'code-server ne peut pas utiliser Authelia pour des raisons de sécurité' };
           }
           config.hosts[hostIndex][key] = updates[key];
-        } else if (key === 'backend') {
-          const validBackends = ['caddy', 'rust'];
-          if (!validBackends.includes(updates[key])) {
-            return { success: false, error: 'Invalid backend value (caddy or rust)' };
-          }
-          config.hosts[hostIndex][key] = updates[key];
         } else {
           config.hosts[hostIndex][key] = updates[key];
         }
@@ -372,8 +300,7 @@ export async function updateHost(hostId, updates) {
     }
 
     await saveConfigFile(config);
-    await applyCaddyConfig();
-    await syncAllRustRoutes(config);
+    await syncAllRoutes(config);
 
     return { success: true, host: config.hosts[hostIndex] };
   } catch (error) {
@@ -392,8 +319,7 @@ export async function deleteHost(hostId) {
 
     const deletedHost = config.hosts.splice(hostIndex, 1)[0];
     await saveConfigFile(config);
-    await applyCaddyConfig();
-    await syncAllRustRoutes(config);
+    await syncAllRoutes(config);
 
     return { success: true, message: 'Host deleted', host: deletedHost };
   } catch (error) {
@@ -474,7 +400,7 @@ export async function updateEnvironment(envId, updates) {
     }
 
     await saveConfigFile(config);
-    await applyCaddyConfig();
+    await syncAllRoutes(config);
 
     return { success: true, environment: config.environments[envIndex] };
   } catch (error) {
@@ -492,7 +418,7 @@ export async function deleteEnvironment(envId) {
     }
 
     // Check if any apps use this environment
-    const appsUsingEnv = config.applications.filter(a => a.environments.includes(envId));
+    const appsUsingEnv = config.applications.filter(a => a.environments?.includes(envId));
     if (appsUsingEnv.length > 0) {
       return { success: false, error: `Cannot delete: ${appsUsingEnv.length} application(s) use this environment` };
     }
@@ -569,8 +495,7 @@ export async function addApplication(appConfig) {
           targetHost: api.targetHost || 'localhost',
           targetPort: parseInt(api.targetPort) || 3001,
           localOnly: !!api.localOnly,
-          requireAuth: !!api.requireAuth,
-          ...(api.backend === 'rust' ? { backend: 'rust' } : {})
+          requireAuth: !!api.requireAuth
         }));
       } else if (envEndpoints.api) {
         // Backward compatibility: convert single api to apis[]
@@ -599,8 +524,7 @@ export async function addApplication(appConfig) {
           targetHost: envEndpoints.frontend.targetHost,
           targetPort: frontendPort,
           localOnly: !!envEndpoints.frontend.localOnly,
-          requireAuth: !!envEndpoints.frontend.requireAuth,
-          ...(envEndpoints.frontend.backend === 'rust' ? { backend: 'rust' } : {})
+          requireAuth: !!envEndpoints.frontend.requireAuth
         },
         apis
       };
@@ -621,8 +545,7 @@ export async function addApplication(appConfig) {
 
     config.applications.push(newApp);
     await saveConfigFile(config);
-    await applyCaddyConfig();
-    await syncAllRustRoutes(config);
+    await syncAllRoutes(config);
 
     return { success: true, application: newApp };
   } catch (error) {
@@ -703,8 +626,7 @@ export async function updateApplication(appId, updates) {
                 targetHost: api.targetHost || 'localhost',
                 targetPort: parseInt(api.targetPort) || 3001,
                 localOnly: !!api.localOnly,
-                requireAuth: !!api.requireAuth,
-                ...(api.backend === 'rust' ? { backend: 'rust' } : {})
+                requireAuth: !!api.requireAuth
               }));
             } else {
               apis = [];
@@ -744,8 +666,7 @@ export async function updateApplication(appId, updates) {
               targetHost: envEndpoints.frontend.targetHost || 'localhost',
               targetPort: parseInt(envEndpoints.frontend.targetPort) || 3000,
               localOnly: !!envEndpoints.frontend.localOnly,
-              requireAuth: !!envEndpoints.frontend.requireAuth,
-              ...(envEndpoints.frontend.backend === 'rust' ? { backend: 'rust' } : {})
+              requireAuth: !!envEndpoints.frontend.requireAuth
             } : app.endpoints[envId]?.frontend || null,
             apis
           };
@@ -754,8 +675,7 @@ export async function updateApplication(appId, updates) {
     }
 
     await saveConfigFile(config);
-    await applyCaddyConfig();
-    await syncAllRustRoutes(config);
+    await syncAllRoutes(config);
 
     return { success: true, application: app };
   } catch (error) {
@@ -774,8 +694,7 @@ export async function deleteApplication(appId) {
 
     const deletedApp = config.applications.splice(appIndex, 1)[0];
     await saveConfigFile(config);
-    await applyCaddyConfig();
-    await syncAllRustRoutes(config);
+    await syncAllRoutes(config);
 
     return { success: true, message: 'Application deleted', application: deletedApp };
   } catch (error) {
@@ -791,75 +710,14 @@ export async function toggleApplication(appId, enabled) {
   }
 }
 
-// ========== Migration ==========
-
-// ========== Cloudflare Configuration ==========
-
-export async function getCloudflareConfig() {
-  try {
-    const config = await loadConfig();
-    return {
-      success: true,
-      cloudflare: {
-        enabled: config.cloudflare?.enabled || false,
-        wildcardDomains: config.cloudflare?.wildcardDomains || [],
-        hasToken: !!process.env.CF_API_TOKEN
-      }
-    };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-}
-
-export async function updateCloudflareConfig(cfConfig) {
-  try {
-    const config = await loadConfig();
-
-    config.cloudflare = {
-      ...config.cloudflare,
-      enabled: !!cfConfig.enabled,
-      wildcardDomains: cfConfig.wildcardDomains || config.cloudflare?.wildcardDomains || []
-    };
-
-    // Auto-generate wildcard domains based on environments
-    if (cfConfig.enabled && config.baseDomain) {
-      const wildcards = new Set();
-      for (const env of config.environments) {
-        if (env.prefix) {
-          wildcards.add(`*.${env.prefix}.${config.baseDomain}`);
-          wildcards.add(`*.${env.apiPrefix}.${config.baseDomain}`);
-        } else {
-          wildcards.add(`*.${config.baseDomain}`);
-          wildcards.add(`*.${env.apiPrefix}.${config.baseDomain}`);
-        }
-      }
-      config.cloudflare.wildcardDomains = Array.from(wildcards);
-    }
-
-    await saveConfigFile(config);
-    await applyCaddyConfig();
-
-    return { success: true, cloudflare: config.cloudflare };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-}
-
-// ========== Caddy Configuration Generation ==========
+// ========== Domain Generation ==========
 
 // Generate domain for an application endpoint
 function getAppDomain(app, endpointType, env, baseDomain, apiSlug = '') {
-  // endpointType: 'frontend' or 'api'
-  // env: environment object with prefix and apiPrefix
-  // apiSlug: optional slug for additional APIs (e.g., 'cdn', 'ws')
-
   if (endpointType === 'api') {
-    // API domain format: {app}-{slug}.{apiPrefix}.{baseDomain} or {app}.{apiPrefix}.{baseDomain}
-    // e.g., www.api.dev.example.com (default) or www-cdn.api.dev.example.com
     const hostPart = apiSlug ? `${app.slug}-${apiSlug}` : app.slug;
     return `${hostPart}.${env.apiPrefix}.${baseDomain}`;
   } else {
-    // Frontend: {slug}.{prefix}.{baseDomain} or {slug}.{baseDomain}
     if (env.prefix) {
       return `${app.slug}.${env.prefix}.${baseDomain}`;
     }
@@ -867,518 +725,24 @@ function getAppDomain(app, endpointType, env, baseDomain, apiSlug = '') {
   }
 }
 
-// Generate CSP header handler
-// Returns null for domains that need permissive CSP (like code-server)
-function getCspHeaderHandler(baseDomain, domain = null) {
-  // Skip CSP for code-server domains (they manage their own security)
-  if (domain && domain.startsWith('code.')) {
-    return null;
-  }
+// ========== Proxy Status & Control ==========
 
-  return {
-    handler: 'headers',
-    response: {
-      set: {
-        'Content-Security-Policy': [
-          `default-src 'self'; connect-src 'self' https://auth.${baseDomain}; script-src 'self' 'unsafe-inline' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; worker-src 'self' blob:`
-        ]
-      }
-    }
-  };
-}
-
-// Generate routes for an application across all its environments
-function generateAppRoutes(app, environments, baseDomain) {
-  const { DASHBOARD_PORT } = getEnv();
-  const authServiceUrl = `http://localhost:${DASHBOARD_PORT}`;
-  const routes = [];
-
-  // New structure: app.endpoints is an object { envId: { frontend, apis: [] } }
-  if (!app.endpoints || typeof app.endpoints !== 'object') {
-    return routes;
-  }
-
-  for (const [envId, envEndpoints] of Object.entries(app.endpoints)) {
-    const env = environments.find(e => e.id === envId);
-    if (!env || !envEndpoints) continue;
-
-    // Frontend route (skip backend='rust')
-    if (envEndpoints.frontend && envEndpoints.frontend.backend !== 'rust') {
-      const frontendDomain = getAppDomain(app, 'frontend', env, baseDomain);
-      routes.push(generateEndpointRoute(
-        `${app.id}-frontend-${envId}`,
-        frontendDomain,
-        envEndpoints.frontend,
-        baseDomain,
-        authServiceUrl,
-        envId
-      ));
-    }
-
-    // API routes (multiple APIs supported via apis[], skip backend='rust')
-    const apis = envEndpoints.apis || [];
-    for (const api of apis) {
-      if (api.backend === 'rust') continue;
-      const apiSlug = api.slug || '';
-      const apiDomain = getAppDomain(app, 'api', env, baseDomain, apiSlug);
-      const routeId = apiSlug
-        ? `${app.id}-api-${apiSlug}-${envId}`
-        : `${app.id}-api-${envId}`;
-      routes.push(generateEndpointRoute(
-        routeId,
-        apiDomain,
-        api,
-        baseDomain,
-        authServiceUrl,
-        envId
-      ));
-    }
-
-    // Backward compatibility: support old 'api' field if apis[] not present
-    if (envEndpoints.api && (!envEndpoints.apis || envEndpoints.apis.length === 0)) {
-      const apiDomain = getAppDomain(app, 'api', env, baseDomain);
-      routes.push(generateEndpointRoute(
-        `${app.id}-api-${envId}`,
-        apiDomain,
-        envEndpoints.api,
-        baseDomain,
-        authServiceUrl,
-        envId
-      ));
-    }
-  }
-
-  return routes;
-}
-
-// Generate a single endpoint route
-function generateEndpointRoute(id, domain, endpoint, baseDomain, authServiceUrl, envId = null) {
-  const cspHandler = getCspHeaderHandler(baseDomain, domain);
-  const reverseProxyHandler = {
-    handler: 'reverse_proxy',
-    upstreams: [{
-      dial: `${endpoint.targetHost}:${endpoint.targetPort}`
-    }]
-  };
-
-  if (endpoint.requireAuth) {
-    // Build routes array for subroute
-    const routes = [];
-
-    // Add WebSocket bypass: websockets cannot be authenticated via forward-auth
-    // because the upgrade request doesn't properly carry session cookies
-    routes.push({
-      match: [{ header: { 'Upgrade': ['websocket'] } }],
-      handle: [reverseProxyHandler]
-    });
-
-    // Add normal auth check route
-    routes.push({
-      // Normal requests: auth check
-      handle: [{
-        handler: 'reverse_proxy',
-        upstreams: [{ dial: authServiceUrl.replace('http://', '') }],
-        rewrite: { method: 'GET', uri: '/api/authz/forward-auth' },
-        handle_response: [
-          {
-            match: { status_code: [401, 403] },
-            routes: [{
-              handle: [{
-                handler: 'static_response',
-                status_code: 302,
-                headers: {
-                  'Location': [`https://auth.${baseDomain}/login?rd=https://${domain}{http.request.uri}`]
-                }
-              }]
-            }]
-          },
-          {
-            match: { status_code: [200] },
-            routes: [{ handle: [reverseProxyHandler] }]
-          }
-        ]
-      }]
-    });
-
-    const subrouteHandler = {
-      handler: 'subroute',
-      routes
-    };
-    const authCheckRoute = {
-      '@id': id,
-      match: [{ host: [domain] }],
-      handle: cspHandler ? [cspHandler, subrouteHandler] : [subrouteHandler],
-      terminal: true
-    };
-
-    if (endpoint.localOnly) {
-      const localHandlers = cspHandler ? [cspHandler, subrouteHandler] : [subrouteHandler];
-      authCheckRoute.handle = [{
-        handler: 'subroute',
-        routes: [
-          { match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }], handle: localHandlers },
-          { handle: [{ handler: 'error', status_code: 403 }] }
-        ]
-      }];
-    }
-
-    return authCheckRoute;
-  }
-
-  // Without requireAuth: direct proxy
-  if (endpoint.localOnly) {
-    // For localOnly, add websocket bypass too (websockets can have issues with IP checks)
-    const routes = [];
-
-    // WebSocket bypass: pass directly without IP restriction
-    routes.push({
-      match: [{ header: { 'Upgrade': ['websocket'] } }],
-      handle: [reverseProxyHandler]
-    });
-
-    // Normal requests: IP restriction
-    const localHandlers = cspHandler ? [cspHandler, reverseProxyHandler] : [reverseProxyHandler];
-    routes.push({
-      match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }],
-      handle: localHandlers
-    });
-    routes.push({
-      handle: [{ handler: 'error', status_code: 403 }]
-    });
-
-    return {
-      '@id': id,
-      match: [{ host: [domain] }],
-      handle: [{
-        handler: 'subroute',
-        routes
-      }],
-      terminal: true
-    };
-  }
-
-  return {
-    '@id': id,
-    match: [{ host: [domain] }],
-    handle: cspHandler ? [cspHandler, reverseProxyHandler] : [reverseProxyHandler],
-    terminal: true
-  };
-}
-
-function generateCaddyRoute(host, baseDomain) {
-  const domain = host.customDomain || `${host.subdomain}.${baseDomain}`;
-  const { DASHBOARD_PORT } = getEnv();
-  const authServiceUrl = `http://localhost:${DASHBOARD_PORT}`;
-  const cspHandler = getCspHeaderHandler(baseDomain, domain);
-
-  // Proxy direct vers la cible
-  const reverseProxyHandler = {
-    handler: 'reverse_proxy',
-    upstreams: [{
-      dial: `${host.targetHost}:${host.targetPort}`
-    }]
-  };
-
-  // Si requireAuth est activé, on utilise intercept pour vérifier l'auth
-  // via une sous-requête à l'auth-service
-  if (host.requireAuth) {
-    // Build routes array for subroute
-    const routes = [];
-
-    // Add WebSocket bypass: websockets cannot be authenticated via forward-auth
-    // because the upgrade request doesn't properly carry session cookies
-    routes.push({
-      match: [{ header: { 'Upgrade': ['websocket'] } }],
-      handle: [reverseProxyHandler]
-    });
-
-    // Add normal auth check route
-    routes.push({
-      // Normal requests: auth check
-      // Faire une sous-requête à l'auth-service pour vérifier le cookie
-      handle: [{
-        handler: 'reverse_proxy',
-        upstreams: [{ dial: authServiceUrl.replace('http://', '') }],
-        rewrite: {
-          method: 'GET',
-          uri: '/api/authz/forward-auth'
-        },
-        handle_response: [
-          {
-            // Si auth-service retourne 401, rediriger vers login
-            match: { status_code: [401, 403] },
-            routes: [{
-              handle: [{
-                handler: 'static_response',
-                status_code: 302,
-                headers: {
-                  'Location': [`https://auth.${baseDomain}/login?rd=https://${domain}{http.request.uri}`]
-                }
-              }]
-            }]
-          },
-          {
-            // Si auth OK (200), proxy vers l'app cible
-            match: { status_code: [200] },
-            routes: [{
-              handle: [reverseProxyHandler]
-            }]
-          }
-        ]
-      }]
-    });
-
-    // Route avec vérification d'auth via intercept
-    const subrouteHandler = {
-      handler: 'subroute',
-      routes
-    };
-    const authCheckRoute = {
-      '@id': host.id,
-      match: [{ host: [domain] }],
-      handle: cspHandler ? [cspHandler, subrouteHandler] : [subrouteHandler],
-      terminal: true
-    };
-
-    // Ajouter restriction IP si localOnly
-    if (host.localOnly) {
-      const localHandlers = cspHandler ? [cspHandler, subrouteHandler] : [subrouteHandler];
-      authCheckRoute.handle = [{
-        handler: 'subroute',
-        routes: [
-          {
-            match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }],
-            handle: localHandlers
-          },
-          {
-            handle: [{
-              handler: 'error',
-              status_code: 403
-            }]
-          }
-        ]
-      }];
-    }
-
-    return authCheckRoute;
-  }
-
-  // Sans requireAuth : proxy direct
-  if (host.localOnly) {
-    // For localOnly, add websocket bypass too (websockets can have issues with IP checks)
-    const routes = [];
-
-    // WebSocket bypass: pass directly without IP restriction
-    routes.push({
-      match: [{ header: { 'Upgrade': ['websocket'] } }],
-      handle: [reverseProxyHandler]
-    });
-
-    // Normal requests: IP restriction
-    const localHandlers = cspHandler ? [cspHandler, reverseProxyHandler] : [reverseProxyHandler];
-    routes.push({
-      match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }],
-      handle: localHandlers
-    });
-    routes.push({
-      handle: [{
-        handler: 'error',
-        status_code: 403
-      }]
-    });
-
-    return {
-      '@id': host.id,
-      match: [{ host: [domain] }],
-      handle: [{
-        handler: 'subroute',
-        routes
-      }],
-      terminal: true
-    };
-  }
-
-  return {
-    '@id': host.id,
-    match: [{ host: [domain] }],
-    handle: cspHandler ? [cspHandler, reverseProxyHandler] : [reverseProxyHandler],
-    terminal: true
-  };
-}
-
-function generateCaddyConfig(config) {
-  const { DASHBOARD_PORT } = getEnv();
-  const authServiceUrl = `http://localhost:${DASHBOARD_PORT}`;
-
-  const routes = [];
-
-  // Generate routes for applications
-  const enabledApps = (config.applications || []).filter(a => a.enabled);
-  for (const app of enabledApps) {
-    const appRoutes = generateAppRoutes(app, config.environments || [], config.baseDomain);
-    routes.push(...appRoutes);
-  }
-
-  // Generate routes for standalone hosts (skip backend='rust')
-  const enabledHosts = config.hosts.filter(h => h.enabled && h.backend !== 'rust');
-  routes.push(...enabledHosts.map(h => generateCaddyRoute(h, config.baseDomain)));
-
-  // Add system route for dashboard (proxy.<baseDomain>)
-  // Note: L'authentification est gérée côté API via le middleware (cookie auth_session)
-  if (config.baseDomain) {
-    const cspHandler = getCspHeaderHandler(config.baseDomain);
-
-    routes.unshift({
-      '@id': 'system-dashboard',
-      match: [{ host: [`proxy.${config.baseDomain}`] }],
-      handle: [
-        cspHandler,
-        {
-          handler: 'reverse_proxy',
-          upstreams: [{ dial: `localhost:${DASHBOARD_PORT}` }]
-        }
-      ],
-      terminal: true
-    });
-
-    // Add auth portal route (auth.<baseDomain>) - custom auth service (no auth required)
-    routes.unshift({
-      '@id': 'system-auth',
-      match: [{ host: [`auth.${config.baseDomain}`] }],
-      handle: [
-        cspHandler,
-        {
-          handler: 'reverse_proxy',
-          upstreams: [{ dial: authServiceUrl.replace('http://', '').replace('https://', '') }]
-        }
-      ],
-      terminal: true
-    });
-  }
-
-  const caddyConfig = {
-    admin: {
-      listen: 'localhost:2019'
-    },
-    apps: {
-      http: {
-        servers: {
-          srv0: {
-            listen: [':80', ':443'],
-            routes,
-            logs: {
-              default_logger_name: 'homeroute_access'
-            }
-          }
-        }
-      }
-    }
-  };
-
-  // TLS configuration
-  if (routes.length > 0) {
-    if (config.cloudflare?.enabled && process.env.CF_API_TOKEN) {
-      // Cloudflare DNS challenge for wildcard certificates
-      caddyConfig.apps.tls = {
-        automation: {
-          policies: [{
-            subjects: config.cloudflare.wildcardDomains || [],
-            issuers: [{
-              module: 'acme',
-              challenges: {
-                dns: {
-                  provider: {
-                    name: 'cloudflare',
-                    api_token: process.env.CF_API_TOKEN
-                  }
-                }
-              }
-            }]
-          }]
-        }
-      };
-    } else {
-      // Default: Let's Encrypt with HTTP challenge (individual certs)
-      caddyConfig.apps.tls = {
-        automation: {
-          policies: [{
-            issuers: [{
-              module: 'acme'
-            }]
-          }]
-        }
-      };
-    }
-  }
-
-  // Add access logging for traffic analytics
-  caddyConfig.logging = {
-    logs: {
-      homeroute_access: {
-        writer: {
-          output: 'file',
-          filename: process.env.CADDY_ACCESS_LOG || '/var/log/caddy/homeroute-access.json'
-        },
-        encoder: {
-          format: 'json'
-        }
-      }
-    }
-  };
-
-  return caddyConfig;
-}
-
-async function applyCaddyConfig() {
+export async function getProxyStatus() {
   try {
-    const config = await loadConfig();
-
-    // Skip if no hosts and no baseDomain (system route)
-    if (config.hosts.length === 0 && !config.baseDomain) {
-      return { success: true, message: 'No configuration to apply' };
-    }
-
-    const caddyConfig = generateCaddyConfig(config);
-    const result = await caddyApiRequest('POST', '/load', caddyConfig);
-
-    if (!result.success) {
-      console.error('Failed to apply Caddy config:', result.error);
-      return result;
-    }
-
-    return { success: true, message: 'Caddy configuration applied' };
-  } catch (error) {
-    console.error('Error applying Caddy config:', error);
-    return { success: false, error: error.message };
-  }
-}
-
-// ========== Caddy Status ==========
-
-export async function getCaddyStatus() {
-  try {
-    const result = await caddyApiRequest('GET', '/config/');
-
-    return {
-      success: true,
-      running: result.success,
-      hasConfig: result.data !== null,
-      error: result.success ? null : result.error
-    };
+    return await getRustProxyStatusFromRoute();
   } catch (error) {
     return {
       success: true,
       running: false,
-      hasConfig: false,
       error: error.message
     };
   }
 }
 
-export async function reloadCaddy() {
+export async function reloadProxy() {
   try {
-    const result = await applyCaddyConfig();
-    return result;
+    await syncAllRoutes();
+    return { success: true, message: 'Proxy configuration reloaded' };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -1386,14 +750,9 @@ export async function reloadCaddy() {
 
 export async function renewCertificates() {
   try {
-    // Caddy handles renewal automatically, but we can force it by reloading config
-    const result = await applyCaddyConfig();
-
-    if (result.success) {
-      return { success: true, message: 'Certificate renewal triggered' };
-    }
-
-    return result;
+    // With local CA, renewal means re-syncing routes which triggers ca-cli
+    await syncAllRoutes();
+    return { success: true, message: 'Certificate renewal triggered via local CA' };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -1426,21 +785,45 @@ export async function getSystemRouteStatus() {
   }
 }
 
-// ========== Rust Proxy Sync ==========
+// ========== Route Sync (Rust Proxy) ==========
 
 /**
- * Collect all routes with backend='rust' from hosts and applications,
- * and sync them to the rust-proxy config.
+ * Collect ALL routes from hosts and applications,
+ * add system routes, and sync them to the rust-proxy config.
  */
-async function syncAllRustRoutes(config) {
+async function syncAllRoutes(config) {
   if (!config) config = await loadConfig();
-  const rustRoutes = [];
+  const { DASHBOARD_PORT } = getEnv();
+  const routes = [];
+
+  // System routes (proxy.<baseDomain> and auth.<baseDomain>)
+  if (config.baseDomain) {
+    routes.push({
+      id: 'system-dashboard',
+      domain: `proxy.${config.baseDomain}`,
+      target_host: 'localhost',
+      target_port: parseInt(DASHBOARD_PORT),
+      local_only: false,
+      require_auth: false,
+      enabled: true
+    });
+
+    routes.push({
+      id: 'system-auth',
+      domain: `auth.${config.baseDomain}`,
+      target_host: 'localhost',
+      target_port: parseInt(DASHBOARD_PORT),
+      local_only: false,
+      require_auth: false,
+      enabled: true
+    });
+  }
 
   // Collect from standalone hosts
   for (const host of config.hosts || []) {
-    if (host.backend === 'rust' && host.enabled) {
+    if (host.enabled) {
       const domain = host.customDomain || `${host.subdomain}.${config.baseDomain}`;
-      rustRoutes.push({
+      routes.push({
         id: host.id,
         domain,
         target_host: host.targetHost,
@@ -1461,9 +844,9 @@ async function syncAllRustRoutes(config) {
       if (!env || !envEndpoints) continue;
 
       // Frontend
-      if (envEndpoints.frontend && envEndpoints.frontend.backend === 'rust') {
+      if (envEndpoints.frontend) {
         const domain = getAppDomain(app, 'frontend', env, config.baseDomain);
-        rustRoutes.push({
+        routes.push({
           id: `${app.id}-frontend-${envId}`,
           domain,
           target_host: envEndpoints.frontend.targetHost,
@@ -1476,27 +859,25 @@ async function syncAllRustRoutes(config) {
 
       // APIs
       for (const api of envEndpoints.apis || []) {
-        if (api.backend === 'rust') {
-          const apiDomain = getAppDomain(app, 'api', env, config.baseDomain, api.slug || '');
-          rustRoutes.push({
-            id: api.slug ? `${app.id}-api-${api.slug}-${envId}` : `${app.id}-api-${envId}`,
-            domain: apiDomain,
-            target_host: api.targetHost,
-            target_port: api.targetPort,
-            local_only: !!api.localOnly,
-            require_auth: !!api.requireAuth,
-            enabled: true
-          });
-        }
+        const apiDomain = getAppDomain(app, 'api', env, config.baseDomain, api.slug || '');
+        routes.push({
+          id: api.slug ? `${app.id}-api-${api.slug}-${envId}` : `${app.id}-api-${envId}`,
+          domain: apiDomain,
+          target_host: api.targetHost,
+          target_port: api.targetPort,
+          local_only: !!api.localOnly,
+          require_auth: !!api.requireAuth,
+          enabled: true
+        });
       }
     }
   }
 
-  await syncRustProxyRoutes(rustRoutes);
+  await syncRustProxyRoutes(routes);
 }
 
-// Export for use in routes
-export { syncAllRustRoutes };
+// Export for use in routes and startup
+export { syncAllRoutes };
 
 // ========== Certificate Status ==========
 
@@ -1505,7 +886,7 @@ async function checkCertificate(domain) {
     const socket = tls.connect({
       host: domain,
       port: 443,
-      servername: domain,  // SNI - important pour les certificats multi-domaines
+      servername: domain,
       rejectUnauthorized: false,
       timeout: 5000
     }, () => {
@@ -1578,13 +959,6 @@ export async function getCertificatesStatus() {
           const key = apiSlug
             ? `${app.id}-api-${apiSlug}-${envId}`
             : `${app.id}-api-${envId}`;
-          statuses[key] = await checkCertificate(apiDomain);
-        }
-
-        // Backward compatibility: check old 'api' field if apis[] not present
-        if (envEndpoints.api && (!envEndpoints.apis || envEndpoints.apis.length === 0)) {
-          const apiDomain = getAppDomain(app, 'api', env, config.baseDomain);
-          const key = `${app.id}-api-${envId}`;
           statuses[key] = await checkCertificate(apiDomain);
         }
       }

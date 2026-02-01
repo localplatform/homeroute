@@ -32,13 +32,17 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub routes: Vec<RouteConfig>,
 
+    /// Chemin du fichier de log d'accès JSON (optionnel)
+    #[serde(default)]
+    pub access_log_path: Option<String>,
+
     /// Réseaux locaux (pour localOnly)
     #[serde(default = "default_local_networks")]
     pub local_networks: Vec<String>,
 }
 
 fn default_http_port() -> u16 { 80 }
-fn default_https_port() -> u16 { 444 }
+fn default_https_port() -> u16 { 443 }
 fn default_tls_mode() -> String { "local-ca".to_string() }
 fn default_ca_path() -> PathBuf { PathBuf::from("/var/lib/server-dashboard/ca") }
 fn default_auth_service_url() -> String { "http://localhost:4000".to_string() }
@@ -105,17 +109,17 @@ impl ProxyConfig {
         Ok(())
     }
 
-    /// Retourne uniquement les routes actives pour le backend "rust"
-    pub fn active_rust_routes(&self) -> Vec<&RouteConfig> {
+    /// Retourne uniquement les routes actives
+    pub fn active_routes(&self) -> Vec<&RouteConfig> {
         self.routes
             .iter()
-            .filter(|r| r.enabled && r.backend == "rust")
+            .filter(|r| r.enabled)
             .collect()
     }
 
     /// Retourne les routes groupées par domaine
     pub fn routes_by_domain(&self) -> HashMap<String, &RouteConfig> {
-        self.active_rust_routes()
+        self.active_routes()
             .into_iter()
             .map(|r| (r.domain.clone(), r))
             .collect()
@@ -130,16 +134,17 @@ mod tests {
     fn test_default_config() {
         let config = ProxyConfig {
             http_port: 80,
-            https_port: 444,
+            https_port: 443,
             base_domain: "example.com".to_string(),
             tls_mode: "local-ca".to_string(),
             ca_storage_path: PathBuf::from("/var/lib/server-dashboard/ca"),
             auth_service_url: "http://localhost:4000".to_string(),
             routes: vec![],
+            access_log_path: None,
             local_networks: default_local_networks(),
         };
 
-        assert_eq!(config.https_port, 444);
+        assert_eq!(config.https_port, 443);
         assert_eq!(config.base_domain, "example.com");
     }
 
@@ -147,7 +152,7 @@ mod tests {
     fn test_active_routes_filter() {
         let config = ProxyConfig {
             http_port: 80,
-            https_port: 444,
+            https_port: 443,
             base_domain: "example.com".to_string(),
             tls_mode: "local-ca".to_string(),
             ca_storage_path: PathBuf::from("/var/lib/server-dashboard/ca"),
@@ -187,11 +192,14 @@ mod tests {
                     cert_id: None,
                 },
             ],
+            access_log_path: None,
             local_networks: default_local_networks(),
         };
 
-        let active = config.active_rust_routes();
-        assert_eq!(active.len(), 1);
+        let active = config.active_routes();
+        // Both enabled routes are returned regardless of backend
+        assert_eq!(active.len(), 2);
         assert_eq!(active[0].domain, "test1.example.com");
+        assert_eq!(active[1].domain, "test2.example.com");
     }
 }

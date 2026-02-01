@@ -167,7 +167,7 @@ router.get('/check', (req, res) => {
 router.get('/me', (req, res) => {
   const sessionId = req.cookies.auth_session;
 
-  // Essayer d'abord via le middleware authelia (headers Caddy)
+  // Essayer d'abord via le middleware authelia (headers proxy)
   if (req.autheliaUser) {
     return res.json({
       success: true,

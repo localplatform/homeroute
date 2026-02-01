@@ -15,6 +15,7 @@ use tracing::{warn, error, debug, info};
 
 use crate::auth;
 use crate::config::{ProxyConfig, RouteConfig};
+use crate::logging::{self, AccessLogEntry, OptionalAccessLogger};
 
 /// Snapshot of parsed config for fast lookups
 struct ConfigSnapshot {
@@ -28,12 +29,16 @@ pub struct ProxyState {
     pub client: Client<hyper_util::client::legacy::connect::HttpConnector, Body>,
     /// Reloadable configuration snapshot
     snapshot: RwLock<ConfigSnapshot>,
+    /// Access logger
+    pub access_logger: OptionalAccessLogger,
 }
 
 impl ProxyState {
     pub fn new(config: ProxyConfig) -> Self {
         let client = Client::builder(TokioExecutor::new())
             .build_http();
+
+        let access_logger = OptionalAccessLogger::new(config.access_log_path.clone());
 
         let local_networks: Vec<IpNet> = config
             .local_networks
@@ -44,6 +49,7 @@ impl ProxyState {
         Self {
             client,
             snapshot: RwLock::new(ConfigSnapshot { config, local_networks }),
+            access_logger,
         }
     }
 
@@ -73,7 +79,7 @@ impl ProxyState {
         snapshot.config
             .routes
             .iter()
-            .find(|r| r.enabled && r.backend == "rust" && r.domain == domain)
+            .find(|r| r.enabled && r.domain == domain)
             .cloned()
     }
 
@@ -86,6 +92,54 @@ impl ProxyState {
 
 /// Main proxy handler - dispatches by Host header
 pub async fn proxy_handler(
+    state: Arc<ProxyState>,
+    client_ip: IpAddr,
+    req: Request,
+) -> Result<Response, ProxyError> {
+    let start = std::time::Instant::now();
+
+    // Extract info for logging before passing ownership
+    let method = req.method().to_string();
+    let path = req.uri().path_and_query().map(|pq| pq.to_string()).unwrap_or_else(|| "/".to_string());
+    let user_agent = req.headers().get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let host_for_log = req.headers().get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    let result = proxy_handler_inner(state.clone(), client_ip, req).await;
+
+    // Log the request
+    let status = match &result {
+        Ok(resp) => resp.status().as_u16(),
+        Err(e) => match e {
+            ProxyError::DomainNotFound(_) => 404,
+            ProxyError::Forbidden => 403,
+            ProxyError::AuthRequired => 401,
+            ProxyError::UpstreamError(_) => 502,
+            ProxyError::InvalidUri(_) => 400,
+        },
+    };
+
+    state.access_logger.log(AccessLogEntry {
+        timestamp: logging::now_timestamp(),
+        client_ip: client_ip.to_string(),
+        host: host_for_log,
+        method,
+        path,
+        status,
+        duration_ms: start.elapsed().as_millis() as u64,
+        user_agent,
+    });
+
+    result
+}
+
+/// Inner proxy handler logic
+async fn proxy_handler_inner(
     state: Arc<ProxyState>,
     client_ip: IpAddr,
     mut req: Request,
@@ -354,7 +408,7 @@ mod tests {
     fn test_config() -> ProxyConfig {
         ProxyConfig {
             http_port: 80,
-            https_port: 444,
+            https_port: 443,
             base_domain: "example.com".to_string(),
             tls_mode: "local-ca".to_string(),
             ca_storage_path: PathBuf::from("/tmp/ca"),
@@ -416,6 +470,7 @@ mod tests {
                     cert_id: None,
                 },
             ],
+            access_log_path: None,
             local_networks: vec![
                 "192.168.0.0/16".to_string(),
                 "10.0.0.0/8".to_string(),
@@ -454,9 +509,12 @@ mod tests {
     }
 
     #[test]
-    fn test_find_route_caddy_backend() {
+    fn test_find_route_any_backend() {
         let state = ProxyState::new(test_config());
-        assert!(state.find_route("caddy.example.com").is_none());
+        // All backends are now served by Rust proxy
+        let route = state.find_route("caddy.example.com");
+        assert!(route.is_some());
+        assert_eq!(route.unwrap().target_port, 3004);
     }
 
     #[test]

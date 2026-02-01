@@ -17,7 +17,7 @@ import { setIO } from './socket.js';
 import { authMiddleware } from './middleware/auth.js';
 import { startScheduler as startDdnsScheduler } from './services/cloudflare.js';
 import { initDatabase } from './services/authdb.js';
-import { reloadCaddy } from './services/reverseproxy.js';
+import { syncAllRoutes } from './services/reverseproxy.js';
 
 // Server Management
 import { initializeSchedules } from './services/serverScheduler.js';
@@ -62,7 +62,7 @@ const PORT = process.env.PORT || 3001;
 // Set io instance for use in other modules
 setIO(io);
 
-// Trust proxy (Caddy) pour les headers X-Forwarded-*
+// Trust proxy pour les headers X-Forwarded-*
 app.set('trust proxy', 1);
 
 // Middleware
@@ -125,12 +125,12 @@ async function startServer() {
     console.log(`API server running on http://localhost:${PORT}`);
   });
 
-  // Restaurer la configuration Caddy depuis le fichier sauvegardé
+  // Synchroniser les routes vers le proxy Rust
   try {
-    await reloadCaddy();
-    console.log('✓ Caddy configuration restored');
+    await syncAllRoutes();
+    console.log('✓ Proxy routes synchronized');
   } catch (error) {
-    console.error('⚠ Caddy configuration restore failed:', error.message);
+    console.error('⚠ Proxy routes sync failed:', error.message);
   }
 
   // Démarrer le scheduler DDNS Cloudflare

@@ -1,7 +1,7 @@
 /**
- * Endpoints forward-auth pour Caddy
+ * Endpoints forward-auth pour le reverse proxy
  *
- * Ces endpoints permettent a Caddy de verifier l'authentification
+ * Ces endpoints permettent au proxy de verifier l'authentification
  * avant de proxifier les requetes vers les services proteges.
  */
 
@@ -12,8 +12,8 @@ import { getUser } from '../services/authUsers.js';
 const router = Router();
 const BASE_DOMAIN = process.env.BASE_DOMAIN || 'localhost';
 
-// /api/authz/forward-auth - Caddy forward_auth endpoint
-// Use router.all so that POST/PUT/DELETE requests proxied through Caddy's
+// /api/authz/forward-auth - Forward auth endpoint
+// Use router.all so that POST/PUT/DELETE requests proxied through the reverse proxy's
 // forward_auth (which preserves the original HTTP method) are handled correctly.
 router.all('/forward-auth', (req, res) => {
   const sessionId = req.cookies.auth_session;
