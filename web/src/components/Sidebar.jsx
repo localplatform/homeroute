@@ -12,7 +12,9 @@ import {
   Users,
   BarChart3,
   LogOut,
-  User
+  User,
+  Power,
+  HardDrive
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
@@ -27,6 +29,8 @@ const navItems = [
   { to: '/updates', icon: RefreshCw, label: 'Mises a jour' },
   { to: '/energy', icon: Zap, label: 'Énergie' },
   { to: '/traffic', icon: BarChart3, label: 'Trafic' },
+  { to: '/servers', icon: HardDrive, label: 'Serveurs' },
+  { to: '/wol', icon: Power, label: 'Wake-on-LAN' },
 ];
 
 function Sidebar() {

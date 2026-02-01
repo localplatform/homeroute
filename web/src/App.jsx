@@ -11,6 +11,8 @@ import Updates from './pages/Updates';
 import Energy from './pages/Energy';
 import Users from './pages/Users';
 import Traffic from './pages/Traffic';
+import Servers from './pages/Servers';
+import Wol from './pages/Wol';
 import Login from './pages/Login';
 import Profile from './pages/Profile';
 
@@ -90,6 +92,8 @@ function AppRoutes() {
               <Route path="/updates" element={<Updates />} />
               <Route path="/energy" element={<Energy />} />
               <Route path="/traffic" element={<Traffic />} />
+              <Route path="/servers" element={<Servers />} />
+              <Route path="/wol" element={<Wol />} />
             </Routes>
           </Layout>
         </ProtectedRoute>

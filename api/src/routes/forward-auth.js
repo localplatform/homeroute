@@ -12,8 +12,10 @@ import { getUser } from '../services/authUsers.js';
 const router = Router();
 const BASE_DOMAIN = process.env.BASE_DOMAIN || 'localhost';
 
-// GET /api/authz/forward-auth - Caddy forward_auth endpoint
-router.get('/forward-auth', (req, res) => {
+// /api/authz/forward-auth - Caddy forward_auth endpoint
+// Use router.all so that POST/PUT/DELETE requests proxied through Caddy's
+// forward_auth (which preserves the original HTTP method) are handled correctly.
+router.all('/forward-auth', (req, res) => {
   const sessionId = req.cookies.auth_session;
 
   // Get the original URL for redirect
@@ -81,9 +83,9 @@ router.get('/forward-auth', (req, res) => {
   });
 });
 
-// GET /api/authz/forward-auth-optional - Auth optionnelle (ne bloque jamais)
+// /api/authz/forward-auth-optional - Auth optionnelle (ne bloque jamais)
 // Retourne toujours 200, injecte les headers si authentifie
-router.get('/forward-auth-optional', (req, res) => {
+router.all('/forward-auth-optional', (req, res) => {
   const sessionId = req.cookies.auth_session;
 
   // Pas de session - retourner 200 sans headers user

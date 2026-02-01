@@ -172,3 +172,26 @@ export const getTopDomains = (timeRange, limit = 20) =>
 
 export const getDnsByCategory = (timeRange) =>
   api.get('/traffic/dns/by-category', { params: { timeRange } }).then(res => res.data);
+
+// ========== Servers Management ==========
+
+export const getServers = () => api.get('/servers');
+export const getServer = (id) => api.get(`/servers/${id}`);
+export const addServer = (data) => api.post('/servers', data);
+export const updateServer = (id, data) => api.put(`/servers/${id}`, data);
+export const deleteServer = (id) => api.delete(`/servers/${id}`);
+export const testServerConnection = (id) => api.post(`/servers/${id}/test`);
+export const getServerInterfaces = (id) => api.get(`/servers/${id}/interfaces`);
+export const refreshServerInterfaces = (id) => api.post(`/servers/${id}/refresh-interfaces`);
+export const getServerInfo = (id) => api.get(`/servers/${id}/info`);
+export const getServerGroups = () => api.get('/servers/groups');
+
+// ========== Wake-on-LAN ==========
+
+export const sendWakeOnLan = (id) => api.post(`/wol/${id}/wake`);
+export const shutdownServer = (id) => api.post(`/wol/${id}/shutdown`);
+export const rebootServer = (id) => api.post(`/wol/${id}/reboot`);
+export const getWolSchedules = () => api.get('/wol/schedules');
+export const addWolSchedule = (data) => api.post('/wol/schedules', data);
+export const updateWolSchedule = (id, data) => api.put(`/wol/schedules/${id}`, data);
+export const deleteWolSchedule = (id) => api.delete(`/wol/schedules/${id}`);

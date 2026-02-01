@@ -943,21 +943,16 @@ function generateEndpointRoute(id, domain, endpoint, baseDomain, authServiceUrl,
     }]
   };
 
-  // Detect if this is a development environment
-  const isDevelopment = envId && envId.toLowerCase().includes('dev');
-
   if (endpoint.requireAuth) {
     // Build routes array for subroute
     const routes = [];
 
-    // Add WebSocket bypass ONLY for development environments
-    if (isDevelopment) {
-      routes.push({
-        // WebSocket bypass in dev: pass directly without auth check (for Vite HMR)
-        match: [{ header: { 'Upgrade': ['websocket'] } }],
-        handle: [reverseProxyHandler]
-      });
-    }
+    // Add WebSocket bypass: websockets cannot be authenticated via forward-auth
+    // because the upgrade request doesn't properly carry session cookies
+    routes.push({
+      match: [{ header: { 'Upgrade': ['websocket'] } }],
+      handle: [reverseProxyHandler]
+    });
 
     // Add normal auth check route
     routes.push({
@@ -965,7 +960,7 @@ function generateEndpointRoute(id, domain, endpoint, baseDomain, authServiceUrl,
       handle: [{
         handler: 'reverse_proxy',
         upstreams: [{ dial: authServiceUrl.replace('http://', '') }],
-        rewrite: { uri: '/api/authz/forward-auth' },
+        rewrite: { method: 'GET', uri: '/api/authz/forward-auth' },
         handle_response: [
           {
             match: { status_code: [401, 403] },
@@ -1014,16 +1009,31 @@ function generateEndpointRoute(id, domain, endpoint, baseDomain, authServiceUrl,
 
   // Without requireAuth: direct proxy
   if (endpoint.localOnly) {
+    // For localOnly, add websocket bypass too (websockets can have issues with IP checks)
+    const routes = [];
+
+    // WebSocket bypass: pass directly without IP restriction
+    routes.push({
+      match: [{ header: { 'Upgrade': ['websocket'] } }],
+      handle: [reverseProxyHandler]
+    });
+
+    // Normal requests: IP restriction
     const localHandlers = cspHandler ? [cspHandler, reverseProxyHandler] : [reverseProxyHandler];
+    routes.push({
+      match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }],
+      handle: localHandlers
+    });
+    routes.push({
+      handle: [{ handler: 'error', status_code: 403 }]
+    });
+
     return {
       '@id': id,
       match: [{ host: [domain] }],
       handle: [{
         handler: 'subroute',
-        routes: [
-          { match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }], handle: localHandlers },
-          { handle: [{ handler: 'error', status_code: 403 }] }
-        ]
+        routes
       }],
       terminal: true
     };
@@ -1051,23 +1061,18 @@ function generateCaddyRoute(host, baseDomain) {
     }]
   };
 
-  // Detect if this is a development environment (domain contains .dev.)
-  const isDevelopment = domain.includes('.dev.');
-
   // Si requireAuth est activé, on utilise intercept pour vérifier l'auth
   // via une sous-requête à l'auth-service
   if (host.requireAuth) {
     // Build routes array for subroute
     const routes = [];
 
-    // Add WebSocket bypass ONLY for development environments
-    if (isDevelopment) {
-      routes.push({
-        // WebSocket bypass in dev: pass directly without auth check (for Vite HMR)
-        match: [{ header: { 'Upgrade': ['websocket'] } }],
-        handle: [reverseProxyHandler]
-      });
-    }
+    // Add WebSocket bypass: websockets cannot be authenticated via forward-auth
+    // because the upgrade request doesn't properly carry session cookies
+    routes.push({
+      match: [{ header: { 'Upgrade': ['websocket'] } }],
+      handle: [reverseProxyHandler]
+    });
 
     // Add normal auth check route
     routes.push({
@@ -1077,6 +1082,7 @@ function generateCaddyRoute(host, baseDomain) {
         handler: 'reverse_proxy',
         upstreams: [{ dial: authServiceUrl.replace('http://', '') }],
         rewrite: {
+          method: 'GET',
           uri: '/api/authz/forward-auth'
         },
         handle_response: [
@@ -1141,24 +1147,34 @@ function generateCaddyRoute(host, baseDomain) {
 
   // Sans requireAuth : proxy direct
   if (host.localOnly) {
+    // For localOnly, add websocket bypass too (websockets can have issues with IP checks)
+    const routes = [];
+
+    // WebSocket bypass: pass directly without IP restriction
+    routes.push({
+      match: [{ header: { 'Upgrade': ['websocket'] } }],
+      handle: [reverseProxyHandler]
+    });
+
+    // Normal requests: IP restriction
     const localHandlers = cspHandler ? [cspHandler, reverseProxyHandler] : [reverseProxyHandler];
+    routes.push({
+      match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }],
+      handle: localHandlers
+    });
+    routes.push({
+      handle: [{
+        handler: 'error',
+        status_code: 403
+      }]
+    });
+
     return {
       '@id': host.id,
       match: [{ host: [domain] }],
       handle: [{
         handler: 'subroute',
-        routes: [
-          {
-            match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }],
-            handle: localHandlers
-          },
-          {
-            handle: [{
-              handler: 'error',
-              status_code: 403
-            }]
-          }
-        ]
+        routes
       }],
       terminal: true
     };

@@ -19,6 +19,10 @@ import { startScheduler as startDdnsScheduler } from './services/cloudflare.js';
 import { initDatabase } from './services/authdb.js';
 import { reloadCaddy } from './services/reverseproxy.js';
 
+// Server Management
+import { initializeSchedules } from './services/serverScheduler.js';
+import { startMonitoring } from './services/serverMonitoring.js';
+
 // Traffic Analytics
 import { initMongoDB } from './services/mongodb.js';
 import { startHttpCapture } from './services/trafficHttpCapture.js';
@@ -40,6 +44,8 @@ import energyRoutes from './routes/energy.js';
 import usersRoutes from './routes/users.js';
 import authproxyRoutes from './routes/authproxy.js';
 import trafficRoutes from './routes/traffic.js';
+import serversRoutes from './routes/servers.js';
+import wolRoutes from './routes/wol.js';
 
 const app = express();
 const httpServer = createServer(app);
@@ -94,6 +100,8 @@ async function startServer() {
   app.use('/api/users', usersRoutes);
   app.use('/api/authproxy', authproxyRoutes);
   app.use('/api/traffic', trafficRoutes);
+  app.use('/api/servers', serversRoutes);
+  app.use('/api/wol', wolRoutes);
 
   // Health check
   app.get('/api/health', (req, res) => {
@@ -133,6 +141,15 @@ async function startServer() {
     console.log('✓ Traffic analytics services started');
   } catch (error) {
     console.error('⚠ Traffic analytics services failed to start:', error.message);
+  }
+
+  // Démarrer les services de gestion des serveurs
+  try {
+    await initializeSchedules();
+    startMonitoring();
+    console.log('✓ Server management services started');
+  } catch (error) {
+    console.error('⚠ Server management services failed to start:', error.message);
   }
 }
 
