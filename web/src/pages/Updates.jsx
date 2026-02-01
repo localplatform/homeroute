@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
 import { RefreshCw, Package, AlertTriangle, Server, Shield, CheckCircle, Play, Square, ChevronDown, ChevronUp, Download } from 'lucide-react';
-import { io } from 'socket.io-client';
 import Card from '../components/Card';
 import Button from '../components/Button';
 import StatusBadge from '../components/StatusBadge';
@@ -16,6 +15,7 @@ import {
   runSnapRefresh,
   cancelUpgrade
 } from '../api/client';
+import useWebSocket from '../hooks/useWebSocket';
 
 function Updates() {
   const [loading, setLoading] = useState(true);
@@ -25,7 +25,6 @@ function Updates() {
   const [currentPhase, setCurrentPhase] = useState(null);
   const [liveOutput, setLiveOutput] = useState([]);
   const [showOutput, setShowOutput] = useState(false);
-  const socketRef = useRef(null);
   const outputRef = useRef(null);
   const upgradeOutputRef = useRef(null);
 
@@ -45,40 +44,29 @@ function Updates() {
   // Confirm modal
   const [confirmModal, setConfirmModal] = useState({ show: false, type: null });
 
-  // WebSocket connection
-  useEffect(() => {
-    const socket = io(window.location.origin);
-    socketRef.current = socket;
-
-    // Check events
-    socket.on('updates:started', () => {
+  useWebSocket({
+    'updates:started': () => {
       setRunning(true);
       setLiveOutput([]);
       setCurrentPhase(null);
       setMessage(null);
-    });
-
-    socket.on('updates:phase', (data) => {
+    },
+    'updates:phase': (data) => {
       setCurrentPhase(data);
-    });
-
-    socket.on('updates:output', (data) => {
+    },
+    'updates:output': (data) => {
       setLiveOutput(prev => [...prev.slice(-100), data.line]);
-    });
-
-    socket.on('updates:apt-complete', (data) => {
+    },
+    'updates:apt-complete': (data) => {
       setAptPackages(data.packages || []);
-    });
-
-    socket.on('updates:snap-complete', (data) => {
+    },
+    'updates:snap-complete': (data) => {
       setSnapPackages(data.snaps || []);
-    });
-
-    socket.on('updates:needrestart-complete', (data) => {
+    },
+    'updates:needrestart-complete': (data) => {
       setNeedrestart(data);
-    });
-
-    socket.on('updates:complete', (data) => {
+    },
+    'updates:complete': (data) => {
       setRunning(false);
       setCurrentPhase(null);
       setSummary(data.summary);
@@ -86,55 +74,43 @@ function Updates() {
       if (data.success) {
         setMessage({ type: 'success', text: `Verification terminee en ${Math.round(data.duration / 1000)}s` });
       }
-    });
-
-    socket.on('updates:cancelled', () => {
+    },
+    'updates:cancelled': () => {
       setRunning(false);
       setCurrentPhase(null);
       setCancelling(false);
       setMessage({ type: 'warning', text: 'Verification annulee' });
-    });
-
-    socket.on('updates:error', (data) => {
+    },
+    'updates:error': (data) => {
       setRunning(false);
       setCurrentPhase(null);
       setMessage({ type: 'error', text: data.error });
-    });
-
-    // Upgrade events
-    socket.on('updates:upgrade-started', (data) => {
+    },
+    'updates:upgrade-started': (data) => {
       setUpgrading(true);
       setUpgradeType(data.type);
       setUpgradeOutput([]);
       setShowUpgradeOutput(true);
       setMessage(null);
-    });
-
-    socket.on('updates:upgrade-output', (data) => {
+    },
+    'updates:upgrade-output': (data) => {
       setUpgradeOutput(prev => [...prev.slice(-200), data.line]);
-    });
-
-    socket.on('updates:upgrade-complete', (data) => {
+    },
+    'updates:upgrade-complete': (data) => {
       setUpgrading(false);
       if (data.success) {
         setMessage({ type: 'success', text: `Mise a jour ${data.type} terminee en ${Math.round(data.duration / 1000)}s` });
-        // Refresh data after upgrade
         fetchInitialData();
       } else {
         setMessage({ type: 'error', text: data.error || 'Erreur lors de la mise a jour' });
       }
-    });
-
-    socket.on('updates:upgrade-cancelled', () => {
+    },
+    'updates:upgrade-cancelled': () => {
       setUpgrading(false);
       setCancelling(false);
       setMessage({ type: 'warning', text: 'Mise a jour annulee' });
-    });
-
-    return () => {
-      socket.disconnect();
-    };
-  }, []);
+    },
+  });
 
   // Auto-scroll live output
   useEffect(() => {

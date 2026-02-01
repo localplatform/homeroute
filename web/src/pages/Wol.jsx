@@ -13,7 +13,7 @@ import {
   deleteWolSchedule,
   updateWolSchedule
 } from '../api/client';
-import { io } from 'socket.io-client';
+import useWebSocket from '../hooks/useWebSocket';
 
 export default function Wol() {
   const [servers, setServers] = useState([]);
@@ -21,7 +21,6 @@ export default function Wol() {
   const [loading, setLoading] = useState(true);
   const [selectedServer, setSelectedServer] = useState(null);
   const [showScheduleModal, setShowScheduleModal] = useState(false);
-  const [socket, setSocket] = useState(null);
 
   // Schedule form
   const [scheduleForm, setScheduleForm] = useState({
@@ -34,14 +33,8 @@ export default function Wol() {
   const [addingSchedule, setAddingSchedule] = useState(false);
   const [scheduleError, setScheduleError] = useState('');
 
-  useEffect(() => {
-    loadData();
-
-    // Setup WebSocket for real-time status updates
-    const newSocket = io(window.location.origin);
-    setSocket(newSocket);
-
-    newSocket.on('servers:status', (data) => {
+  useWebSocket({
+    'servers:status': (data) => {
       setServers(prevServers =>
         prevServers.map(server =>
           server.id === data.serverId
@@ -49,11 +42,11 @@ export default function Wol() {
             : server
         )
       );
-    });
+    }
+  });
 
-    return () => {
-      newSocket.close();
-    };
+  useEffect(() => {
+    loadData();
   }, []);
 
   const loadData = async () => {

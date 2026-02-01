@@ -11,14 +11,13 @@ import {
   testServerConnection,
   refreshServerInterfaces
 } from '../api/client';
-import { io } from 'socket.io-client';
+import useWebSocket from '../hooks/useWebSocket';
 
 export default function Servers() {
   const [servers, setServers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingServer, setEditingServer] = useState(null);
-  const [socket, setSocket] = useState(null);
 
   // Form state
   const [formData, setFormData] = useState({
@@ -34,14 +33,8 @@ export default function Servers() {
   const [addingServer, setAddingServer] = useState(false);
   const [addError, setAddError] = useState('');
 
-  useEffect(() => {
-    loadServers();
-
-    // Setup WebSocket for real-time status updates
-    const newSocket = io(window.location.origin);
-    setSocket(newSocket);
-
-    newSocket.on('servers:status', (data) => {
+  useWebSocket({
+    'servers:status': (data) => {
       setServers(prevServers =>
         prevServers.map(server =>
           server.id === data.serverId
@@ -49,11 +42,11 @@ export default function Servers() {
             : server
         )
       );
-    });
+    }
+  });
 
-    return () => {
-      newSocket.close();
-    };
+  useEffect(() => {
+    loadServers();
   }, []);
 
   const loadServers = async () => {

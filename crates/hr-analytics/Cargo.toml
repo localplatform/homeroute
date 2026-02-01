@@ -1,0 +1,16 @@
+[package]
+name = "hr-analytics"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hr-common = { path = "../hr-common" }
+hr-dhcp = { path = "../hr-dhcp" }
+tokio = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }

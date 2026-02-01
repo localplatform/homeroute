@@ -1,0 +1,30 @@
+[package]
+name = "hr-proxy"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hr-common = { path = "../hr-common" }
+hr-auth = { path = "../hr-auth" }
+hr-ca = { path = "../hr-ca" }
+tokio = { workspace = true }
+axum = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { workspace = true }
+signal-hook = { workspace = true }
+signal-hook-tokio = { workspace = true }
+tokio-stream = { workspace = true }
+ipnet = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }

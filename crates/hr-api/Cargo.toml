@@ -1,0 +1,30 @@
+[package]
+name = "hr-api"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hr-common = { path = "../hr-common" }
+hr-auth = { path = "../hr-auth" }
+hr-ca = { path = "../hr-ca" }
+hr-proxy = { path = "../hr-proxy" }
+hr-dns = { path = "../hr-dns" }
+hr-dhcp = { path = "../hr-dhcp" }
+hr-ipv6 = { path = "../hr-ipv6" }
+hr-adblock = { path = "../hr-adblock" }
+hr-analytics = { path = "../hr-analytics" }
+hr-servers = { path = "../hr-servers" }
+hr-system = { path = "../hr-system" }
+tokio = { workspace = true }
+axum = { workspace = true }
+axum-extra = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+reqwest = { workspace = true }
