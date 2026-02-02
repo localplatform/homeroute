@@ -11,7 +11,7 @@ function Button({ children, onClick, variant = 'primary', disabled = false, load
     <button
       onClick={onClick}
       disabled={disabled || loading}
-      className={`px-4 py-2 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 ${variants[variant]} ${className}`}
+      className={`px-4 py-2 font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 ${variants[variant]} ${className}`}
     >
       {loading && (
         <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">

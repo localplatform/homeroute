@@ -1,10 +1,13 @@
 use axum::{
     extract::Query,
+    response::sse::{Event, Sse},
     routing::{get, post},
     Json, Router,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::convert::Infallible;
+use tokio_stream::StreamExt;
 
 use crate::state::ApiState;
 
@@ -25,6 +28,7 @@ pub fn router() -> Router<ApiState> {
         .route("/benchmark", get(benchmark_status))
         .route("/benchmark/start", post(start_benchmark))
         .route("/benchmark/stop", post(stop_benchmark))
+        .route("/events", get(sse_events))
 }
 
 async fn cpu_info() -> Json<Value> {
@@ -103,11 +107,14 @@ async fn read_cpu_frequency() -> Value {
         freqs.iter().sum::<u64>() / freqs.len() as u64
     };
 
+    let current_ghz = avg as f64 / 1_000_000.0;
+    let min_ghz = min_freq.map(|f| f as f64 / 1_000_000.0);
+    let max_ghz = max_freq.map(|f| f as f64 / 1_000_000.0);
+
     json!({
-        "current_khz": avg,
-        "current_mhz": avg / 1000,
-        "min_khz": min_freq,
-        "max_khz": max_freq,
+        "current": current_ghz,
+        "min": min_ghz,
+        "max": max_ghz,
         "cores": freqs.len()
     })
 }
@@ -205,12 +212,13 @@ async fn set_governor(Json(body): Json<GovernorRequest>) -> Json<Value> {
 }
 
 async fn get_schedule() -> Json<Value> {
+    let default_config = json!({"enabled": false, "nightStart": "00:00", "nightEnd": "08:00"});
     match tokio::fs::read_to_string(ENERGY_SCHEDULE_PATH).await {
         Ok(content) => match serde_json::from_str::<Value>(&content) {
-            Ok(schedule) => Json(json!({"success": true, "schedule": schedule})),
-            Err(_) => Json(json!({"success": true, "schedule": null})),
+            Ok(config) => Json(json!({"success": true, "config": config})),
+            Err(_) => Json(json!({"success": true, "config": default_config})),
         },
-        Err(_) => Json(json!({"success": true, "schedule": null})),
+        Err(_) => Json(json!({"success": true, "config": default_config})),
     }
 }
 
@@ -308,9 +316,9 @@ async fn apply_mode(axum::extract::Path(mode): axum::extract::Path<String>) -> J
 }
 
 async fn energy_interfaces() -> Json<Value> {
-    // List network interfaces for energy auto-select
+    // List network interfaces with IP info for energy auto-select
     let output = tokio::process::Command::new("ip")
-        .args(["-j", "link", "show"])
+        .args(["-j", "addr", "show"])
         .output()
         .await;
 
@@ -318,13 +326,39 @@ async fn energy_interfaces() -> Json<Value> {
         Ok(o) if o.status.success() => {
             let stdout = String::from_utf8_lossy(&o.stdout);
             if let Ok(ifaces) = serde_json::from_str::<Vec<Value>>(&stdout) {
-                let names: Vec<String> = ifaces
+                let result: Vec<Value> = ifaces
                     .iter()
-                    .filter_map(|i| i.get("ifname").and_then(|n| n.as_str()))
-                    .filter(|n| !n.starts_with("lo") && !n.starts_with("veth"))
-                    .map(String::from)
+                    .filter(|i| {
+                        i.get("ifname")
+                            .and_then(|n| n.as_str())
+                            .is_some_and(|n| !n.starts_with("lo") && !n.starts_with("veth"))
+                    })
+                    .map(|i| {
+                        let name = i.get("ifname").and_then(|n| n.as_str()).unwrap_or("");
+                        let flags = i.get("flags").and_then(|f| f.as_array());
+                        let state = if flags.is_some_and(|f| f.iter().any(|v| v.as_str() == Some("UP"))) {
+                            "UP"
+                        } else {
+                            "DOWN"
+                        };
+                        // Find first IPv4 address
+                        let primary_ip = i
+                            .get("addr_info")
+                            .and_then(|a| a.as_array())
+                            .and_then(|addrs| {
+                                addrs.iter().find_map(|a| {
+                                    if a.get("family").and_then(|f| f.as_str()) == Some("inet") {
+                                        a.get("local").and_then(|l| l.as_str()).map(String::from)
+                                    } else {
+                                        None
+                                    }
+                                })
+                            })
+                            .unwrap_or_default();
+                        json!({"name": name, "primaryIp": primary_ip, "state": state})
+                    })
                     .collect();
-                return Json(json!({"success": true, "interfaces": names}));
+                return Json(json!({"success": true, "interfaces": result}));
             }
             Json(json!({"success": true, "interfaces": []}))
         }
@@ -333,12 +367,19 @@ async fn energy_interfaces() -> Json<Value> {
 }
 
 async fn get_autoselect() -> Json<Value> {
+    let default_config = json!({
+        "enabled": false,
+        "networkInterface": null,
+        "thresholds": {"low": 1000, "high": 10000},
+        "averagingTime": 3,
+        "sampleInterval": 1000
+    });
     match tokio::fs::read_to_string(ENERGY_AUTOSELECT_PATH).await {
         Ok(content) => match serde_json::from_str::<Value>(&content) {
             Ok(config) => Json(json!({"success": true, "config": config})),
-            Err(_) => Json(json!({"success": true, "config": null})),
+            Err(_) => Json(json!({"success": true, "config": default_config})),
         },
-        Err(_) => Json(json!({"success": true, "config": null})),
+        Err(_) => Json(json!({"success": true, "config": default_config})),
     }
 }
 
@@ -420,4 +461,17 @@ async fn stop_benchmark() -> Json<Value> {
         .await;
 
     Json(json!({"success": true}))
+}
+
+/// SSE endpoint for real-time energy events.
+/// Sends periodic keepalive comments to maintain the connection.
+async fn sse_events() -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let interval = tokio::time::interval(std::time::Duration::from_secs(15));
+    let stream = tokio_stream::wrappers::IntervalStream::new(interval)
+        .map(|_| Ok(Event::default().comment("keepalive")));
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15))
+            .text("keepalive"),
+    )
 }

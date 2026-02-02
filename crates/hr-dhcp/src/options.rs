@@ -9,6 +9,8 @@ pub const OPT_DOMAIN_NAME: u8 = 15;
 pub const OPT_BROADCAST_ADDR: u8 = 28;
 pub const OPT_REQUESTED_IP: u8 = 50;
 pub const OPT_LEASE_TIME: u8 = 51;
+pub const OPT_RENEWAL_TIME: u8 = 58;
+pub const OPT_REBINDING_TIME: u8 = 59;
 pub const OPT_MSG_TYPE: u8 = 53;
 pub const OPT_SERVER_ID: u8 = 54;
 pub const OPT_PARAM_REQUEST: u8 = 55;
@@ -68,6 +70,14 @@ impl DhcpOption {
 
     pub fn hostname(name: &str) -> Self {
         Self::new(OPT_HOSTNAME, name.as_bytes().to_vec())
+    }
+
+    pub fn renewal_time(secs: u32) -> Self {
+        Self::new(OPT_RENEWAL_TIME, secs.to_be_bytes().to_vec())
+    }
+
+    pub fn rebinding_time(secs: u32) -> Self {
+        Self::new(OPT_REBINDING_TIME, secs.to_be_bytes().to_vec())
     }
 
     pub fn broadcast(ip: Ipv4Addr) -> Self {

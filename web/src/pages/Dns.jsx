@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Server, Search } from 'lucide-react';
-import Card from '../components/Card';
+import PageHeader from '../components/PageHeader';
+import Section from '../components/Section';
 import { getDnsConfig, getDhcpLeases } from '../api/client';
 
 function Dns() {
@@ -17,7 +18,28 @@ function Dns() {
           getDhcpLeases()
         ]);
 
-        if (configRes.data.success) setConfig(configRes.data.config);
+        if (configRes.data.success) {
+          const raw = configRes.data.config;
+          setConfig({
+            interface: raw.dhcp?.interface,
+            domain: raw.dhcp?.domain,
+            dhcpRange: raw.dhcp?.range_start && raw.dhcp?.range_end
+              ? `${raw.dhcp.range_start} - ${raw.dhcp.range_end}`
+              : null,
+            cacheSize: raw.dns?.cache_size,
+            dnsServers: raw.dns?.upstream_servers,
+            dhcpOptions: raw.dhcp?.static_leases?.map(l => `${l.mac} → ${l.ip} (${l.hostname || ''})`),
+            wildcardAddress: raw.dns?.wildcard_ipv4 ? {
+              domain: raw.dns.local_domain,
+              ip: raw.dns.wildcard_ipv4
+            } : null,
+            ipv6: {
+              raEnabled: raw.ipv6?.ra_enabled,
+              dhcpRange: raw.ipv6?.ra_prefix,
+              options: raw.ipv6?.dhcpv6_dns_servers?.map(s => `DNS: ${s}`)
+            }
+          });
+        }
         if (leasesRes.data.success) setLeases(leasesRes.data.leases);
       } catch (error) {
         console.error('Error:', error);
@@ -44,93 +66,86 @@ function Dns() {
   }
 
   return (
-    <div className="space-y-6">
-      <h1 className="text-2xl font-bold">DNS / DHCP</h1>
+    <div>
+      <PageHeader title="DNS / DHCP" icon={Server} />
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Configuration */}
-        <Card title="Configuration dnsmasq" icon={Server}>
-          <dl className="space-y-3 text-sm">
-            <div className="flex justify-between">
-              <dt className="text-gray-400">Interface</dt>
-              <dd className="font-mono text-blue-400">{config?.interface || '-'}</dd>
-            </div>
-            <div className="flex justify-between">
-              <dt className="text-gray-400">Domaine</dt>
-              <dd className="font-mono">{config?.domain || '-'}</dd>
-            </div>
-            <div className="flex justify-between">
-              <dt className="text-gray-400">Plage DHCP</dt>
-              <dd className="font-mono text-green-400">{config?.dhcpRange || '-'}</dd>
-            </div>
-            <div className="flex justify-between">
-              <dt className="text-gray-400">Cache DNS</dt>
-              <dd className="font-mono">{config?.cacheSize || '-'} entrées</dd>
-            </div>
+      <Section title="Configuration DNS">
+        <dl className="space-y-3 text-sm">
+          <div className="flex justify-between">
+            <dt className="text-gray-400">Interface</dt>
+            <dd className="font-mono text-blue-400">{config?.interface || '-'}</dd>
+          </div>
+          <div className="flex justify-between">
+            <dt className="text-gray-400">Domaine</dt>
+            <dd className="font-mono">{config?.domain || '-'}</dd>
+          </div>
+          <div className="flex justify-between">
+            <dt className="text-gray-400">Plage DHCP</dt>
+            <dd className="font-mono text-green-400">{config?.dhcpRange || '-'}</dd>
+          </div>
+          <div className="flex justify-between">
+            <dt className="text-gray-400">Cache DNS</dt>
+            <dd className="font-mono">{config?.cacheSize || '-'} entrées</dd>
+          </div>
+          <div className="border-t border-gray-700 pt-3">
+            <dt className="text-gray-400 mb-2">Serveurs DNS upstream</dt>
+            <dd className="space-y-1">
+              {config?.dnsServers?.map(server => (
+                <div key={server} className="font-mono text-sm bg-gray-900 px-2 py-1">
+                  {server}
+                </div>
+              ))}
+            </dd>
+          </div>
+          <div className="border-t border-gray-700 pt-3">
+            <dt className="text-gray-400 mb-2">Options DHCP</dt>
+            <dd className="space-y-1">
+              {config?.dhcpOptions?.map((opt, i) => (
+                <div key={i} className="font-mono text-xs bg-gray-900 px-2 py-1">
+                  {opt}
+                </div>
+              ))}
+            </dd>
+          </div>
+          {config?.wildcardAddress && (
             <div className="border-t border-gray-700 pt-3">
-              <dt className="text-gray-400 mb-2">Serveurs DNS upstream</dt>
-              <dd className="space-y-1">
-                {config?.dnsServers?.map(server => (
-                  <div key={server} className="font-mono text-sm bg-gray-900 px-2 py-1 rounded">
-                    {server}
-                  </div>
-                ))}
+              <dt className="text-gray-400 mb-2">Wildcard DNS</dt>
+              <dd className="font-mono text-sm">
+                *.{config.wildcardAddress.domain} → {config.wildcardAddress.ip}
               </dd>
             </div>
-            <div className="border-t border-gray-700 pt-3">
-              <dt className="text-gray-400 mb-2">Options DHCP</dt>
-              <dd className="space-y-1">
-                {config?.dhcpOptions?.map((opt, i) => (
-                  <div key={i} className="font-mono text-xs bg-gray-900 px-2 py-1 rounded">
-                    {opt}
-                  </div>
-                ))}
-              </dd>
-            </div>
-            {config?.wildcardAddress && (
-              <div className="border-t border-gray-700 pt-3">
-                <dt className="text-gray-400 mb-2">Wildcard DNS</dt>
-                <dd className="font-mono text-sm">
-                  *.{config.wildcardAddress.domain} → {config.wildcardAddress.ip}
-                </dd>
-              </div>
-            )}
-          </dl>
-        </Card>
+          )}
+        </dl>
+      </Section>
 
-        {/* IPv6 Configuration */}
-        <Card title="Configuration IPv6" icon={Server}>
-          <dl className="space-y-3 text-sm">
+      <Section title="Configuration IPv6" contrast>
+        <dl className="space-y-3 text-sm">
+          <div className="flex justify-between">
+            <dt className="text-gray-400">Router Advertisement</dt>
+            <dd className="font-mono">
+              {config?.ipv6?.raEnabled ? (
+                <span className="text-green-400">Activé</span>
+              ) : (
+                <span className="text-gray-500">Désactivé</span>
+              )}
+            </dd>
+          </div>
+          {config?.ipv6?.dhcpRange && (
             <div className="flex justify-between">
-              <dt className="text-gray-400">Router Advertisement</dt>
-              <dd className="font-mono">
-                {config?.ipv6?.raEnabled ? (
-                  <span className="text-green-400">Activé</span>
-                ) : (
-                  <span className="text-gray-500">Désactivé</span>
-                )}
-              </dd>
+              <dt className="text-gray-400">Plage DHCPv6</dt>
+              <dd className="font-mono text-xs">{config.ipv6.dhcpRange}</dd>
             </div>
-            {config?.ipv6?.dhcpRange && (
-              <div className="flex justify-between">
-                <dt className="text-gray-400">Plage DHCPv6</dt>
-                <dd className="font-mono text-xs">{config.ipv6.dhcpRange}</dd>
-              </div>
-            )}
-            {config?.ipv6?.options?.map((opt, i) => (
-              <div key={i} className="font-mono text-xs bg-gray-900 px-2 py-1 rounded">
-                {opt}
-              </div>
-            ))}
-          </dl>
-        </Card>
-      </div>
+          )}
+          {config?.ipv6?.options?.map((opt, i) => (
+            <div key={i} className="font-mono text-xs bg-gray-900 px-2 py-1">
+              {opt}
+            </div>
+          ))}
+        </dl>
+      </Section>
 
-      {/* DHCP Leases */}
-      <Card
-        title={`Baux DHCP (${filteredLeases.length})`}
-        icon={Server}
-        actions={
+      <Section title={`Baux DHCP (${filteredLeases.length})`}>
+        <div className="mb-4">
           <div className="relative">
             <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
             <input
@@ -138,11 +153,10 @@ function Dns() {
               placeholder="Rechercher..."
               value={search}
               onChange={e => setSearch(e.target.value)}
-              className="pl-9 pr-4 py-1.5 bg-gray-900 border border-gray-600 rounded text-sm focus:outline-none focus:border-blue-500"
+              className="pl-9 pr-4 py-1.5 bg-gray-900 border border-gray-600 text-sm focus:outline-none focus:border-blue-500"
             />
           </div>
-        }
-      >
+        </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
@@ -162,14 +176,14 @@ function Dns() {
                   <td className="py-2 font-mono text-blue-400">{lease.ip}</td>
                   <td className="py-2 font-mono text-gray-400 text-xs">{lease.mac}</td>
                   <td className="py-2 text-gray-400 text-xs">
-                    {new Date(lease.expiration).toLocaleString('fr-FR')}
+                    {new Date(lease.expiry * 1000).toLocaleString('fr-FR')}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-      </Card>
+      </Section>
     </div>
   );
 }

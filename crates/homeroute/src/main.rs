@@ -5,6 +5,9 @@ use hr_auth::AuthService;
 use hr_ca::{CaConfig, CertificateAuthority};
 use hr_common::config::EnvConfig;
 use hr_common::events::EventBus;
+use hr_common::service_registry::{
+    new_service_registry, now_millis, ServicePriorityLevel, ServiceState, ServiceStatus,
+};
 use hr_dns::DnsState;
 use hr_proxy::{ProxyConfig, ProxyState, TlsManager};
 use signal_hook::consts::SIGHUP;
@@ -65,6 +68,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize event bus
     let events = Arc::new(EventBus::new());
+
+    // Initialize service registry
+    let service_registry = new_service_registry();
 
     // Initialize auth service
     let auth = AuthService::new(&env.auth_data_dir, &env.base_domain)?;
@@ -238,14 +244,16 @@ async fn main() -> anyhow::Result<()> {
         let addr: SocketAddr = format!("{}:{}", addr_str, dns_dhcp_config.dns.port).parse()?;
 
         let dns_state_c = dns_state.clone();
-        spawn_supervised("dns-udp", ServicePriority::Critical, move || {
+        let reg = service_registry.clone();
+        spawn_supervised("dns-udp", ServicePriority::Critical, reg, move || {
             let state = dns_state_c.clone();
             let addr = addr;
             async move { hr_dns::server::run_udp_server(addr, state).await }
         });
 
         let dns_state_c = dns_state.clone();
-        spawn_supervised("dns-tcp", ServicePriority::Critical, move || {
+        let reg = service_registry.clone();
+        spawn_supervised("dns-tcp", ServicePriority::Critical, reg, move || {
             let state = dns_state_c.clone();
             let addr = addr;
             async move { hr_dns::server::run_tcp_server(addr, state).await }
@@ -255,17 +263,30 @@ async fn main() -> anyhow::Result<()> {
     // DHCP server (Critical)
     if dns_dhcp_config.dhcp.enabled {
         let dhcp_state_c = dhcp_state.clone();
-        spawn_supervised("dhcp", ServicePriority::Critical, move || {
+        let reg = service_registry.clone();
+        spawn_supervised("dhcp", ServicePriority::Critical, reg, move || {
             let state = dhcp_state_c.clone();
             async move { hr_dhcp::server::run_dhcp_server(state).await }
         });
+    } else {
+        let mut reg = service_registry.write().await;
+        reg.insert("dhcp".into(), ServiceStatus {
+            name: "dhcp".into(),
+            state: ServiceState::Disabled,
+            priority: ServicePriorityLevel::Critical,
+            restart_count: 0,
+            last_state_change: now_millis(),
+            error: None,
+        });
+        drop(reg);
     }
 
     // HTTPS proxy (Critical)
     {
         let proxy_state_c = proxy_state.clone();
         let tls_config_c = tls_config.clone();
-        spawn_supervised("proxy-https", ServicePriority::Critical, move || {
+        let reg = service_registry.clone();
+        spawn_supervised("proxy-https", ServicePriority::Critical, reg, move || {
             let proxy_state = proxy_state_c.clone();
             let tls_config = tls_config_c.clone();
             let port = https_port;
@@ -276,7 +297,8 @@ async fn main() -> anyhow::Result<()> {
     // HTTP redirect (Critical)
     {
         let base_domain = env.base_domain.clone();
-        spawn_supervised("proxy-http", ServicePriority::Critical, move || {
+        let reg = service_registry.clone();
+        spawn_supervised("proxy-http", ServicePriority::Critical, reg, move || {
             let base_domain = base_domain.clone();
             let port = http_port;
             async move { run_http_redirect(port, &base_domain).await }
@@ -286,19 +308,59 @@ async fn main() -> anyhow::Result<()> {
     // IPv6 RA sender (Important)
     if dns_dhcp_config.ipv6.enabled && dns_dhcp_config.ipv6.ra_enabled {
         let ipv6_config = dns_dhcp_config.ipv6.clone();
-        spawn_supervised("ipv6-ra", ServicePriority::Important, move || {
+        let reg = service_registry.clone();
+        spawn_supervised("ipv6-ra", ServicePriority::Important, reg, move || {
             let config = ipv6_config.clone();
             async move { hr_ipv6::ra::run_ra_sender(config).await }
         });
+    } else {
+        let mut reg = service_registry.write().await;
+        reg.insert("ipv6-ra".into(), ServiceStatus {
+            name: "ipv6-ra".into(),
+            state: ServiceState::Disabled,
+            priority: ServicePriorityLevel::Important,
+            restart_count: 0,
+            last_state_change: now_millis(),
+            error: None,
+        });
+        drop(reg);
     }
 
     // DHCPv6 (Important)
     if dns_dhcp_config.ipv6.enabled && dns_dhcp_config.ipv6.dhcpv6_enabled {
         let ipv6_config = dns_dhcp_config.ipv6.clone();
-        spawn_supervised("dhcpv6", ServicePriority::Important, move || {
+        let reg = service_registry.clone();
+        spawn_supervised("dhcpv6", ServicePriority::Important, reg, move || {
             let config = ipv6_config.clone();
             async move { hr_ipv6::dhcpv6::run_dhcpv6_server(config).await }
         });
+    } else {
+        let mut reg = service_registry.write().await;
+        reg.insert("dhcpv6".into(), ServiceStatus {
+            name: "dhcpv6".into(),
+            state: ServiceState::Disabled,
+            priority: ServicePriorityLevel::Important,
+            restart_count: 0,
+            last_state_change: now_millis(),
+            error: None,
+        });
+        drop(reg);
+    }
+
+    // ── Register background tasks in service registry ─────────────────
+
+    {
+        let mut reg = service_registry.write().await;
+        for name in &["analytics-http", "analytics-dns", "aggregation", "monitoring", "wol-scheduler"] {
+            reg.insert(name.to_string(), ServiceStatus {
+                name: name.to_string(),
+                state: ServiceState::Running,
+                priority: ServicePriorityLevel::Background,
+                restart_count: 0,
+                last_state_change: now_millis(),
+                error: None,
+            });
+        }
     }
 
     // ── Analytics (Background) ─────────────────────────────────────────
@@ -361,12 +423,14 @@ async fn main() -> anyhow::Result<()> {
         dns_dhcp_config_path: env.dns_dhcp_config_path.clone(),
         proxy_config_path: env.proxy_config_path.clone(),
         reverseproxy_config_path: env.reverseproxy_config_path.clone(),
+        service_registry: service_registry.clone(),
     };
 
     let api_router = hr_api::build_router(api_state);
     let api_port = env.api_port;
 
-    spawn_supervised("api", ServicePriority::Important, move || {
+    let reg = service_registry.clone();
+    spawn_supervised("api", ServicePriority::Important, reg, move || {
         let router = api_router.clone();
         let port = api_port;
         async move {
@@ -380,13 +444,17 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Background tasks ───────────────────────────────────────────────
 
-    // Lease persistence (save every 60s)
+    // Lease persistence + expired lease purge (every 60s)
     {
         let dhcp_state_c = dhcp_state.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                let s = dhcp_state_c.read().await;
+                let mut s = dhcp_state_c.write().await;
+                let purged = s.lease_store.purge_expired();
+                if purged > 0 {
+                    info!("Purged {} expired DHCP leases", purged);
+                }
                 if let Err(e) = s.lease_store.save_to_file() {
                     warn!("Failed to save lease file: {}", e);
                 }

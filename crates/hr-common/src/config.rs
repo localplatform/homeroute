@@ -15,6 +15,7 @@ pub struct EnvConfig {
     pub cf_zone_id: Option<String>,
     pub cf_record_name: Option<String>,
     pub cf_interface: String,
+    pub cf_proxied: bool,
     pub ddns_cron: String,
     /// Chemins de configuration des services
     pub proxy_config_path: PathBuf,
@@ -40,6 +41,7 @@ impl Default for EnvConfig {
             cf_zone_id: None,
             cf_record_name: None,
             cf_interface: "eno1".to_string(),
+            cf_proxied: true,
             ddns_cron: "*/2 * * * *".to_string(),
             proxy_config_path: PathBuf::from(
                 "/var/lib/server-dashboard/rust-proxy-config.json",
@@ -85,6 +87,9 @@ impl EnvConfig {
         }
         if let Ok(v) = std::env::var("CF_INTERFACE") {
             config.cf_interface = v;
+        }
+        if let Ok(v) = std::env::var("CF_PROXIED") {
+            config.cf_proxied = v.to_lowercase() != "false" && v != "0";
         }
         if let Ok(v) = std::env::var("DDNS_CRON") {
             config.ddns_cron = v;

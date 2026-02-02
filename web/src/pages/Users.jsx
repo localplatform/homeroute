@@ -22,6 +22,7 @@ import Button from '../components/Button';
 import GroupBadge from '../components/GroupBadge';
 import UserModal from '../components/UserModal';
 import GroupModal from '../components/GroupModal';
+import PageHeader from '../components/PageHeader';
 import {
   getAutheliaStatus,
   getAutheliaInstallInstructions,
@@ -417,7 +418,7 @@ function Users() {
                         setSelectedUser(user);
                         setShowPasswordModal(true);
                       }}
-                      className="p-2 text-gray-400 hover:text-yellow-400 hover:bg-gray-700 rounded"
+                      className="p-2 text-gray-400 hover:text-yellow-400 hover:bg-gray-700"
                       title="Changer le mot de passe"
                     >
                       <Key className="w-4 h-4" />
@@ -427,7 +428,7 @@ function Users() {
                         setEditingUser(user);
                         setShowUserModal(true);
                       }}
-                      className="p-2 text-gray-400 hover:text-blue-400 hover:bg-gray-700 rounded"
+                      className="p-2 text-gray-400 hover:text-blue-400 hover:bg-gray-700"
                       title="Modifier"
                     >
                       <Pencil className="w-4 h-4" />
@@ -469,13 +470,13 @@ function Users() {
           {groups.map(group => (
             <div
               key={group.id}
-              className="bg-gray-700/50 rounded-lg p-4 border border-gray-600"
+              className="bg-gray-700/50 p-4 border border-gray-600"
             >
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-2">
                   <GroupBadge group={group.id} color={group.color} label={group.name} size="md" />
                   {group.builtIn && (
-                    <span className="text-xs text-gray-500 bg-gray-600/50 px-2 py-0.5 rounded">
+                    <span className="text-xs text-gray-500 bg-gray-600/50 px-2 py-0.5">
                       Système
                     </span>
                   )}
@@ -487,14 +488,14 @@ function Users() {
                         setEditingGroup(group);
                         setShowGroupModal(true);
                       }}
-                      className="p-1.5 text-gray-400 hover:text-blue-400 hover:bg-gray-700 rounded"
+                      className="p-1.5 text-gray-400 hover:text-blue-400 hover:bg-gray-700"
                       title="Modifier"
                     >
                       <Pencil className="w-3.5 h-3.5" />
                     </button>
                     <button
                       onClick={() => handleDeleteGroup(group.id)}
-                      className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded"
+                      className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-gray-700"
                       title="Supprimer"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
@@ -527,29 +528,17 @@ function Users() {
   const isAuthAvailable = authStatus?.status === 'running';
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold flex items-center gap-2">
-            <ShieldCheck className="w-7 h-7 text-blue-400" />
-            Utilisateurs
-          </h1>
-          <p className="text-gray-400 text-sm mt-1">
-            Gestion des utilisateurs, groupes et authentification
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          {renderStatusBadge()}
-          <Button variant="secondary" onClick={fetchData}>
-            <RefreshCw className="w-4 h-4" />
-          </Button>
-        </div>
-      </div>
+    <div>
+      <PageHeader title="Utilisateurs" icon={ShieldCheck}>
+        {renderStatusBadge()}
+        <Button variant="secondary" onClick={fetchData}>
+          <RefreshCw className="w-4 h-4" />
+        </Button>
+      </PageHeader>
 
       {/* Message */}
       {message && (
-        <div className={`p-4 rounded-lg flex items-center gap-2 ${
+        <div className={`p-4 flex items-center gap-2 ${
           message.type === 'success' ? 'bg-green-500/20 text-green-400 border border-green-500/30' :
           'bg-red-500/20 text-red-400 border border-red-500/30'
         }`}>
@@ -640,7 +629,7 @@ function Users() {
       {/* Password Modal */}
       {showPasswordModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 rounded-lg border border-gray-700 w-full max-w-md mx-4 p-4">
+          <div className="bg-gray-800 border border-gray-700 w-full max-w-md mx-4 p-4">
             <h3 className="font-semibold mb-4">
               Changer le mot de passe de {selectedUser?.username}
             </h3>
@@ -652,7 +641,7 @@ function Users() {
                     type={showPassword ? 'text' : 'password'}
                     value={newPassword.password}
                     onChange={e => setNewPassword({ ...newPassword, password: e.target.value })}
-                    className="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white pr-10"
+                    className="w-full bg-gray-700 border border-gray-600 px-3 py-2 text-white pr-10"
                     placeholder="Minimum 8 caractères"
                   />
                   <button
@@ -670,7 +659,7 @@ function Users() {
                   type={showPassword ? 'text' : 'password'}
                   value={newPassword.confirmPassword}
                   onChange={e => setNewPassword({ ...newPassword, confirmPassword: e.target.value })}
-                  className="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white"
+                  className="w-full bg-gray-700 border border-gray-600 px-3 py-2 text-white"
                   placeholder="Confirmer le mot de passe"
                 />
               </div>
@@ -698,7 +687,7 @@ function Users() {
       {/* Bootstrap Modal */}
       {showBootstrapModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 rounded-lg border border-gray-700 w-full max-w-md mx-4 p-4">
+          <div className="bg-gray-800 border border-gray-700 w-full max-w-md mx-4 p-4">
             <h3 className="font-semibold mb-2">Créer l'administrateur initial</h3>
             <p className="text-gray-400 text-sm mb-4">
               Cet utilisateur aura accès complet à la gestion des utilisateurs et des services.
@@ -711,7 +700,7 @@ function Users() {
                     type={showPassword ? 'text' : 'password'}
                     value={bootstrapPassword.password}
                     onChange={e => setBootstrapPassword({ ...bootstrapPassword, password: e.target.value })}
-                    className="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white pr-10"
+                    className="w-full bg-gray-700 border border-gray-600 px-3 py-2 text-white pr-10"
                     placeholder="Minimum 8 caractères"
                   />
                   <button
@@ -729,7 +718,7 @@ function Users() {
                   type={showPassword ? 'text' : 'password'}
                   value={bootstrapPassword.confirmPassword}
                   onChange={e => setBootstrapPassword({ ...bootstrapPassword, confirmPassword: e.target.value })}
-                  className="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white"
+                  className="w-full bg-gray-700 border border-gray-600 px-3 py-2 text-white"
                   placeholder="Confirmer le mot de passe"
                 />
               </div>
@@ -756,7 +745,7 @@ function Users() {
       {/* Install Instructions Modal */}
       {showInstallModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 rounded-lg border border-gray-700 w-full max-w-3xl max-h-[80vh] flex flex-col">
+          <div className="bg-gray-800 border border-gray-700 w-full max-w-3xl max-h-[80vh] flex flex-col">
             <div className="flex items-center justify-between p-4 border-b border-gray-700">
               <h3 className="font-semibold">Instructions de démarrage</h3>
               <button
@@ -767,7 +756,7 @@ function Users() {
               </button>
             </div>
             <div className="p-4 overflow-auto flex-1">
-              <pre className="bg-gray-900 p-4 rounded-lg text-sm text-gray-300 whitespace-pre-wrap font-mono">
+              <pre className="bg-gray-900 p-4 text-sm text-gray-300 whitespace-pre-wrap font-mono">
                 {installInstructions}
               </pre>
             </div>

@@ -15,3 +15,4 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 rustc-hash = { workspace = true }
 chrono = { workspace = true }
+rand = { workspace = true }

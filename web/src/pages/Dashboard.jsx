@@ -1,9 +1,12 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { Network, Server, Shield, Globe, Wifi, ArrowRight } from 'lucide-react';
+import { LayoutDashboard, Network, Shield, Globe, Wifi, ArrowRight } from 'lucide-react';
 import Card from '../components/Card';
 import StatusBadge from '../components/StatusBadge';
-import { getInterfaces, getDhcpLeases, getAdblockStats, getDdnsStatus } from '../api/client';
+import ServiceStatusPanel from '../components/ServiceStatusPanel';
+import PageHeader from '../components/PageHeader';
+import Section from '../components/Section';
+import { getInterfaces, getDhcpLeases, getAdblockStats, getDdnsStatus, getServicesStatus } from '../api/client';
 
 function Dashboard() {
   const [data, setData] = useState({
@@ -11,17 +14,19 @@ function Dashboard() {
     leases: null,
     adblock: null,
     ddns: null,
+    services: null,
     loading: true
   });
 
   useEffect(() => {
     async function fetchData() {
       try {
-        const [ifRes, leaseRes, adblockRes, ddnsRes] = await Promise.all([
+        const [ifRes, leaseRes, adblockRes, ddnsRes, svcRes] = await Promise.all([
           getInterfaces(),
           getDhcpLeases(),
           getAdblockStats(),
-          getDdnsStatus()
+          getDdnsStatus(),
+          getServicesStatus()
         ]);
 
         setData({
@@ -29,6 +34,7 @@ function Dashboard() {
           leases: leaseRes.data.success ? leaseRes.data.leases : [],
           adblock: adblockRes.data.success ? adblockRes.data.stats : null,
           ddns: ddnsRes.data.success ? ddnsRes.data.status : null,
+          services: svcRes.data.success ? svcRes.data.services : [],
           loading: false
         });
       } catch (error) {
@@ -55,101 +61,106 @@ function Dashboard() {
   ) || [];
 
   return (
-    <div className="space-y-6">
-      <h1 className="text-2xl font-bold">Dashboard</h1>
+    <div>
+      <PageHeader title="Dashboard" icon={LayoutDashboard} />
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* Interfaces Card */}
-        <Card
-          title="Interfaces Réseau"
-          icon={Network}
-          actions={
-            <Link to="/network" className="text-blue-400 hover:text-blue-300">
-              <ArrowRight className="w-4 h-4" />
-            </Link>
-          }
-        >
-          <div className="space-y-2">
-            {physicalInterfaces.map(iface => (
-              <div key={iface.name} className="flex items-center justify-between">
-                <span className="text-sm font-mono">{iface.name}</span>
-                <StatusBadge status={iface.state === 'UP' ? 'up' : 'down'}>
-                  {iface.state}
-                </StatusBadge>
+      <Section title="Vue d'ensemble">
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+            {/* Interfaces Card */}
+            <Card
+              title="Interfaces Réseau"
+              icon={Network}
+              actions={
+                <Link to="/network" className="text-blue-400 hover:text-blue-300">
+                  <ArrowRight className="w-4 h-4" />
+                </Link>
+              }
+            >
+              <div className="space-y-2">
+                {physicalInterfaces.map(iface => (
+                  <div key={iface.name} className="flex items-center justify-between">
+                    <span className="text-sm font-mono">{iface.name}</span>
+                    <StatusBadge status={iface.state === 'UP' ? 'up' : 'down'}>
+                      {iface.state}
+                    </StatusBadge>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-          <p className="text-xs text-gray-500 mt-3">
-            {data.interfaces?.length || 0} interfaces totales
-          </p>
-        </Card>
+              <p className="text-xs text-gray-500 mt-3">
+                {data.interfaces?.length || 0} interfaces totales
+              </p>
+            </Card>
 
-        {/* DHCP Leases Card */}
-        <Card
-          title="Baux DHCP"
-          icon={Wifi}
-          actions={
-            <Link to="/dns" className="text-blue-400 hover:text-blue-300">
-              <ArrowRight className="w-4 h-4" />
-            </Link>
-          }
-        >
-          <div className="text-3xl font-bold text-blue-400">
-            {data.leases?.length || 0}
-          </div>
-          <p className="text-sm text-gray-400">appareils connectés</p>
-          <div className="mt-3 text-xs text-gray-500">
-            {data.leases?.slice(0, 3).map(lease => (
-              <div key={lease.mac} className="truncate">
-                {lease.hostname || lease.ip}
+            {/* DHCP Leases Card */}
+            <Card
+              title="Baux DHCP"
+              icon={Wifi}
+              actions={
+                <Link to="/dns" className="text-blue-400 hover:text-blue-300">
+                  <ArrowRight className="w-4 h-4" />
+                </Link>
+              }
+            >
+              <div className="text-3xl font-bold text-blue-400">
+                {data.leases?.length || 0}
               </div>
-            ))}
-          </div>
-        </Card>
+              <p className="text-sm text-gray-400">appareils connectés</p>
+              <div className="mt-3 text-xs text-gray-500">
+                {data.leases?.slice(0, 3).map(lease => (
+                  <div key={lease.mac} className="truncate">
+                    {lease.hostname || lease.ip}
+                  </div>
+                ))}
+              </div>
+            </Card>
 
-        {/* AdBlock Card */}
-        <Card
-          title="AdBlock"
-          icon={Shield}
-          actions={
-            <Link to="/adblock" className="text-blue-400 hover:text-blue-300">
-              <ArrowRight className="w-4 h-4" />
-            </Link>
-          }
-        >
-          <div className="text-3xl font-bold text-green-400">
-            {data.adblock?.domainCount?.toLocaleString() || 0}
-          </div>
-          <p className="text-sm text-gray-400">domaines bloqués</p>
-          <p className="text-xs text-gray-500 mt-3">
-            {data.adblock?.sources?.length || 0} sources actives
-          </p>
-        </Card>
+            {/* AdBlock Card */}
+            <Card
+              title="AdBlock"
+              icon={Shield}
+              actions={
+                <Link to="/adblock" className="text-blue-400 hover:text-blue-300">
+                  <ArrowRight className="w-4 h-4" />
+                </Link>
+              }
+            >
+              <div className="text-3xl font-bold text-green-400">
+                {data.adblock?.domainCount?.toLocaleString() || 0}
+              </div>
+              <p className="text-sm text-gray-400">domaines bloqués</p>
+              <p className="text-xs text-gray-500 mt-3">
+                {data.adblock?.sources?.length || 0} sources actives
+              </p>
+            </Card>
 
-        {/* DDNS Card */}
-        <Card
-          title="Dynamic DNS"
-          icon={Globe}
-          actions={
-            <Link to="/ddns" className="text-blue-400 hover:text-blue-300">
-              <ArrowRight className="w-4 h-4" />
-            </Link>
-          }
-        >
-          <div className="text-sm font-mono text-blue-400 break-all">
-            {data.ddns?.config?.recordName || '-'}
+            {/* DDNS Card */}
+            <Card
+              title="Dynamic DNS"
+              icon={Globe}
+              actions={
+                <Link to="/ddns" className="text-blue-400 hover:text-blue-300">
+                  <ArrowRight className="w-4 h-4" />
+                </Link>
+              }
+            >
+              <div className="text-sm font-mono text-blue-400 break-all">
+                {data.ddns?.config?.recordName || '-'}
+              </div>
+              <p className="text-xs text-gray-500 mt-2 font-mono break-all">
+                {data.ddns?.currentIpv6 || 'Pas d\'IPv6'}
+              </p>
+              <p className="text-xs text-gray-500 mt-2">
+                {data.ddns?.lastUpdate ? `MAJ: ${data.ddns.lastUpdate}` : '-'}
+              </p>
+            </Card>
           </div>
-          <p className="text-xs text-gray-500 mt-2 font-mono break-all">
-            {data.ddns?.currentIpv6 || 'Pas d\'IPv6'}
-          </p>
-          <p className="text-xs text-gray-500 mt-2">
-            {data.ddns?.lastUpdate ? `MAJ: ${data.ddns.lastUpdate}` : '-'}
-          </p>
-        </Card>
-      </div>
+      </Section>
 
-      {/* Recent DHCP Leases Table */}
-      <Card title="Baux DHCP Récents" icon={Server}>
+      <Section title="Services" contrast>
+        <ServiceStatusPanel services={data.services} />
+      </Section>
+
+      <Section title="Baux DHCP Récents">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
@@ -176,7 +187,7 @@ function Dashboard() {
             </tbody>
           </table>
         </div>
-      </Card>
+      </Section>
     </div>
   );
 }

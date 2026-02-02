@@ -1,21 +1,8 @@
 import { NavLink } from 'react-router-dom';
 import {
-  LayoutDashboard,
-  Server,
-  Network,
-  Shield,
-  Globe,
-  Settings,
-  ArrowLeftRight,
-  RefreshCw,
-  Zap,
-  Users,
-  BarChart3,
-  LogOut,
-  User,
-  Power,
-  HardDrive,
-  KeyRound
+  LayoutDashboard, Server, Network, Shield, Globe, Settings,
+  ArrowLeftRight, RefreshCw, Zap, Users, BarChart3, LogOut,
+  User, Power, HardDrive, KeyRound
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
@@ -48,17 +35,17 @@ function Sidebar() {
         <p className="text-xs text-gray-400 mt-1">cloudmaster</p>
       </div>
 
-      <nav className="flex-1 p-4">
-        <ul className="space-y-2">
+      <nav className="flex-1 py-2">
+        <ul className="space-y-0.5">
           {navItems.map(({ to, icon: Icon, label }) => (
             <li key={to}>
               <NavLink
                 to={to}
                 className={({ isActive }) =>
-                  `flex items-center gap-3 px-4 py-2 rounded-lg transition-colors ${
+                  `flex items-center gap-3 px-4 py-2 transition-colors text-sm ${
                     isActive
-                      ? 'bg-blue-600 text-white'
-                      : 'text-gray-300 hover:bg-gray-700'
+                      ? 'border-l-3 border-blue-400 bg-gray-700/50 text-white'
+                      : 'border-l-3 border-transparent text-gray-300 hover:bg-gray-700/30'
                   }`
                 }
               >
@@ -86,7 +73,7 @@ function Sidebar() {
             </div>
             <button
               onClick={logout}
-              className="p-2 text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded transition-colors"
+              className="p-2 text-gray-400 hover:text-red-400 hover:bg-gray-700 transition-colors"
               title="Deconnexion"
             >
               <LogOut className="w-4 h-4" />

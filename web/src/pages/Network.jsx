@@ -11,6 +11,7 @@ import {
 import Card from '../components/Card';
 import StatusBadge from '../components/StatusBadge';
 import Button from '../components/Button';
+import PageHeader from '../components/PageHeader';
 import {
   getInterfaces,
   getRoutes,
@@ -102,13 +103,13 @@ function Network() {
 
   // Separate physical from virtual interfaces
   const physicalIfaces = interfaces.filter(i =>
-    i.name.startsWith('en') || i.name.startsWith('eth')
+    i.name?.startsWith('en') || i.name?.startsWith('eth')
   );
   const bridgeIfaces = interfaces.filter(i =>
-    i.name.startsWith('br-') || i.name.startsWith('virbr') || i.name.startsWith('lxc') || i.name === 'docker0'
+    i.name?.startsWith('br-') || i.name?.startsWith('virbr') || i.name?.startsWith('lxc') || i.name === 'docker0'
   );
   const vpnIfaces = interfaces.filter(i =>
-    i.name.startsWith('tailscale') || i.name.startsWith('wg') || i.name.startsWith('tun')
+    i.name?.startsWith('tailscale') || i.name?.startsWith('wg') || i.name?.startsWith('tun')
   );
 
   const tabs = [
@@ -122,36 +123,32 @@ function Network() {
   const mainChains = ['INPUT', 'FORWARD', 'OUTPUT'];
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Reseau / Firewall</h1>
-        <div className="flex items-center gap-4">
-          {firewallStatus && (
-            <div className="flex items-center gap-2 text-sm">
-              <StatusBadge status={firewallStatus.active ? 'up' : 'down'}>
-                {firewallStatus.active ? 'Actif' : 'Inactif'}
-              </StatusBadge>
-              <span className="text-gray-400">{firewallStatus.framework}</span>
-            </div>
-          )}
-          <Button onClick={handleRefresh} disabled={refreshing}>
-            <RefreshCw className={`w-4 h-4 mr-2 ${refreshing ? 'animate-spin' : ''}`} />
-            Actualiser
-          </Button>
-        </div>
-      </div>
+    <div>
+      <PageHeader title="Réseau / Firewall" icon={NetworkIcon}>
+        {firewallStatus && (
+          <div className="flex items-center gap-2 text-sm">
+            <StatusBadge status={firewallStatus.active ? 'up' : 'down'}>
+              {firewallStatus.active ? 'Actif' : 'Inactif'}
+            </StatusBadge>
+            <span className="text-gray-400">{firewallStatus.framework}</span>
+          </div>
+        )}
+        <Button onClick={handleRefresh} disabled={refreshing}>
+          <RefreshCw className={`w-4 h-4 mr-2 ${refreshing ? 'animate-spin' : ''}`} />
+          Actualiser
+        </Button>
+      </PageHeader>
 
       {/* Tabs */}
-      <div className="flex gap-2 border-b border-gray-700 pb-2">
+      <div className="flex border-b border-gray-700">
         {tabs.map(tab => (
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
-            className={`flex items-center gap-2 px-4 py-2 rounded-t-lg transition-colors ${
+            className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
               activeTab === tab.id
-                ? 'bg-gray-800 text-blue-400 border-b-2 border-blue-400'
-                : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/50'
+                ? 'border-blue-400 text-blue-400'
+                : 'border-transparent text-gray-400 hover:text-gray-300'
             }`}
           >
             <tab.icon className="w-4 h-4" />
@@ -162,12 +159,12 @@ function Network() {
 
       {/* Tab: Interfaces */}
       {activeTab === 'interfaces' && (
-        <div className="space-y-6">
+        <div>
           {/* Physical Interfaces */}
           <Card title="Interfaces Physiques" icon={NetworkIcon}>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {physicalIfaces.map(iface => (
-                <div key={iface.name} className="bg-gray-900 rounded-lg p-4">
+                <div key={iface.name} className="bg-gray-900 p-4">
                   <div className="flex items-center justify-between mb-3">
                     <span className="font-mono font-bold">{iface.name}</span>
                     <StatusBadge status={iface.state === 'UP' ? 'up' : 'down'}>
@@ -206,7 +203,7 @@ function Network() {
             <Card title="Interfaces VPN" icon={Shield}>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {vpnIfaces.map(iface => (
-                  <div key={iface.name} className="bg-gray-900 rounded-lg p-4">
+                  <div key={iface.name} className="bg-gray-900 p-4">
                     <div className="flex items-center justify-between mb-3">
                       <span className="font-mono font-bold text-green-400">{iface.name}</span>
                       <StatusBadge status={iface.state === 'UP' ? 'up' : 'down'}>
@@ -263,7 +260,7 @@ function Network() {
 
       {/* Tab: Routing */}
       {activeTab === 'routing' && (
-        <div className="space-y-6">
+        <div>
           {/* Routing Table */}
           <Card title="Table de Routage IPv4" icon={Route}>
             <div className="overflow-x-auto">
@@ -332,7 +329,7 @@ function Network() {
 
       {/* Tab: Firewall */}
       {activeTab === 'firewall' && (
-        <div className="space-y-6">
+        <div>
           {/* Chain Stats Overview */}
           {chainStats && (
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -341,10 +338,10 @@ function Network() {
                 const stats = chainStats.chains?.[chainName];
                 if (!chain) return null;
                 return (
-                  <div key={chainName} className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+                  <div key={chainName} className="bg-gray-800 p-4 border border-gray-700">
                     <div className="flex items-center justify-between mb-2">
                       <span className="font-bold">{chainName}</span>
-                      <span className={`text-xs px-2 py-1 rounded ${
+                      <span className={`text-xs px-2 py-1 ${
                         chain.policy === 'DROP' ? 'bg-red-900/50 text-red-400' :
                         chain.policy === 'ACCEPT' ? 'bg-green-900/50 text-green-400' :
                         'bg-gray-700 text-gray-400'
@@ -485,7 +482,7 @@ function Network() {
 
       {/* Tab: NAT */}
       {activeTab === 'nat' && (
-        <div className="space-y-6">
+        <div>
           {/* Port Forwards */}
           <Card title="Port Forwards (DNAT)" icon={ArrowRight}>
             {forwards.length > 0 ? (

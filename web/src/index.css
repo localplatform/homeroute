@@ -17,7 +17,7 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  @apply bg-gray-600 rounded;
+  @apply bg-gray-600;
 }
 
 ::-webkit-scrollbar-thumb:hover {

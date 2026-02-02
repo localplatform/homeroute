@@ -28,9 +28,12 @@ api.interceptors.response.use(
   }
 );
 
+// Services Status
+export const getServicesStatus = () => api.get('/services/status');
+
 // DNS/DHCP
-export const getDnsConfig = () => api.get('/dns');
-export const getDhcpLeases = () => api.get('/dns/leases');
+export const getDnsConfig = () => api.get('/dns-dhcp/config');
+export const getDhcpLeases = () => api.get('/dns-dhcp/leases');
 
 // Network
 export const getInterfaces = () => api.get('/network/interfaces');
@@ -58,6 +61,7 @@ export const searchBlocked = (query) => api.get('/adblock/search', { params: { q
 export const getDdnsStatus = () => api.get('/ddns/status');
 export const forceDdnsUpdate = () => api.post('/ddns/update');
 export const updateDdnsToken = (token) => api.put('/ddns/token', { token });
+export const updateDdnsConfig = (config) => api.put('/ddns/config', config);
 
 // Reverse Proxy
 export const getReverseProxyConfig = () => api.get('/reverseproxy/config');

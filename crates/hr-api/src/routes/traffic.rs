@@ -1,10 +1,13 @@
 use axum::{
     extract::{Query, State},
+    response::sse::{Event, Sse},
     routing::get,
     Json, Router,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::convert::Infallible;
+use tokio_stream::StreamExt;
 
 use crate::state::ApiState;
 
@@ -18,6 +21,7 @@ pub fn router() -> Router<ApiState> {
         .route("/device/{mac}", get(device_detail))
         .route("/dns/top-domains", get(dns_top_domains))
         .route("/dns/by-category", get(dns_by_category))
+        .route("/events", get(sse_events))
 }
 
 #[derive(Deserialize)]
@@ -138,4 +142,16 @@ async fn dns_by_category(
         Ok(data) => Json(json!({ "success": true, "data": data })),
         Err(e) => Json(json!({ "success": false, "error": e.to_string() })),
     }
+}
+
+/// SSE endpoint for real-time traffic updates.
+async fn sse_events() -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let interval = tokio::time::interval(std::time::Duration::from_secs(15));
+    let stream = tokio_stream::wrappers::IntervalStream::new(interval)
+        .map(|_| Ok(Event::default().comment("keepalive")));
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15))
+            .text("keepalive"),
+    )
 }

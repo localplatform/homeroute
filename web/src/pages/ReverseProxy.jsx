@@ -26,6 +26,8 @@ import Card from '../components/Card';
 import Button from '../components/Button';
 import ApplicationCard from '../components/ApplicationCard';
 import GroupBadge from '../components/GroupBadge';
+import PageHeader from '../components/PageHeader';
+import Section from '../components/Section';
 import {
   getReverseProxyConfig,
   getReverseProxyStatus,
@@ -636,37 +638,33 @@ Verification rapide (sans les details utilisateur).
   ];
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Reverse Proxy</h1>
-        <div className="flex gap-2">
-          <Button onClick={handleReload} loading={reloading} variant="secondary">
-            <RefreshCw className="w-4 h-4" />
-            Recharger
+    <div>
+      <PageHeader title="Reverse Proxy" icon={Globe}>
+        <Button onClick={handleReload} loading={reloading} variant="secondary">
+          <RefreshCw className="w-4 h-4" />
+          Recharger
+        </Button>
+        <Button onClick={handleRenewCerts} loading={renewing} variant="secondary">
+          <Lock className="w-4 h-4" />
+          Renouveler certs
+        </Button>
+        {activeTab === 'applications' && (
+          <Button onClick={() => setShowAddAppModal(true)} disabled={!config?.baseDomain}>
+            <Plus className="w-4 h-4" />
+            Nouvelle app
           </Button>
-          <Button onClick={handleRenewCerts} loading={renewing} variant="secondary">
-            <Lock className="w-4 h-4" />
-            Renouveler certs
+        )}
+        {activeTab === 'standalone' && (
+          <Button onClick={() => setShowAddModal(true)} disabled={!config?.baseDomain}>
+            <Plus className="w-4 h-4" />
+            Ajouter hote
           </Button>
-          {activeTab === 'applications' && (
-            <Button onClick={() => setShowAddAppModal(true)} disabled={!config?.baseDomain}>
-              <Plus className="w-4 h-4" />
-              Nouvelle app
-            </Button>
-          )}
-          {activeTab === 'standalone' && (
-            <Button onClick={() => setShowAddModal(true)} disabled={!config?.baseDomain}>
-              <Plus className="w-4 h-4" />
-              Ajouter hote
-            </Button>
-          )}
-        </div>
-      </div>
+        )}
+      </PageHeader>
 
       {/* Message */}
       {message && (
-        <div className={`p-4 rounded-lg flex items-center gap-2 ${
+        <div className={`p-4 flex items-center gap-2 ${
           message.type === 'success' ? 'bg-green-900/50 text-green-400' : 'bg-red-900/50 text-red-400'
         }`}>
           {message.type === 'success' ? <CheckCircle className="w-5 h-5" /> : <XCircle className="w-5 h-5" />}
@@ -678,7 +676,7 @@ Verification rapide (sans les details utilisateur).
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <Card title="Proxy" icon={Server}>
           <div className="flex items-center gap-2">
-            <div className={`w-3 h-3 rounded-full ${rustProxy?.running ? 'bg-green-400' : 'bg-red-400'}`} />
+            <div className={`w-3 h-3  ${rustProxy?.running ? 'bg-green-400' : 'bg-red-400'}`} />
             <span className={rustProxy?.running ? 'text-green-400' : 'text-red-400'}>
               {rustProxy?.running ? `Port ${rustProxy.httpsPort || 443}` : 'Hors ligne'}
             </span>
@@ -696,7 +694,7 @@ Verification rapide (sans les details utilisateur).
 
         <Card title="Certificats" icon={Lock}>
           <div className="flex items-center gap-2">
-            <div className="w-3 h-3 rounded-full bg-green-400" />
+            <div className="w-3 h-3  bg-green-400" />
             <span className="text-green-400">CA Locale</span>
           </div>
         </Card>
@@ -725,7 +723,7 @@ Verification rapide (sans les details utilisateur).
               <tab.icon className="w-4 h-4" />
               {tab.label}
               {tab.count !== undefined && (
-                <span className="text-xs bg-gray-700 px-2 py-0.5 rounded-full">{tab.count}</span>
+                <span className="text-xs bg-gray-700 px-2 py-0.5 ">{tab.count}</span>
               )}
             </button>
           ))}
@@ -764,7 +762,7 @@ Verification rapide (sans les details utilisateur).
       )}
 
       {activeTab === 'standalone' && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <div className="lg:col-span-2">
             <Card title="Hotes standalone" icon={Globe}>
               {hosts.length === 0 ? (
@@ -802,13 +800,13 @@ Verification rapide (sans les details utilisateur).
                                   {host.customDomain || `${host.subdomain}.${config?.baseDomain}`}
                                 </a>
                                 {host.localOnly && (
-                                  <span className="flex items-center gap-1 text-xs text-yellow-400 bg-yellow-900/30 px-2 py-0.5 rounded">
+                                  <span className="flex items-center gap-1 text-xs text-yellow-400 bg-yellow-900/30 px-2 py-0.5">
                                     <Shield className="w-3 h-3" />
                                     Local
                                   </span>
                                 )}
                                 {host.requireAuth && (
-                                  <span className="flex items-center gap-1 text-xs text-purple-400 bg-purple-900/30 px-2 py-0.5 rounded">
+                                  <span className="flex items-center gap-1 text-xs text-purple-400 bg-purple-900/30 px-2 py-0.5">
                                     <Key className="w-3 h-3" />
                                     Auth
                                   </span>
@@ -820,7 +818,7 @@ Verification rapide (sans les details utilisateur).
                             </td>
                             <td className="py-3">
                               {certStatus ? (
-                                <span className={`flex items-center gap-1 text-xs px-2 py-0.5 rounded ${
+                                <span className={`flex items-center gap-1 text-xs px-2 py-0.5${
                                   certStatus.valid
                                     ? certStatus.daysRemaining <= 14 ? 'text-yellow-400 bg-yellow-900/30' : 'text-green-400 bg-green-900/30'
                                     : 'text-red-400 bg-red-900/30'
@@ -833,7 +831,7 @@ Verification rapide (sans les details utilisateur).
                             <td className="py-3">
                               <button
                                 onClick={() => handleToggleHost(host.id, !host.enabled)}
-                                className={`p-1.5 rounded transition-colors ${
+                                className={`p-1.5transition-colors ${
                                   host.enabled ? 'text-green-400 bg-green-900/30 hover:bg-green-900/50' : 'text-gray-500 bg-gray-700/30 hover:bg-gray-700/50'
                                 }`}
                               >
@@ -878,7 +876,7 @@ Verification rapide (sans les details utilisateur).
             >
               <p className="text-sm text-gray-400 mb-3">Instructions pour integrer l&apos;authentification.</p>
               {showIntegration && (
-                <pre className="text-xs text-gray-300 whitespace-pre-wrap font-mono overflow-x-auto max-h-96 overflow-y-auto bg-gray-900 rounded p-4">
+                <pre className="text-xs text-gray-300 whitespace-pre-wrap font-mono overflow-x-auto max-h-96 overflow-y-auto bg-gray-900p-4">
                   {authInstructions}
                 </pre>
               )}
@@ -888,7 +886,7 @@ Verification rapide (sans les details utilisateur).
       )}
 
       {activeTab === 'config' && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {/* Domain Config */}
           <Card title="Domaine de base" icon={Globe}>
             <div className="space-y-4">
@@ -899,7 +897,7 @@ Verification rapide (sans les details utilisateur).
                     type="text"
                     value={configForm.baseDomain}
                     onChange={e => setConfigForm({ ...configForm, baseDomain: e.target.value })}
-                    className="flex-1 px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm"
+                    className="flex-1 px-3 py-2 bg-gray-900 border border-gray-600text-sm"
                     placeholder="example.com"
                   />
                   <Button onClick={handleSaveConfig} loading={saving} disabled={configForm.baseDomain === config?.baseDomain}>
@@ -918,11 +916,11 @@ Verification rapide (sans les details utilisateur).
           <Card title="Environnements" icon={Layers}>
             <div className="space-y-2">
               {environments.map(env => (
-                <div key={env.id} className="p-3 bg-gray-900/50 rounded border border-gray-700">
+                <div key={env.id} className="p-3 bg-gray-900/50border border-gray-700">
                   <div className="flex items-center justify-between mb-2">
                     <div className="font-medium">{env.name}</div>
                     {env.isDefault && (
-                      <span className="text-xs bg-blue-900/50 text-blue-400 px-2 py-1 rounded">Default</span>
+                      <span className="text-xs bg-blue-900/50 text-blue-400 px-2 py-1">Default</span>
                     )}
                   </div>
                   <div className="space-y-1 text-xs">
@@ -951,49 +949,49 @@ Verification rapide (sans les details utilisateur).
       {/* Add Host Modal */}
       {showAddModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md border border-gray-700">
+          <div className="bg-gray-800 p-6 w-full max-w-md border border-gray-700">
             <h2 className="text-xl font-bold mb-4">Ajouter un hote standalone</h2>
             <div className="space-y-4">
               <div className="flex gap-2">
-                <button onClick={() => setHostType('subdomain')} className={`flex-1 py-2 rounded text-sm ${hostType === 'subdomain' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300'}`}>Sous-domaine</button>
-                <button onClick={() => setHostType('custom')} className={`flex-1 py-2 rounded text-sm ${hostType === 'custom' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300'}`}>Domaine perso</button>
+                <button onClick={() => setHostType('subdomain')} className={`flex-1 py-2text-sm ${hostType === 'subdomain' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300'}`}>Sous-domaine</button>
+                <button onClick={() => setHostType('custom')} className={`flex-1 py-2text-sm ${hostType === 'custom' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300'}`}>Domaine perso</button>
               </div>
 
               {hostType === 'subdomain' ? (
                 <div>
                   <label className="block text-sm text-gray-400 mb-1">Sous-domaine</label>
                   <div className="flex">
-                    <input type="text" placeholder="app" value={newHost.subdomain} onChange={e => setNewHost({ ...newHost, subdomain: e.target.value })} className="flex-1 px-3 py-2 bg-gray-900 border border-gray-600 rounded-l text-sm" />
-                    <span className="px-3 py-2 bg-gray-700 border border-l-0 border-gray-600 rounded-r text-gray-400 text-sm">.{config?.baseDomain}</span>
+                    <input type="text" placeholder="app" value={newHost.subdomain} onChange={e => setNewHost({ ...newHost, subdomain: e.target.value })} className="flex-1 px-3 py-2 bg-gray-900 border border-gray-600 text-sm" />
+                    <span className="px-3 py-2 bg-gray-700 border border-l-0 border-gray-600 text-gray-400 text-sm">.{config?.baseDomain}</span>
                   </div>
                 </div>
               ) : (
                 <div>
                   <label className="block text-sm text-gray-400 mb-1">Domaine complet</label>
-                  <input type="text" placeholder="app.example.com" value={newHost.customDomain} onChange={e => setNewHost({ ...newHost, customDomain: e.target.value })} className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm" />
+                  <input type="text" placeholder="app.example.com" value={newHost.customDomain} onChange={e => setNewHost({ ...newHost, customDomain: e.target.value })} className="w-full px-3 py-2 bg-gray-900 border border-gray-600text-sm" />
                 </div>
               )}
 
               <div>
                 <label className="block text-sm text-gray-400 mb-1">Hote cible</label>
-                <input type="text" placeholder="localhost" value={newHost.targetHost} onChange={e => setNewHost({ ...newHost, targetHost: e.target.value })} className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm" />
+                <input type="text" placeholder="localhost" value={newHost.targetHost} onChange={e => setNewHost({ ...newHost, targetHost: e.target.value })} className="w-full px-3 py-2 bg-gray-900 border border-gray-600text-sm" />
               </div>
 
               <div>
                 <label className="block text-sm text-gray-400 mb-1">Port</label>
-                <input type="number" placeholder="3000" value={newHost.targetPort} onChange={e => setNewHost({ ...newHost, targetPort: e.target.value })} className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm" />
+                <input type="number" placeholder="3000" value={newHost.targetPort} onChange={e => setNewHost({ ...newHost, targetPort: e.target.value })} className="w-full px-3 py-2 bg-gray-900 border border-gray-600text-sm" />
               </div>
 
-              <div onClick={() => setNewHost({ ...newHost, localOnly: !newHost.localOnly })} className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer ${newHost.localOnly ? 'bg-yellow-900/30 border-yellow-600' : 'bg-gray-900/50 border-gray-700'}`}>
+              <div onClick={() => setNewHost({ ...newHost, localOnly: !newHost.localOnly })} className={`flex items-center gap-3 p-3 border cursor-pointer ${newHost.localOnly ? 'bg-yellow-900/30 border-yellow-600' : 'bg-gray-900/50 border-gray-700'}`}>
                 <Shield className="w-5 h-5" />
                 <div className="flex-1"><div className="text-sm">Reseau local uniquement</div></div>
-                <div className={`w-10 h-6 rounded-full ${newHost.localOnly ? 'bg-yellow-600' : 'bg-gray-600'}`}><div className={`w-4 h-4 bg-white rounded-full mt-1 ${newHost.localOnly ? 'translate-x-5' : 'translate-x-1'}`} /></div>
+                <div className={`w-10 h-6  ${newHost.localOnly ? 'bg-yellow-600' : 'bg-gray-600'}`}><div className={`w-4 h-4 bg-white  mt-1 ${newHost.localOnly ? 'translate-x-5' : 'translate-x-1'}`} /></div>
               </div>
 
-              <div onClick={() => setNewHost({ ...newHost, requireAuth: !newHost.requireAuth })} className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer ${newHost.requireAuth ? 'bg-purple-900/30 border-purple-600' : 'bg-gray-900/50 border-gray-700'}`}>
+              <div onClick={() => setNewHost({ ...newHost, requireAuth: !newHost.requireAuth })} className={`flex items-center gap-3 p-3 border cursor-pointer ${newHost.requireAuth ? 'bg-purple-900/30 border-purple-600' : 'bg-gray-900/50 border-gray-700'}`}>
                 <Key className="w-5 h-5" />
                 <div className="flex-1"><div className="text-sm">Authentification requise</div></div>
-                <div className={`w-10 h-6 rounded-full ${newHost.requireAuth ? 'bg-purple-600' : 'bg-gray-600'}`}><div className={`w-4 h-4 bg-white rounded-full mt-1 ${newHost.requireAuth ? 'translate-x-5' : 'translate-x-1'}`} /></div>
+                <div className={`w-10 h-6  ${newHost.requireAuth ? 'bg-purple-600' : 'bg-gray-600'}`}><div className={`w-4 h-4 bg-white  mt-1 ${newHost.requireAuth ? 'translate-x-5' : 'translate-x-1'}`} /></div>
               </div>
             </div>
             <div className="flex justify-end gap-2 mt-6">
@@ -1007,7 +1005,7 @@ Verification rapide (sans les details utilisateur).
       {/* Add App Modal */}
       {showAddAppModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-2xl border border-gray-700 max-h-[90vh] overflow-y-auto">
+          <div className="bg-gray-800 p-6 w-full max-w-2xl border border-gray-700 max-h-[90vh] overflow-y-auto">
             <h2 className="text-xl font-bold mb-4">Nouvelle application</h2>
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
@@ -1027,7 +1025,7 @@ Verification rapide (sans les details utilisateur).
                         .replace(/^-|-$/g, '');
                       setNewApp({ ...newApp, name, slug: autoSlug });
                     }}
-                    className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm"
+                    className="w-full px-3 py-2 bg-gray-900 border border-gray-600text-sm"
                   />
                 </div>
                 <div>
@@ -1037,7 +1035,7 @@ Verification rapide (sans les details utilisateur).
                     placeholder="mon-app"
                     value={newApp.slug}
                     onChange={e => setNewApp({ ...newApp, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })}
-                    className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm font-mono"
+                    className="w-full px-3 py-2 bg-gray-900 border border-gray-600text-sm font-mono"
                   />
                 </div>
               </div>
@@ -1068,7 +1066,7 @@ Verification rapide (sans les details utilisateur).
                 };
 
                 return (
-                  <div key={env.id} className={`border rounded-lg overflow-hidden ${envData.enabled ? 'border-gray-600' : 'border-gray-800 opacity-60'}`}>
+                  <div key={env.id} className={`border overflow-hidden ${envData.enabled ? 'border-gray-600' : 'border-gray-800 opacity-60'}`}>
                     <div className="bg-gray-900/50 px-4 py-2 flex items-center justify-between">
                       <label className="flex items-center gap-2 cursor-pointer">
                         <input
@@ -1097,7 +1095,7 @@ Verification rapide (sans les details utilisateur).
                                 type="text"
                                 value={envData.frontend.targetHost}
                                 onChange={e => updateEnv(data => ({ ...data, frontend: { ...data.frontend, targetHost: e.target.value } }))}
-                                className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-sm"
+                                className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700text-sm"
                               />
                             </div>
                             <div>
@@ -1107,7 +1105,7 @@ Verification rapide (sans les details utilisateur).
                                 placeholder="3000"
                                 value={envData.frontend.targetPort}
                                 onChange={e => updateEnv(data => ({ ...data, frontend: { ...data.frontend, targetPort: e.target.value } }))}
-                                className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-sm"
+                                className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700text-sm"
                               />
                             </div>
                           </div>
@@ -1158,7 +1156,7 @@ Verification rapide (sans les details utilisateur).
                                     type="text"
                                     value={envData.api.targetHost}
                                     onChange={e => updateEnv(data => ({ ...data, api: { ...data.api, targetHost: e.target.value } }))}
-                                    className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-sm"
+                                    className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700text-sm"
                                   />
                                 </div>
                                 <div>
@@ -1168,7 +1166,7 @@ Verification rapide (sans les details utilisateur).
                                     placeholder="3001"
                                     value={envData.api.targetPort}
                                     onChange={e => updateEnv(data => ({ ...data, api: { ...data.api, targetPort: e.target.value } }))}
-                                    className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-sm"
+                                    className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700text-sm"
                                   />
                                 </div>
                               </div>
@@ -1223,13 +1221,13 @@ Verification rapide (sans les details utilisateur).
                             : [...newApp.allowedGroups, group.id];
                           setNewApp({ ...newApp, allowedGroups: groups });
                         }}
-                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs border transition-all ${
+                        className={`flex items-center gap-1.5 px-3 py-1.5  text-xs border transition-all ${
                           selected
                             ? 'border-white/30 bg-white/10 text-white'
                             : 'border-gray-700 bg-gray-800/50 text-gray-400 hover:border-gray-500'
                         }`}
                       >
-                        <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: group.color }} />
+                        <span className="w-2.5 h-2.5 " style={{ backgroundColor: group.color }} />
                         {group.name}
                       </button>
                     );
@@ -1248,32 +1246,32 @@ Verification rapide (sans les details utilisateur).
       {/* Edit Host Modal */}
       {showEditModal && editingHost && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md border border-gray-700">
+          <div className="bg-gray-800 p-6 w-full max-w-md border border-gray-700">
             <h2 className="text-xl font-bold mb-4">Modifier l&apos;hote</h2>
             <div className="space-y-4">
               <div>
                 <label className="block text-sm text-gray-400 mb-1">Domaine</label>
-                <div className="px-3 py-2 bg-gray-900/50 border border-gray-700 rounded text-sm font-mono text-gray-400">
+                <div className="px-3 py-2 bg-gray-900/50 border border-gray-700text-sm font-mono text-gray-400">
                   {editingHost.customDomain || `${editingHost.subdomain}.${config?.baseDomain}`}
                 </div>
               </div>
               <div>
                 <label className="block text-sm text-gray-400 mb-1">Hote cible</label>
-                <input type="text" value={editForm.targetHost} onChange={e => setEditForm({ ...editForm, targetHost: e.target.value })} className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm" />
+                <input type="text" value={editForm.targetHost} onChange={e => setEditForm({ ...editForm, targetHost: e.target.value })} className="w-full px-3 py-2 bg-gray-900 border border-gray-600text-sm" />
               </div>
               <div>
                 <label className="block text-sm text-gray-400 mb-1">Port</label>
-                <input type="number" value={editForm.targetPort} onChange={e => setEditForm({ ...editForm, targetPort: e.target.value })} className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm" />
+                <input type="number" value={editForm.targetPort} onChange={e => setEditForm({ ...editForm, targetPort: e.target.value })} className="w-full px-3 py-2 bg-gray-900 border border-gray-600text-sm" />
               </div>
-              <div onClick={() => setEditForm({ ...editForm, localOnly: !editForm.localOnly })} className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer ${editForm.localOnly ? 'bg-yellow-900/30 border-yellow-600' : 'bg-gray-900/50 border-gray-700'}`}>
+              <div onClick={() => setEditForm({ ...editForm, localOnly: !editForm.localOnly })} className={`flex items-center gap-3 p-3 border cursor-pointer ${editForm.localOnly ? 'bg-yellow-900/30 border-yellow-600' : 'bg-gray-900/50 border-gray-700'}`}>
                 <Shield className="w-5 h-5" />
                 <div className="flex-1"><div className="text-sm">Reseau local uniquement</div></div>
-                <div className={`w-10 h-6 rounded-full ${editForm.localOnly ? 'bg-yellow-600' : 'bg-gray-600'}`}><div className={`w-4 h-4 bg-white rounded-full mt-1 ${editForm.localOnly ? 'translate-x-5' : 'translate-x-1'}`} /></div>
+                <div className={`w-10 h-6  ${editForm.localOnly ? 'bg-yellow-600' : 'bg-gray-600'}`}><div className={`w-4 h-4 bg-white  mt-1 ${editForm.localOnly ? 'translate-x-5' : 'translate-x-1'}`} /></div>
               </div>
-              <div onClick={() => setEditForm({ ...editForm, requireAuth: !editForm.requireAuth })} className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer ${editForm.requireAuth ? 'bg-purple-900/30 border-purple-600' : 'bg-gray-900/50 border-gray-700'}`}>
+              <div onClick={() => setEditForm({ ...editForm, requireAuth: !editForm.requireAuth })} className={`flex items-center gap-3 p-3 border cursor-pointer ${editForm.requireAuth ? 'bg-purple-900/30 border-purple-600' : 'bg-gray-900/50 border-gray-700'}`}>
                 <Key className="w-5 h-5" />
                 <div className="flex-1"><div className="text-sm">Authentification requise</div></div>
-                <div className={`w-10 h-6 rounded-full ${editForm.requireAuth ? 'bg-purple-600' : 'bg-gray-600'}`}><div className={`w-4 h-4 bg-white rounded-full mt-1 ${editForm.requireAuth ? 'translate-x-5' : 'translate-x-1'}`} /></div>
+                <div className={`w-10 h-6  ${editForm.requireAuth ? 'bg-purple-600' : 'bg-gray-600'}`}><div className={`w-4 h-4 bg-white  mt-1 ${editForm.requireAuth ? 'translate-x-5' : 'translate-x-1'}`} /></div>
               </div>
 
             </div>
@@ -1288,10 +1286,10 @@ Verification rapide (sans les details utilisateur).
       {/* Edit App Modal */}
       {showEditAppModal && editingApp && editAppForm && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-4xl border border-gray-700 max-h-[90vh] overflow-y-auto">
+          <div className="bg-gray-800 p-6 w-full max-w-4xl border border-gray-700 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-xl font-bold">Modifier {editingApp.name}</h2>
-              <span className="text-xs text-gray-500 bg-gray-900/50 px-2 py-1 rounded font-mono">
+              <span className="text-xs text-gray-500 bg-gray-900/50 px-2 py-1font-mono">
                 {editingApp.slug}
               </span>
             </div>
@@ -1304,7 +1302,7 @@ Verification rapide (sans les details utilisateur).
                     placeholder="Mon Application"
                     value={editAppForm.name}
                     onChange={e => setEditAppForm({ ...editAppForm, name: e.target.value })}
-                    className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm"
+                    className="w-full px-3 py-2 bg-gray-900 border border-gray-600text-sm"
                   />
                 </div>
                 <div>
@@ -1314,7 +1312,7 @@ Verification rapide (sans les details utilisateur).
                     placeholder="mon-app"
                     value={editAppForm.slug}
                     onChange={e => setEditAppForm({ ...editAppForm, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })}
-                    className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm font-mono"
+                    className="w-full px-3 py-2 bg-gray-900 border border-gray-600text-sm font-mono"
                   />
                   <p className="text-xs text-yellow-400 mt-1 flex items-center gap-1">
                     <AlertTriangle className="w-3 h-3" />
@@ -1386,7 +1384,7 @@ Verification rapide (sans les details utilisateur).
                 };
 
                 return (
-                  <div key={env.id} className={`border rounded-lg overflow-hidden ${envData.enabled ? 'border-gray-600' : 'border-gray-800 opacity-60'}`}>
+                  <div key={env.id} className={`border overflow-hidden ${envData.enabled ? 'border-gray-600' : 'border-gray-800 opacity-60'}`}>
                     <div className="bg-gray-900/50 px-4 py-2 flex items-center justify-between">
                       <label className="flex items-center gap-2 cursor-pointer">
                         <input
@@ -1405,7 +1403,7 @@ Verification rapide (sans les details utilisateur).
                         {/* Grille 2 colonnes pour Frontend + APIs */}
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                           {/* Frontend - toujours present */}
-                          <div className="bg-gray-900/30 rounded-lg p-3 border border-gray-700">
+                          <div className="bg-gray-900/30 p-3 border border-gray-700">
                             <div className="text-xs text-blue-400 mb-2 font-mono flex items-center gap-1">
                               <Globe className="w-3 h-3" />
                               {getAppDomain(editingApp.slug, 'frontend', env, config?.baseDomain)}
@@ -1416,14 +1414,14 @@ Verification rapide (sans les details utilisateur).
                                 value={envData.frontend.targetHost}
                                 onChange={e => updateEditEnv(data => ({ ...data, frontend: { ...data.frontend, targetHost: e.target.value } }))}
                                 placeholder="localhost"
-                                className="flex-1 px-2 py-1 bg-gray-900 border border-gray-700 rounded text-sm"
+                                className="flex-1 px-2 py-1 bg-gray-900 border border-gray-700text-sm"
                               />
                               <input
                                 type="number"
                                 value={envData.frontend.targetPort}
                                 onChange={e => updateEditEnv(data => ({ ...data, frontend: { ...data.frontend, targetPort: e.target.value } }))}
                                 placeholder="3000"
-                                className="w-20 px-2 py-1 bg-gray-900 border border-gray-700 rounded text-sm"
+                                className="w-20 px-2 py-1 bg-gray-900 border border-gray-700text-sm"
                               />
                             </div>
                             <div className="flex gap-3">
@@ -1450,7 +1448,7 @@ Verification rapide (sans les details utilisateur).
 
                           {/* APIs */}
                           {envData.apis.map((api, apiIndex) => (
-                            <div key={apiIndex} className="bg-gray-900/30 rounded-lg p-3 border border-gray-700 relative">
+                            <div key={apiIndex} className="bg-gray-900/30 p-3 border border-gray-700 relative">
                               {/* Bouton supprimer */}
                               <button
                                 onClick={() => removeApi(apiIndex)}
@@ -1469,14 +1467,14 @@ Verification rapide (sans les details utilisateur).
                                   value={api.targetHost}
                                   onChange={e => updateApi(apiIndex, { targetHost: e.target.value })}
                                   placeholder="localhost"
-                                  className="flex-1 px-2 py-1 bg-gray-900 border border-gray-700 rounded text-sm"
+                                  className="flex-1 px-2 py-1 bg-gray-900 border border-gray-700text-sm"
                                 />
                                 <input
                                   type="number"
                                   value={api.targetPort}
                                   onChange={e => updateApi(apiIndex, { targetPort: e.target.value })}
                                   placeholder="3001"
-                                  className="w-20 px-2 py-1 bg-gray-900 border border-gray-700 rounded text-sm"
+                                  className="w-20 px-2 py-1 bg-gray-900 border border-gray-700text-sm"
                                 />
                               </div>
                               <div className="flex gap-3">
@@ -1505,7 +1503,7 @@ Verification rapide (sans les details utilisateur).
                           {/* Bouton ajouter API */}
                           <button
                             onClick={addApi}
-                            className="flex items-center justify-center gap-2 bg-gray-900/30 rounded-lg p-3 border border-dashed border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors"
+                            className="flex items-center justify-center gap-2 bg-gray-900/30 p-3 border border-dashed border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors"
                           >
                             <Plus className="w-4 h-4" />
                             <span className="text-sm">Ajouter API</span>
@@ -1539,13 +1537,13 @@ Verification rapide (sans les details utilisateur).
                             : [...(editAppForm.allowedGroups || []), group.id];
                           setEditAppForm({ ...editAppForm, allowedGroups: groups });
                         }}
-                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs border transition-all ${
+                        className={`flex items-center gap-1.5 px-3 py-1.5  text-xs border transition-all ${
                           selected
                             ? 'border-white/30 bg-white/10 text-white'
                             : 'border-gray-700 bg-gray-800/50 text-gray-400 hover:border-gray-500'
                         }`}
                       >
-                        <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: group.color }} />
+                        <span className="w-2.5 h-2.5 " style={{ backgroundColor: group.color }} />
                         {group.name}
                       </button>
                     );
@@ -1564,7 +1562,7 @@ Verification rapide (sans les details utilisateur).
       {/* Domain Required Modal */}
       {showDomainRequiredModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md border border-gray-700">
+          <div className="bg-gray-800 p-6 w-full max-w-md border border-gray-700">
             <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
               <AlertTriangle className="w-5 h-5 text-yellow-400" />
               Configuration requise
@@ -1573,7 +1571,7 @@ Verification rapide (sans les details utilisateur).
             <div className="space-y-4">
               <div>
                 <label className="block text-sm text-gray-400 mb-1">Domaine de base</label>
-                <input type="text" placeholder="example.com" value={configForm.baseDomain} onChange={e => setConfigForm({ ...configForm, baseDomain: e.target.value })} className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm" />
+                <input type="text" placeholder="example.com" value={configForm.baseDomain} onChange={e => setConfigForm({ ...configForm, baseDomain: e.target.value })} className="w-full px-3 py-2 bg-gray-900 border border-gray-600text-sm" />
               </div>
             </div>
             <div className="flex justify-end gap-2 mt-6">
@@ -1586,12 +1584,12 @@ Verification rapide (sans les details utilisateur).
       {/* Config Modal (legacy, kept for edit button) */}
       {showConfigModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md border border-gray-700">
+          <div className="bg-gray-800 p-6 w-full max-w-md border border-gray-700">
             <h2 className="text-xl font-bold mb-4">Configuration</h2>
             <div className="space-y-4">
               <div>
                 <label className="block text-sm text-gray-400 mb-1">Domaine de base</label>
-                <input type="text" placeholder="example.com" value={configForm.baseDomain} onChange={e => setConfigForm({ ...configForm, baseDomain: e.target.value })} className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm" />
+                <input type="text" placeholder="example.com" value={configForm.baseDomain} onChange={e => setConfigForm({ ...configForm, baseDomain: e.target.value })} className="w-full px-3 py-2 bg-gray-900 border border-gray-600text-sm" />
               </div>
             </div>
             <div className="flex justify-end gap-2 mt-6">

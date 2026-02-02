@@ -18,6 +18,10 @@ pub enum DnsParseError {
     InvalidUtf8,
     #[error("Packet too short: {0} bytes")]
     TooShort(usize),
+    #[error("Name too long (exceeds 255 bytes)")]
+    NameTooLong,
+    #[error("Label too long: {0} bytes (max 63)")]
+    LabelTooLong(usize),
 }
 
 /// Parsed DNS header (12 bytes)
@@ -114,7 +118,11 @@ pub fn parse_name(buf: &[u8], mut offset: usize) -> Result<(String, usize), DnsP
             break;
         }
 
-        // Normal label
+        // Normal label — RFC 1035: labels must be ≤63 octets
+        if len > 63 {
+            return Err(DnsParseError::LabelTooLong(len));
+        }
+
         offset += 1;
         if offset + len > buf.len() {
             return Err(DnsParseError::Truncated(offset));
@@ -128,20 +136,27 @@ pub fn parse_name(buf: &[u8], mut offset: usize) -> Result<(String, usize), DnsP
             .map_err(|_| DnsParseError::InvalidUtf8)?;
         name.push_str(label);
         offset += len;
+
+        // RFC 1035 §2.3.4: total name must not exceed 253 characters (255 wire bytes)
+        if name.len() > 253 {
+            return Err(DnsParseError::NameTooLong);
+        }
     }
 
     Ok((name, end_offset))
 }
 
 /// Encode a DNS name into wire format labels.
+/// Labels are clamped to 63 bytes per RFC 1035 §2.3.4.
 pub fn encode_name(name: &str, buf: &mut Vec<u8>) {
     if name.is_empty() {
         buf.push(0);
         return;
     }
     for label in name.split('.') {
-        buf.push(label.len() as u8);
-        buf.extend_from_slice(label.as_bytes());
+        let len = label.len().min(63);
+        buf.push(len as u8);
+        buf.extend_from_slice(&label.as_bytes()[..len]);
     }
     buf.push(0);
 }
@@ -194,8 +209,25 @@ pub fn parse_query(buf: &[u8]) -> Result<DnsQuery, DnsParseError> {
     })
 }
 
-/// Parse resource records from an upstream response (for caching).
+/// Parsed DNS response with separated sections.
+pub struct ParsedResponse {
+    pub header: DnsHeader,
+    pub answers: Vec<DnsRecord>,
+    pub authority: Vec<DnsRecord>,
+    pub additional: Vec<DnsRecord>,
+}
+
+/// Parse resource records from an upstream response, separating sections.
+/// OPT records (type 41) are filtered out per RFC 6891 (must not be cached).
 pub fn parse_response_records(buf: &[u8]) -> Result<(DnsHeader, Vec<DnsRecord>), DnsParseError> {
+    let parsed = parse_response_sections(buf)?;
+    // For backward compatibility, return only answer records
+    Ok((parsed.header, parsed.answers))
+}
+
+/// Parse a full DNS response into separated sections (answer, authority, additional).
+/// Filters out OPT records (type 41) per RFC 6891.
+pub fn parse_response_sections(buf: &[u8]) -> Result<ParsedResponse, DnsParseError> {
     let header = parse_header(buf)?;
     let mut offset = 12;
 
@@ -205,44 +237,69 @@ pub fn parse_response_records(buf: &[u8]) -> Result<(DnsHeader, Vec<DnsRecord>),
         offset = new_offset + 4; // skip QTYPE + QCLASS
     }
 
-    let total_records = header.an_count as usize + header.ns_count as usize + header.ar_count as usize;
-    let mut records = Vec::with_capacity(total_records);
+    let mut answers = Vec::new();
+    let mut authority = Vec::new();
+    let mut additional = Vec::new();
 
-    // Parse answer, authority, additional sections
-    for _ in 0..total_records {
-        if offset >= buf.len() {
-            break;
+    let sections: [(usize, u8); 3] = [
+        (header.an_count as usize, 0), // answer
+        (header.ns_count as usize, 1), // authority
+        (header.ar_count as usize, 2), // additional
+    ];
+
+    for (count, section_id) in sections {
+        for _ in 0..count {
+            if offset >= buf.len() {
+                break;
+            }
+            let (name, new_offset) = parse_name(buf, offset)?;
+            offset = new_offset;
+
+            if offset + 10 > buf.len() {
+                return Err(DnsParseError::Truncated(offset));
+            }
+
+            let rtype_raw = u16::from_be_bytes([buf[offset], buf[offset + 1]]);
+            let rtype = RecordType::from_u16(rtype_raw);
+            let class = RecordClass::from_u16(u16::from_be_bytes([buf[offset + 2], buf[offset + 3]]));
+            let ttl = u32::from_be_bytes([buf[offset + 4], buf[offset + 5], buf[offset + 6], buf[offset + 7]]);
+            let rdlength = u16::from_be_bytes([buf[offset + 8], buf[offset + 9]]) as usize;
+            offset += 10;
+
+            if offset + rdlength > buf.len() {
+                return Err(DnsParseError::Truncated(offset));
+            }
+
+            let rdata = parse_rdata(buf, offset, rdlength, rtype)?;
+            offset += rdlength;
+
+            // Filter OPT records (type 41) — RFC 6891: must not be cached or forwarded
+            if rtype_raw == 41 {
+                continue;
+            }
+
+            let record = DnsRecord {
+                name: name.to_lowercase(),
+                rtype,
+                class,
+                ttl,
+                rdata,
+            };
+
+            match section_id {
+                0 => answers.push(record),
+                1 => authority.push(record),
+                _ => additional.push(record),
+            }
         }
-        let (name, new_offset) = parse_name(buf, offset)?;
-        offset = new_offset;
-
-        if offset + 10 > buf.len() {
-            return Err(DnsParseError::Truncated(offset));
-        }
-
-        let rtype = RecordType::from_u16(u16::from_be_bytes([buf[offset], buf[offset + 1]]));
-        let class = RecordClass::from_u16(u16::from_be_bytes([buf[offset + 2], buf[offset + 3]]));
-        let ttl = u32::from_be_bytes([buf[offset + 4], buf[offset + 5], buf[offset + 6], buf[offset + 7]]);
-        let rdlength = u16::from_be_bytes([buf[offset + 8], buf[offset + 9]]) as usize;
-        offset += 10;
-
-        if offset + rdlength > buf.len() {
-            return Err(DnsParseError::Truncated(offset));
-        }
-
-        let rdata = parse_rdata(buf, offset, rdlength, rtype)?;
-        offset += rdlength;
-
-        records.push(DnsRecord {
-            name: name.to_lowercase(),
-            rtype,
-            class,
-            ttl,
-            rdata,
-        });
     }
 
-    Ok((header, records))
+    Ok(ParsedResponse {
+        header,
+        answers,
+        authority,
+        additional,
+    })
 }
 
 fn parse_rdata(buf: &[u8], offset: usize, rdlength: usize, rtype: RecordType) -> Result<RData, DnsParseError> {
@@ -421,6 +478,31 @@ fn encode_rdata(rdata: &RData, buf: &mut Vec<u8>) {
             buf.extend_from_slice(&(data.len() as u16).to_be_bytes());
             buf.extend_from_slice(data);
         }
+    }
+}
+
+/// Truncate a DNS response to fit within the given max UDP size.
+/// Sets the TC (truncated) flag if the response exceeds the limit.
+/// For UDP without EDNS0, max_size should be 512.
+pub fn truncate_for_udp(response: &mut Vec<u8>, max_size: usize) {
+    if response.len() <= max_size {
+        return;
+    }
+    // Set TC flag (bit 1 of byte 2)
+    if response.len() >= 3 {
+        response[2] |= 0x02;
+    }
+    // Truncate to max_size — keep header + question, drop partial answers
+    response.truncate(max_size);
+    // Zero out answer/authority/additional counts since they're now incomplete
+    if response.len() >= 12 {
+        // Set AN, NS, AR counts to 0 (we can't guarantee partial records are valid)
+        response[6] = 0;
+        response[7] = 0;
+        response[8] = 0;
+        response[9] = 0;
+        response[10] = 0;
+        response[11] = 0;
     }
 }
 

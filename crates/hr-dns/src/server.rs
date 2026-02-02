@@ -30,7 +30,13 @@ pub async fn run_udp_server(addr: SocketAddr, state: SharedDnsState) -> Result<(
         let state = state.clone();
 
         tokio::spawn(async move {
-            let response = handle_dns_query(&packet, &state, src).await;
+            let mut response = handle_dns_query(&packet, &state, src).await;
+            // Silently drop responses for malformed packets (empty = nothing parseable)
+            if response.is_empty() {
+                return;
+            }
+            // RFC 1035: UDP responses must not exceed 512 bytes (without EDNS0)
+            packet::truncate_for_udp(&mut response, 512);
             if let Err(e) = socket.send_to(&response, src).await {
                 debug!("Failed to send UDP response to {}: {}", src, e);
             }

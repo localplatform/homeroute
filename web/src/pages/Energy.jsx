@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from 'react';
 import { Zap, Thermometer, Cpu, Clock, Moon, Rocket, Play, Square, Activity } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
+import PageHeader from '../components/PageHeader';
+import Section from '../components/Section';
 import {
   getCpuInfo,
   getCurrentEnergyMode,
@@ -283,19 +285,16 @@ function Energy() {
   }
 
   return (
-    <div className="space-y-6">
-      <h1 className="text-2xl font-bold flex items-center gap-2">
-        <Zap className="text-yellow-400" />
-        Énergie
-      </h1>
+    <div>
+      <PageHeader title="Énergie" icon={Zap} />
 
-      {/* CPU Info + Mode side by side */}
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+      <Section title="CPU / Mode">
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
         {/* CPU Info Card */}
         <Card title={`Infos CPU (${cpuModel})`} icon={Cpu}>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           {/* Temperature */}
-          <div className="bg-gray-900 rounded-lg p-4">
+          <div className="bg-gray-900 p-4">
             <div className="flex items-center gap-2 text-gray-400 mb-2">
               <Thermometer size={16} />
               <span className="text-sm">Température</span>
@@ -303,7 +302,7 @@ function Energy() {
             <div className={`text-3xl font-bold ${getTempColor(cpuInfo.temperature || 0)}`}>
               {cpuInfo.temperature !== null ? `${cpuInfo.temperature.toFixed(0)}°C` : '--'}
             </div>
-            <div className="mt-2 h-2 bg-gray-700 rounded-full overflow-hidden">
+            <div className="mt-2 h-2 bg-gray-700 overflow-hidden">
               <div
                 className={`h-full ${getTempBarColor(cpuInfo.temperature || 0)} transition-all`}
                 style={{ width: `${Math.min(100, ((cpuInfo.temperature || 0) / 95) * 100)}%` }}
@@ -313,7 +312,7 @@ function Energy() {
           </div>
 
           {/* Frequency */}
-          <div className="bg-gray-900 rounded-lg p-4">
+          <div className="bg-gray-900 p-4">
             <div className="flex items-center gap-2 text-gray-400 mb-2">
               <Zap size={16} />
               <span className="text-sm">Fréquence</span>
@@ -331,7 +330,7 @@ function Energy() {
           </div>
 
           {/* Usage */}
-          <div className="bg-gray-900 rounded-lg p-4">
+          <div className="bg-gray-900 p-4">
             <div className="flex items-center gap-2 text-gray-400 mb-2">
               <Cpu size={16} />
               <span className="text-sm">Usage CPU</span>
@@ -339,7 +338,7 @@ function Energy() {
             <div className="text-3xl font-bold text-purple-400">
               {cpuInfo.usage !== null ? `${cpuInfo.usage.toFixed(0)}%` : '--'}
             </div>
-            <div className="mt-2 h-2 bg-gray-700 rounded-full overflow-hidden">
+            <div className="mt-2 h-2 bg-gray-700 overflow-hidden">
               <div
                 className="h-full bg-purple-500 transition-all"
                 style={{ width: `${cpuInfo.usage || 0}%` }}
@@ -358,7 +357,7 @@ function Energy() {
           {benchmark.running ? (
             <button
               onClick={handleStopBenchmark}
-              className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition-colors"
+              className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white font-medium transition-colors"
             >
               <Square size={16} />
               Arrêter
@@ -366,7 +365,7 @@ function Energy() {
           ) : (
             <button
               onClick={handleStartBenchmark}
-              className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors"
+              className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white font-medium transition-colors"
             >
               <Play size={16} />
               Benchmark
@@ -391,7 +390,7 @@ function Energy() {
                   key={mode}
                   onClick={() => handleModeChange(mode)}
                   disabled={isDisabled}
-                  className={`flex flex-col items-center justify-center w-28 h-28 rounded-xl transition-all ${
+                  className={`flex flex-col items-center justify-center w-28 h-28 transition-all ${
                     isActive
                       ? `${colors.bg} text-white ring-2 ${colors.ring} shadow-lg`
                       : `bg-gray-800 text-gray-300 ${isDisabled ? '' : colors.hover}`
@@ -410,15 +409,16 @@ function Energy() {
           </div>
 
           {/* Mode details */}
-          <div className="flex-1 bg-gray-900 rounded-lg p-4 flex items-center">
+          <div className="flex-1 bg-gray-900 p-4 flex items-center">
             <p className="text-gray-300 font-medium">{MODE_DESCRIPTIONS[currentMode]}</p>
           </div>
         </div>
       </Card>
       </div>
+      </Section>
 
-      {/* Programmation Card */}
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+      <Section title="Programmation / Auto-select" contrast>
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
         {/* Programmation Card */}
         <Card title="Programmation" icon={Clock}>
           <div className="space-y-6">
@@ -436,12 +436,12 @@ function Energy() {
                     console.error('Error saving schedule:', error);
                   }
                 }}
-                className={`relative w-12 h-6 rounded-full transition-colors ${
+                className={`relative w-12 h-6 transition-colors ${
                   schedule.enabled ? 'bg-blue-600' : 'bg-gray-600'
                 }`}
               >
                 <span
-                  className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                  className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white transition-transform ${
                     schedule.enabled ? 'translate-x-6' : ''
                   }`}
                 />
@@ -450,21 +450,21 @@ function Energy() {
             </div>
 
             {schedule.enabled && (
-              <div className="bg-gray-900 rounded-lg p-4 space-y-3">
+              <div className="bg-gray-900 p-4 space-y-3">
                 <div className="flex flex-wrap items-center gap-3">
                   <span className="text-gray-400">Forcer économie de</span>
                   <input
                     type="time"
                     value={schedule.nightStart}
                     onChange={e => setSchedule(prev => ({ ...prev, nightStart: e.target.value }))}
-                    className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white"
+                    className="bg-gray-800 border border-gray-700 px-3 py-2 text-white"
                   />
                   <span className="text-gray-400">à</span>
                   <input
                     type="time"
                     value={schedule.nightEnd}
                     onChange={e => setSchedule(prev => ({ ...prev, nightEnd: e.target.value }))}
-                    className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white"
+                    className="bg-gray-800 border border-gray-700 px-3 py-2 text-white"
                   />
                 </div>
 
@@ -508,12 +508,12 @@ function Energy() {
                     console.error('Error saving auto-select config:', error);
                   }
                 }}
-                className={`relative w-12 h-6 rounded-full transition-colors ${
+                className={`relative w-12 h-6 transition-colors ${
                   autoSelect.enabled ? 'bg-green-600' : 'bg-gray-600'
                 }`}
               >
                 <span
-                  className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                  className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white transition-transform ${
                     autoSelect.enabled ? 'translate-x-6' : ''
                   }`}
                 />
@@ -527,7 +527,7 @@ function Energy() {
             </div>
 
             {/* Interface selector and RPS indicator */}
-            <div className="bg-gray-900 rounded-lg p-3 space-y-3">
+            <div className="bg-gray-900 p-3 space-y-3">
               <div>
                 <div className="flex items-center gap-2 text-sm text-gray-400 mb-2">
                   <Activity size={14} />
@@ -542,7 +542,7 @@ function Energy() {
                       ...prev,
                       networkInterface: e.target.value || null
                     }))}
-                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
+                    className="w-full bg-gray-800 border border-gray-700 px-3 py-2 text-white text-sm"
                   >
                     <option value="">Sélectionner une interface...</option>
                     {interfaces.map(iface => (
@@ -586,7 +586,7 @@ function Energy() {
             </div>
 
             {autoSelect.enabled && (
-              <div className="bg-gray-900 rounded-lg p-4 space-y-4">
+              <div className="bg-gray-900 p-4 space-y-4">
                 <div className="grid grid-cols-3 gap-3">
                   <div>
                     <label className="block text-xs text-gray-400 mb-1">Seuil bas (req/s)</label>
@@ -597,7 +597,7 @@ function Energy() {
                         ...prev,
                         thresholds: { ...prev.thresholds, low: parseInt(e.target.value) || 0 }
                       }))}
-                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
+                      className="w-full bg-gray-800 border border-gray-700 px-3 py-2 text-white text-sm"
                     />
                     <span className="text-xs text-indigo-400">→ Économie</span>
                   </div>
@@ -610,7 +610,7 @@ function Energy() {
                         ...prev,
                         thresholds: { ...prev.thresholds, high: parseInt(e.target.value) || 0 }
                       }))}
-                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
+                      className="w-full bg-gray-800 border border-gray-700 px-3 py-2 text-white text-sm"
                     />
                     <span className="text-xs text-orange-400">→ Performance</span>
                   </div>
@@ -625,7 +625,7 @@ function Energy() {
                         ...prev,
                         averagingTime: Math.max(1, Math.min(30, parseInt(e.target.value) || 3))
                       }))}
-                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
+                      className="w-full bg-gray-800 border border-gray-700 px-3 py-2 text-white text-sm"
                     />
                   </div>
                 </div>
@@ -646,6 +646,7 @@ function Energy() {
         </div>
       </Card>
       </div>
+      </Section>
     </div>
   );
 }

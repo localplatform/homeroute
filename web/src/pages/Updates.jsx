@@ -4,6 +4,7 @@ import Card from '../components/Card';
 import Button from '../components/Button';
 import StatusBadge from '../components/StatusBadge';
 import ConfirmModal from '../components/ConfirmModal';
+import PageHeader from '../components/PageHeader';
 import {
   getUpdatesStatus,
   getLastUpdatesCheck,
@@ -253,33 +254,30 @@ function Updates() {
   const isRunningAny = running || upgrading;
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Mises a jour systeme</h1>
-        <div className="flex items-center gap-3">
-          {isRunningAny ? (
-            <Button
-              variant="danger"
-              onClick={handleCancel}
-              loading={cancelling}
-              icon={Square}
-            >
-              Annuler
-            </Button>
-          ) : (
-            <Button
-              variant="primary"
-              onClick={handleCheck}
-              icon={Play}
-            >
-              Verifier les mises a jour
-            </Button>
-          )}
-        </div>
-      </div>
+    <div>
+      <PageHeader title="Mises a jour systeme" icon={Package}>
+        {isRunningAny ? (
+          <Button
+            variant="danger"
+            onClick={handleCancel}
+            loading={cancelling}
+            icon={Square}
+          >
+            Annuler
+          </Button>
+        ) : (
+          <Button
+            variant="primary"
+            onClick={handleCheck}
+            icon={Play}
+          >
+            Verifier les mises a jour
+          </Button>
+        )}
+      </PageHeader>
 
       {message && (
-        <div className={`p-3 rounded-lg ${
+        <div className={`p-3 ${
           message.type === 'success' ? 'bg-green-500/20 text-green-400' :
           message.type === 'error' ? 'bg-red-500/20 text-red-400' :
           'bg-yellow-500/20 text-yellow-400'
@@ -312,7 +310,7 @@ function Updates() {
             {showOutput && liveOutput.length > 0 && (
               <div
                 ref={outputRef}
-                className="bg-gray-900 p-3 rounded font-mono text-xs h-48 overflow-y-auto"
+                className="bg-gray-900 p-3 font-mono text-xs h-48 overflow-y-auto"
               >
                 {liveOutput.map((line, i) => (
                   <div key={i} className="text-gray-400">{line}</div>
@@ -345,7 +343,7 @@ function Updates() {
             {showUpgradeOutput && upgradeOutput.length > 0 && (
               <div
                 ref={upgradeOutputRef}
-                className="bg-gray-900 p-3 rounded font-mono text-xs h-64 overflow-y-auto"
+                className="bg-gray-900 p-3 font-mono text-xs h-64 overflow-y-auto"
               >
                 {upgradeOutput.map((line, i) => (
                   <div key={i} className="text-gray-400">{line}</div>
@@ -512,7 +510,7 @@ function Updates() {
       {needrestart && (needrestart.kernelRebootNeeded || needrestart.services?.length > 0) && (
         <Card title="Services a redemarrer" icon={AlertTriangle}>
           {needrestart.kernelRebootNeeded && (
-            <div className="bg-red-500/20 p-4 rounded-lg mb-4">
+            <div className="bg-red-500/20 p-4 mb-4">
               <div className="flex items-center gap-2 text-red-400 font-semibold">
                 <AlertTriangle className="w-5 h-5" />
                 Redemarrage du systeme requis
@@ -532,7 +530,7 @@ function Updates() {
                 Les services suivants doivent etre redemarres pour appliquer les mises a jour:
               </p>
               {needrestart.services.map((service, i) => (
-                <div key={i} className="flex items-center gap-2 p-2 bg-gray-800 rounded">
+                <div key={i} className="flex items-center gap-2 p-2 bg-gray-800">
                   <Server className="w-4 h-4 text-yellow-400" />
                   <span className="font-mono text-sm">{service}</span>
                 </div>

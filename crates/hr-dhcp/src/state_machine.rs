@@ -38,7 +38,7 @@ pub fn handle_dhcp_packet(
 fn handle_discover(
     packet: &DhcpPacket,
     config: &DhcpConfig,
-    lease_store: &LeaseStore,
+    lease_store: &mut LeaseStore,
     server_ip: Ipv4Addr,
 ) -> Option<DhcpPacket> {
     let mac = packet.mac_str();
@@ -61,13 +61,28 @@ fn handle_discover(
 
     info!("DHCPOFFER {} to {}", offered_ip, mac);
 
+    // Reserve IP with a short lease (60s) to prevent double-offering.
+    // The real lease is committed at REQUEST time with the full duration.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    lease_store.add_lease(Lease {
+        expiry: now + 60,
+        mac: mac.clone(),
+        ip: offered_ip,
+        hostname: hostname.clone(),
+        client_id: packet.client_id(),
+    });
+
     let mut options = build_standard_options(config, server_ip);
 
     if let Some(ref h) = hostname {
         options.push(DhcpOption::hostname(h));
     }
 
-    Some(packet.build_reply(DHCPOFFER, offered_ip, server_ip, options))
+    // DHCPOFFER: ciaddr is always 0 (RFC 2131 §4.3.1)
+    Some(packet.build_reply(DHCPOFFER, offered_ip, server_ip, Ipv4Addr::UNSPECIFIED, options))
 }
 
 fn handle_request(
@@ -104,6 +119,17 @@ fn handle_request(
     };
 
     info!("DHCPREQUEST from {} for {}", mac, requested_ip);
+
+    // RFC 2131 §4.3.2: Detect INIT-REBOOT state (no server_id, requested_ip set, ciaddr=0).
+    // If the server has no record of this client, it MUST remain silent.
+    let is_init_reboot = packet.server_id().is_none()
+        && packet.requested_ip().is_some()
+        && packet.ciaddr == Ipv4Addr::UNSPECIFIED;
+
+    if is_init_reboot && lease_store.get_lease_by_mac(&mac).is_none() {
+        debug!("INIT-REBOOT from {} for {} — no record, staying silent", mac, requested_ip);
+        return None;
+    }
 
     // Validate the request
     let range_start: Ipv4Addr = config.range_start.parse().ok()?;
@@ -166,7 +192,8 @@ fn handle_request(
         options.push(DhcpOption::hostname(h));
     }
 
-    Some(packet.build_reply(DHCPACK, requested_ip, server_ip, options))
+    // DHCPACK: echo client's ciaddr (RFC 2131 §4.3.1 Table 3)
+    Some(packet.build_reply(DHCPACK, requested_ip, server_ip, packet.ciaddr, options))
 }
 
 fn handle_release(packet: &DhcpPacket, lease_store: &mut LeaseStore) {
@@ -174,6 +201,13 @@ fn handle_release(packet: &DhcpPacket, lease_store: &mut LeaseStore) {
     let ip = packet.ciaddr;
 
     if ip != Ipv4Addr::UNSPECIFIED {
+        // Validate that the releasing client actually owns this lease
+        if let Some(lease) = lease_store.get_lease(ip) {
+            if lease.mac != mac {
+                warn!("DHCPRELEASE from {} for {} — MAC mismatch (leased to {})", mac, ip, lease.mac);
+                return;
+            }
+        }
         info!("DHCPRELEASE from {} for {}", mac, ip);
         lease_store.remove_lease(ip);
     }
@@ -188,35 +222,46 @@ fn handle_inform(
     info!("DHCPINFORM from {}", mac);
 
     let options = build_standard_options(config, server_ip);
-    // INFORM: yiaddr must be 0, client already has an IP
-    Some(packet.build_reply(DHCPACK, Ipv4Addr::UNSPECIFIED, server_ip, options))
+    // INFORM: yiaddr must be 0, client already has an IP; ciaddr from client
+    Some(packet.build_reply(DHCPACK, Ipv4Addr::UNSPECIFIED, server_ip, packet.ciaddr, options))
 }
 
 fn handle_decline(packet: &DhcpPacket, lease_store: &mut LeaseStore) {
     let mac = packet.mac_str();
     if let Some(ip) = packet.requested_ip() {
+        // Validate that the declining client actually owns this lease
+        if let Some(lease) = lease_store.get_lease(ip) {
+            if lease.mac != mac {
+                warn!("DHCPDECLINE from {} for {} — MAC mismatch (leased to {})", mac, ip, lease.mac);
+                return;
+            }
+        }
         info!("DHCPDECLINE from {} for {}", mac, ip);
         // Remove the lease so the IP can be re-offered.
         // The client detected an ARP conflict -- this is common in container
         // environments where the interface may briefly have stale addresses.
-        // Simply removing the lease allows the next DISCOVER to re-allocate.
         lease_store.remove_lease(ip);
     }
 }
 
 fn build_nak(packet: &DhcpPacket, server_ip: Ipv4Addr) -> DhcpPacket {
+    // DHCPNAK: ciaddr and yiaddr are always 0 (RFC 2131 §4.3.2)
     packet.build_reply(
         DHCPNAK,
         Ipv4Addr::UNSPECIFIED,
         server_ip,
+        Ipv4Addr::UNSPECIFIED,
         vec![DhcpOption::server_id(server_ip)],
     )
 }
 
 fn build_standard_options(config: &DhcpConfig, server_ip: Ipv4Addr) -> Vec<DhcpOption> {
+    let lease = config.default_lease_time_secs as u32;
     let mut opts = vec![
         DhcpOption::server_id(server_ip),
-        DhcpOption::lease_time(config.default_lease_time_secs as u32),
+        DhcpOption::lease_time(lease),
+        DhcpOption::renewal_time(lease / 2),       // T1 = 50% of lease
+        DhcpOption::rebinding_time(lease * 7 / 8), // T2 = 87.5% of lease
     ];
 
     if let Ok(mask) = config.netmask.parse::<Ipv4Addr>() {
@@ -235,14 +280,13 @@ fn build_standard_options(config: &DhcpConfig, server_ip: Ipv4Addr) -> Vec<DhcpO
         opts.push(DhcpOption::domain_name(&config.domain));
     }
 
-    // Broadcast address
-    if let (Ok(server), Ok(mask)) = (
+    // Broadcast address: network_address | ~netmask
+    if let (Ok(gw), Ok(mask)) = (
         config.gateway.parse::<Ipv4Addr>(),
         config.netmask.parse::<Ipv4Addr>(),
     ) {
-        let broadcast = Ipv4Addr::from(
-            u32::from(server) | !u32::from(mask),
-        );
+        let network = u32::from(gw) & u32::from(mask);
+        let broadcast = Ipv4Addr::from(network | !u32::from(mask));
         opts.push(DhcpOption::broadcast(broadcast));
     }
 

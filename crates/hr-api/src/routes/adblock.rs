@@ -20,18 +20,36 @@ pub fn router() -> Router<ApiState> {
 async fn stats(State(state): State<ApiState>) -> Json<Value> {
     let engine = state.adblock.read().await;
     let dns = state.dns.read().await;
+
+    // Read sources from config for frontend display
+    let sources = read_adblock_sources(&state).await;
+
+    // Check cache file mtime for lastUpdate
+    let last_update = tokio::fs::metadata("/var/lib/server-dashboard/adblock/domains.json")
+        .await
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .map(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64
+        });
+
     Json(json!({
         "success": true,
-        "enabled": dns.adblock_enabled,
-        "blocked_domains": engine.domain_count(),
-        "whitelist_count": engine.whitelist_domains().len()
+        "stats": {
+            "domainCount": engine.domain_count(),
+            "sources": sources,
+            "lastUpdate": last_update,
+            "enabled": dns.adblock_enabled
+        }
     }))
 }
 
 async fn get_whitelist(State(state): State<ApiState>) -> Json<Value> {
     let engine = state.adblock.read().await;
     let domains = engine.whitelist_domains();
-    Json(json!({"success": true, "whitelist": domains}))
+    Json(json!({"success": true, "domains": domains}))
 }
 
 #[derive(Deserialize)]
@@ -175,6 +193,35 @@ async fn trigger_update(State(state): State<ApiState>) -> Json<Value> {
         "total_domains": count,
         "sources": source_results
     }))
+}
+
+/// Read adblock sources from config file for frontend display.
+async fn read_adblock_sources(state: &ApiState) -> Vec<Value> {
+    let config_path = &state.dns_dhcp_config_path;
+    let content = match tokio::fs::read_to_string(config_path).await {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    let config: Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    config
+        .get("adblock")
+        .and_then(|a| a.get("sources"))
+        .and_then(|s| s.as_array())
+        .map(|sources| {
+            sources
+                .iter()
+                .map(|s| {
+                    json!({
+                        "name": s.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                        "url": s.get("url").and_then(|v| v.as_str()).unwrap_or("")
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Deserialize)]

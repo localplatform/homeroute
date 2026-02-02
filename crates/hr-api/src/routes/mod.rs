@@ -14,5 +14,6 @@ pub mod energy;
 pub mod updates;
 pub mod traffic;
 pub mod servers;
+pub mod services;
 pub mod wol;
 pub mod ws;

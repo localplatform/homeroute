@@ -1,8 +1,10 @@
 pub mod routes;
 pub mod state;
 
+use axum::http::{header, HeaderValue, Method};
 use axum::Router;
 use state::ApiState;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 
 /// Build the complete API router with all `/api/*` routes.
@@ -16,9 +18,24 @@ pub fn build_router(state: ApiState) -> Router {
     let spa_fallback = ServeDir::new(&web_dist)
         .fallback(ServeFile::new(&index_html));
 
+    let base = format!(".{}", state.env.base_domain);
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(move |origin: &HeaderValue, _| {
+            origin
+                .to_str()
+                .ok()
+                .and_then(|s| s.strip_prefix("https://"))
+                .map(|host| host.ends_with(&base))
+                .unwrap_or(false)
+        }))
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::COOKIE])
+        .allow_credentials(true);
+
     Router::new()
         .nest("/api", api_routes())
         .with_state(state)
+        .layer(cors)
         .fallback_service(spa_fallback)
 }
 
@@ -40,6 +57,7 @@ fn api_routes() -> Router<ApiState> {
         .nest("/traffic", routes::traffic::router())
         .nest("/servers", routes::servers::router())
         .nest("/wol", routes::wol::router())
+        .nest("/services", routes::services::router())
         .merge(routes::ws::router())
         .merge(routes::health::router())
 }

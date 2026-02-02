@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import Card from '../components/Card';
+import PageHeader from '../components/PageHeader';
+import Section from '../components/Section';
 import { BarChart3, Activity, HardDrive, Users } from 'lucide-react';
 import {
   getTrafficOverview,
@@ -70,13 +72,13 @@ export default function Traffic() {
         getDnsByCategory(timeRange)
       ]);
 
-      setOverview(overviewRes.data);
-      setTimeseriesData(timeseriesRes.data);
-      setTopDevices(devicesRes.data);
-      setTopEndpoints(endpointsRes.data);
-      setAppBreakdown(appsRes.data);
-      setTopDomains(domainsRes.data);
-      setDnsCategories(categoriesRes.data);
+      setOverview(overviewRes.data || null);
+      setTimeseriesData(timeseriesRes.data || []);
+      setTopDevices(devicesRes.data || []);
+      setTopEndpoints(endpointsRes.data || []);
+      setAppBreakdown(appsRes.data || []);
+      setTopDomains(domainsRes.data || []);
+      setDnsCategories(categoriesRes.data || []);
       setLoading(false);
     } catch (error) {
       console.error('Error fetching traffic data:', error);
@@ -85,29 +87,27 @@ export default function Traffic() {
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h1 className="text-3xl font-bold text-gray-100">Analyse du Trafic</h1>
-
-        {/* Time Range Selector */}
+    <div>
+      <PageHeader title="Analyse du Trafic" icon={BarChart3}>
         <select
           value={timeRange}
           onChange={(e) => setTimeRange(e.target.value)}
-          className="bg-gray-800 border border-gray-700 text-gray-100 rounded px-4 py-2"
+          className="bg-gray-800 border border-gray-700 text-gray-100 px-4 py-2"
         >
           <option value="1h">Dernière heure</option>
           <option value="24h">24 heures</option>
           <option value="7d">7 jours</option>
           <option value="30d">30 jours</option>
         </select>
-      </div>
+      </PageHeader>
 
       {loading ? (
         <div className="text-gray-400">Chargement...</div>
       ) : (
         <>
           {/* Overview Cards */}
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
+          <Section title="Vue d'ensemble">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
             <Card title="Requêtes" icon={Activity}>
               <div className="text-3xl font-bold text-gray-100">
                 {overview?.totalRequests?.toLocaleString() || '0'}
@@ -140,8 +140,10 @@ export default function Traffic() {
               <div className="text-sm text-gray-400 mt-1">différents</div>
             </Card>
           </div>
+          </Section>
 
           {/* Timeseries Chart */}
+          <Section title="Requêtes au fil du temps" contrast>
           <Card title="Requêtes au fil du temps">
             {timeseriesData.length > 0 ? (
               <TrafficTimeseriesChart data={timeseriesData} metric="requests" />
@@ -151,9 +153,11 @@ export default function Traffic() {
               </div>
             )}
           </Card>
+          </Section>
 
           {/* Top Devices & Endpoints */}
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+          <Section title="Top Périphériques / Endpoints">
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
             <Card title="Top Périphériques">
               {topDevices.length > 0 ? (
                 <TopDevicesChart data={topDevices} />
@@ -174,8 +178,9 @@ export default function Traffic() {
               )}
             </Card>
           </div>
+          </Section>
 
-          {/* Application Breakdown */}
+          <Section title="Trafic par Application" contrast>
           <Card title="Trafic par Application">
             {appBreakdown.length > 0 ? (
               <ApplicationPieChart data={appBreakdown} />
@@ -185,9 +190,10 @@ export default function Traffic() {
               </div>
             )}
           </Card>
+          </Section>
 
-          {/* DNS Analytics Section */}
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+          <Section title="DNS Analytics">
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
             <Card title="Top Domaines LAN/WAN">
               {topDomains.length > 0 ? (
                 <div className="space-y-2">
@@ -228,6 +234,7 @@ export default function Traffic() {
               )}
             </Card>
           </div>
+          </Section>
         </>
       )}
     </div>

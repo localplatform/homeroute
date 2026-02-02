@@ -4,6 +4,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tracing::{debug, info, warn};
 
 use crate::SharedDhcpState;
+use crate::options::DHCPNAK;
 use crate::packet::DhcpPacket;
 use crate::state_machine;
 
@@ -81,7 +82,10 @@ pub async fn run_dhcp_server(state: SharedDhcpState) -> Result<()> {
             let response_bytes = response.to_bytes();
 
             // Determine destination: broadcast or unicast
-            let dest = if packet.is_broadcast() || packet.ciaddr == Ipv4Addr::UNSPECIFIED {
+            // RFC 2131 §4.3.2: DHCPNAK MUST always be broadcast when giaddr is zero.
+            let dest = if response.msg_type() == Some(DHCPNAK) {
+                SocketAddr::new("255.255.255.255".parse().unwrap(), 68)
+            } else if packet.is_broadcast() || packet.ciaddr == Ipv4Addr::UNSPECIFIED {
                 SocketAddr::new("255.255.255.255".parse().unwrap(), 68)
             } else {
                 SocketAddr::new(packet.ciaddr.into(), 68)

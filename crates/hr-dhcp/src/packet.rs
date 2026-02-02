@@ -169,12 +169,14 @@ impl DhcpPacket {
         self.flags & 0x8000 != 0
     }
 
-    /// Build a reply packet from this request
+    /// Build a reply packet from this request.
+    /// `ciaddr` should be set from the client's ciaddr for DHCPACK (RFC 2131 §4.3.1).
     pub fn build_reply(
         &self,
         msg_type: u8,
         yiaddr: Ipv4Addr,
         siaddr: Ipv4Addr,
+        ciaddr: Ipv4Addr,
         options: Vec<DhcpOption>,
     ) -> DhcpPacket {
         DhcpPacket {
@@ -185,7 +187,7 @@ impl DhcpPacket {
             xid: self.xid,
             secs: 0,
             flags: self.flags,
-            ciaddr: Ipv4Addr::UNSPECIFIED,
+            ciaddr,
             yiaddr,
             siaddr,
             giaddr: self.giaddr,
@@ -258,6 +260,7 @@ mod tests {
             2, // OFFER
             Ipv4Addr::new(10, 0, 0, 100),
             Ipv4Addr::new(10, 0, 0, 254),
+            Ipv4Addr::UNSPECIFIED,
             vec![
                 DhcpOption::lease_time(86400),
                 DhcpOption::subnet_mask(Ipv4Addr::new(255, 255, 255, 0)),

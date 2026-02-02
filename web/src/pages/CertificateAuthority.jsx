@@ -17,6 +17,8 @@ import {
 } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
+import PageHeader from '../components/PageHeader';
+import Section from '../components/Section';
 
 const CertificateAuthority = () => {
   const [status, setStatus] = useState(null);
@@ -175,44 +177,26 @@ const CertificateAuthority = () => {
   }
 
   return (
-    <div className="p-6 max-w-7xl mx-auto space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900 dark:text-white flex items-center gap-3">
-            <Shield className="w-8 h-8 text-blue-500" />
-            Autorité de Certification
-          </h1>
-          <p className="text-gray-600 dark:text-gray-400 mt-2">
-            Gérez les certificats TLS auto-signés pour votre réseau local
-          </p>
-        </div>
-      </div>
+    <div>
+      <PageHeader title="Autorité de Certification" icon={Shield} />
 
-      {/* Message */}
       {message && (
         <div
-          className={`p-4 rounded-lg ${
+          className={`p-3 ${
             message.type === 'error'
-              ? 'bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-200'
-              : 'bg-green-50 dark:bg-green-900/20 text-green-800 dark:text-green-200'
+              ? 'bg-red-500/20 text-red-400'
+              : 'bg-green-500/20 text-green-400'
           }`}
         >
           {message.text}
         </div>
       )}
 
-      {/* CA Status */}
-      <Card>
-        <div className="p-6">
-          <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
-            <Key className="w-5 h-5" />
-            Statut de la CA
-          </h2>
-
+      <Section title="Statut de la CA">
+      <Card title="Statut" icon={Key}>
           {!status?.initialized ? (
             <div className="space-y-4">
-              <div className="flex items-center gap-3 text-orange-600 dark:text-orange-400">
+              <div className="flex items-center gap-3 text-orange-400">
                 <AlertTriangle className="w-5 h-5" />
                 <span>L'autorité de certification n'est pas initialisée</span>
               </div>
@@ -226,17 +210,17 @@ const CertificateAuthority = () => {
             </div>
           ) : (
             <div className="space-y-4">
-              <div className="flex items-center gap-3 text-green-600 dark:text-green-400">
+              <div className="flex items-center gap-3 text-green-400">
                 <CheckCircle className="w-5 h-5" />
                 <span className="font-medium">CA initialisée et opérationnelle</span>
               </div>
 
-              <div className="border-t dark:border-gray-700 pt-4">
+              <div className="border-t border-gray-700 pt-4">
                 <h3 className="font-medium mb-3 flex items-center gap-2">
                   <Download className="w-4 h-4" />
                   Télécharger le certificat root
                 </h3>
-                <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
+                <p className="text-sm text-gray-400 mb-3">
                   Installez ce certificat sur vos appareils pour faire confiance aux certificats émis par cette CA.
                 </p>
                 <div className="flex gap-2 flex-wrap">
@@ -295,21 +279,17 @@ const CertificateAuthority = () => {
               </div>
             </div>
           )}
-        </div>
       </Card>
+      </Section>
 
       {/* Installation Instructions */}
       {status?.initialized && (
-        <Card>
-          <div className="p-6">
+        <Section title="Instructions" contrast>
             <button
               onClick={() => setShowInstructions(!showInstructions)}
-              className="w-full flex items-center justify-between text-left"
+              className="w-full flex items-center justify-between text-left p-4 bg-gray-800"
             >
-              <h2 className="text-xl font-semibold flex items-center gap-2">
-                <Info className="w-5 h-5" />
-                Instructions d'installation
-              </h2>
+              <span className="text-sm text-gray-300">Instructions d'installation</span>
               {showInstructions ? (
                 <ChevronUp className="w-5 h-5" />
               ) : (
@@ -318,11 +298,11 @@ const CertificateAuthority = () => {
             </button>
 
             {showInstructions && (
-              <div className="mt-4 space-y-4 text-sm">
+              <div className="space-y-4 text-sm p-4">
                 {/* Windows */}
-                <div className="border dark:border-gray-700 rounded-lg p-4">
+                <div className="border border-gray-700 p-4">
                   <h3 className="font-semibold mb-2">Windows</h3>
-                  <ol className="list-decimal list-inside space-y-1 text-gray-600 dark:text-gray-400">
+                  <ol className="list-decimal list-inside space-y-1 text-gray-400">
                     <li>Téléchargez le certificat au format .der</li>
                     <li>Double-cliquez sur le fichier téléchargé</li>
                     <li>Cliquez sur "Installer le certificat..."</li>
@@ -334,9 +314,9 @@ const CertificateAuthority = () => {
                 </div>
 
                 {/* macOS */}
-                <div className="border dark:border-gray-700 rounded-lg p-4">
+                <div className="border border-gray-700 p-4">
                   <h3 className="font-semibold mb-2">macOS</h3>
-                  <ol className="list-decimal list-inside space-y-1 text-gray-600 dark:text-gray-400">
+                  <ol className="list-decimal list-inside space-y-1 text-gray-400">
                     <li>Téléchargez le certificat au format .pem</li>
                     <li>Double-cliquez sur le fichier pour l'ouvrir dans Trousseau d'accès</li>
                     <li>Double-cliquez sur le certificat importé</li>
@@ -346,19 +326,19 @@ const CertificateAuthority = () => {
                 </div>
 
                 {/* Linux */}
-                <div className="border dark:border-gray-700 rounded-lg p-4">
+                <div className="border border-gray-700 p-4">
                   <h3 className="font-semibold mb-2">Linux (Ubuntu/Debian)</h3>
-                  <ol className="list-decimal list-inside space-y-1 text-gray-600 dark:text-gray-400">
+                  <ol className="list-decimal list-inside space-y-1 text-gray-400">
                     <li>Téléchargez le certificat au format .crt</li>
-                    <li>Copiez le fichier : <code className="bg-gray-100 dark:bg-gray-800 px-1 rounded">sudo cp homeroute-root-ca.crt /usr/local/share/ca-certificates/</code></li>
-                    <li>Mettez à jour les certificats : <code className="bg-gray-100 dark:bg-gray-800 px-1 rounded">sudo update-ca-certificates</code></li>
+                    <li>Copiez le fichier : <code className="bg-gray-800 px-1">sudo cp homeroute-root-ca.crt /usr/local/share/ca-certificates/</code></li>
+                    <li>Mettez à jour les certificats : <code className="bg-gray-800 px-1">sudo update-ca-certificates</code></li>
                   </ol>
                 </div>
 
                 {/* Firefox */}
-                <div className="border dark:border-gray-700 rounded-lg p-4">
+                <div className="border border-gray-700 p-4">
                   <h3 className="font-semibold mb-2">Firefox (tous OS)</h3>
-                  <ol className="list-decimal list-inside space-y-1 text-gray-600 dark:text-gray-400">
+                  <ol className="list-decimal list-inside space-y-1 text-gray-400">
                     <li>Ouvrez Firefox et allez dans Paramètres → Vie privée et sécurité</li>
                     <li>Descendez jusqu'à "Certificats" et cliquez sur "Afficher les certificats"</li>
                     <li>Onglet "Autorités" → "Importer"</li>
@@ -368,19 +348,13 @@ const CertificateAuthority = () => {
                 </div>
               </div>
             )}
-          </div>
-        </Card>
+        </Section>
       )}
 
       {/* Certificates List */}
       {status?.initialized && (
-        <Card>
-          <div className="p-6">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-xl font-semibold flex items-center gap-2">
-                <Globe className="w-5 h-5" />
-                Certificats émis ({certificates.length})
-              </h2>
+        <Section title={`Certificats émis (${certificates.length})`}>
+          <div className="flex items-center justify-between mb-4">
               <Button
                 onClick={fetchData}
                 variant="outline"
@@ -391,7 +365,7 @@ const CertificateAuthority = () => {
             </div>
 
             {certificates.length === 0 ? (
-              <div className="text-center py-8 text-gray-500 dark:text-gray-400">
+              <div className="text-center py-8 text-gray-400">
                 Aucun certificat émis pour le moment
               </div>
             ) : (
@@ -404,11 +378,11 @@ const CertificateAuthority = () => {
                   return (
                     <div
                       key={cert.id}
-                      className={`border dark:border-gray-700 rounded-lg p-4 ${
+                      className={`border border-gray-700 p-4 ${
                         expired
-                          ? 'bg-red-50 dark:bg-red-900/10 border-red-300 dark:border-red-800'
+                          ? 'bg-red-900/10 border-red-800'
                           : needsRenewal
-                          ? 'bg-orange-50 dark:bg-orange-900/10 border-orange-300 dark:border-orange-800'
+                          ? 'bg-orange-900/10 border-orange-800'
                           : ''
                       }`}
                     >
@@ -416,7 +390,7 @@ const CertificateAuthority = () => {
                         <div className="flex-1 space-y-2">
                           <div className="flex items-center gap-2">
                             <Key className="w-4 h-4 text-gray-400" />
-                            <span className="font-mono text-sm text-gray-500 dark:text-gray-400">
+                            <span className="font-mono text-sm text-gray-400">
                               {cert.id.substring(0, 8)}...
                             </span>
                           </div>
@@ -425,7 +399,7 @@ const CertificateAuthority = () => {
                             {cert.domains.map((domain, idx) => (
                               <span
                                 key={idx}
-                                className="inline-flex items-center gap-1 px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 rounded text-sm"
+                                className="inline-flex items-center gap-1 px-2 py-1 bg-blue-900/30 text-blue-300 text-sm"
                               >
                                 <Globe className="w-3 h-3" />
                                 {domain}
@@ -433,7 +407,7 @@ const CertificateAuthority = () => {
                             ))}
                           </div>
 
-                          <div className="flex items-center gap-4 text-sm text-gray-600 dark:text-gray-400">
+                          <div className="flex items-center gap-4 text-sm text-gray-400">
                             <span className="flex items-center gap-1">
                               <Calendar className="w-4 h-4" />
                               Émis : {formatDate(cert.issued_at)}
@@ -445,17 +419,17 @@ const CertificateAuthority = () => {
                           </div>
 
                           {expired ? (
-                            <div className="flex items-center gap-2 text-red-600 dark:text-red-400 text-sm font-medium">
+                            <div className="flex items-center gap-2 text-red-400 text-sm font-medium">
                               <AlertTriangle className="w-4 h-4" />
                               Expiré depuis {Math.abs(daysUntilExpiry)} jour(s)
                             </div>
                           ) : needsRenewal ? (
-                            <div className="flex items-center gap-2 text-orange-600 dark:text-orange-400 text-sm font-medium">
+                            <div className="flex items-center gap-2 text-orange-400 text-sm font-medium">
                               <AlertTriangle className="w-4 h-4" />
                               Expire dans {daysUntilExpiry} jour(s)
                             </div>
                           ) : (
-                            <div className="flex items-center gap-2 text-green-600 dark:text-green-400 text-sm">
+                            <div className="flex items-center gap-2 text-green-400 text-sm">
                               <CheckCircle className="w-4 h-4" />
                               Valide ({daysUntilExpiry} jours restants)
                             </div>
@@ -475,7 +449,7 @@ const CertificateAuthority = () => {
                             onClick={() => handleRevokeCertificate(cert.id)}
                             variant="outline"
                             size="sm"
-                            className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/20"
+                            className="text-red-400 hover:text-red-300 hover:bg-red-900/20"
                             title="Révoquer"
                           >
                             <Trash2 className="w-4 h-4" />
@@ -487,8 +461,7 @@ const CertificateAuthority = () => {
                 })}
               </div>
             )}
-          </div>
-        </Card>
+        </Section>
       )}
     </div>
   );

@@ -3,6 +3,8 @@ import { Power, Plus, Trash2, Play, Square, RotateCw, Clock, X, Check } from 'lu
 import Card from '../components/Card';
 import Button from '../components/Button';
 import StatusBadge from '../components/StatusBadge';
+import PageHeader from '../components/PageHeader';
+import Section from '../components/Section';
 import {
   getServers,
   sendWakeOnLan,
@@ -208,17 +210,10 @@ export default function Wol() {
   }
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-white">Wake-on-LAN</h1>
-        <p className="text-gray-400 mt-1">
-          Control servers remotely: wake, shutdown, reboot
-        </p>
-      </div>
+    <div>
+      <PageHeader title="Wake-on-LAN" icon={Power} />
 
-      {/* Server Controls */}
-      <div>
-        <h2 className="text-lg font-semibold text-white mb-4">Server Controls</h2>
+      <Section title="Server Controls">
         {servers.length === 0 ? (
           <Card title="No servers" icon={Power}>
             <p className="text-gray-400">
@@ -284,12 +279,10 @@ export default function Wol() {
             ))}
           </div>
         )}
-      </div>
+      </Section>
 
-      {/* Schedules */}
-      <div>
+      <Section title="Schedules" contrast>
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold text-white">Schedules</h2>
           <Button onClick={() => setShowScheduleModal(true)} disabled={servers.length === 0}>
             <Plus className="w-4 h-4 mr-2" />
             Add Schedule
@@ -310,7 +303,7 @@ export default function Wol() {
                 <Card key={schedule.id}>
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3 flex-1">
-                      <div className={`p-2 rounded ${getActionColor(schedule.action)}`}>
+                      <div className={`p-2 ${getActionColor(schedule.action)}`}>
                         <ActionIcon className="w-4 h-4" />
                       </div>
                       <div className="flex-1">
@@ -337,7 +330,7 @@ export default function Wol() {
                           type="checkbox"
                           checked={schedule.enabled}
                           onChange={(e) => handleToggleSchedule(schedule.id, e.target.checked)}
-                          className="w-4 h-4 rounded"
+                          className="w-4 h-4"
                         />
                         <span className="text-sm text-gray-400">Enabled</span>
                       </label>
@@ -355,12 +348,12 @@ export default function Wol() {
             })}
           </div>
         )}
-      </div>
+      </Section>
 
       {/* Add Schedule Modal */}
       {showScheduleModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md">
+          <div className="bg-gray-800 p-6 w-full max-w-md">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-xl font-bold text-white">Add Schedule</h2>
               <button
@@ -382,7 +375,7 @@ export default function Wol() {
                 <select
                   value={scheduleForm.serverId}
                   onChange={(e) => setScheduleForm({ ...scheduleForm, serverId: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:ring-2 focus:ring-blue-500"
+                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white focus:ring-2 focus:ring-blue-500"
                   required
                 >
                   <option value="">Select server...</option>
@@ -401,7 +394,7 @@ export default function Wol() {
                 <select
                   value={scheduleForm.action}
                   onChange={(e) => setScheduleForm({ ...scheduleForm, action: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:ring-2 focus:ring-blue-500"
+                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white focus:ring-2 focus:ring-blue-500"
                   required
                 >
                   <option value="wake">Wake</option>
@@ -418,7 +411,7 @@ export default function Wol() {
                   type="text"
                   value={scheduleForm.cron}
                   onChange={(e) => setScheduleForm({ ...scheduleForm, cron: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white font-mono focus:ring-2 focus:ring-blue-500"
+                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white font-mono focus:ring-2 focus:ring-blue-500"
                   placeholder="0 7 * * *"
                   required
                 />
@@ -435,7 +428,7 @@ export default function Wol() {
                   type="text"
                   value={scheduleForm.description}
                   onChange={(e) => setScheduleForm({ ...scheduleForm, description: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:ring-2 focus:ring-blue-500"
+                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white focus:ring-2 focus:ring-blue-500"
                   placeholder="Daily morning wake"
                 />
               </div>
@@ -446,7 +439,7 @@ export default function Wol() {
                   id="enabled"
                   checked={scheduleForm.enabled}
                   onChange={(e) => setScheduleForm({ ...scheduleForm, enabled: e.target.checked })}
-                  className="w-4 h-4 rounded"
+                  className="w-4 h-4"
                 />
                 <label htmlFor="enabled" className="text-sm text-gray-300 cursor-pointer">
                   Enable schedule immediately
@@ -454,7 +447,7 @@ export default function Wol() {
               </div>
 
               {scheduleError && (
-                <div className="p-3 bg-red-900/20 border border-red-600 rounded text-red-400 text-sm">
+                <div className="p-3 bg-red-900/20 border border-red-600 text-red-400 text-sm">
                   {scheduleError}
                 </div>
               )}

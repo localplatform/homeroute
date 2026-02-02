@@ -76,6 +76,10 @@ impl DnsCache {
         }
 
         let min_ttl = records.iter().map(|r| r.ttl).min().unwrap_or(60);
+        // RFC 2181 §8: TTL with sign bit set must be treated as 0
+        let min_ttl = if min_ttl & 0x80000000 != 0 { 0 } else { min_ttl };
+        // Cap TTL to 1 day (86400s) to prevent absurdly long caching
+        let min_ttl = min_ttl.min(86400);
         // Don't cache records with TTL 0
         if min_ttl == 0 {
             return;
@@ -111,6 +115,63 @@ impl DnsCache {
         }
 
         entries.insert(key, entry);
+    }
+
+    /// Insert a negative cache entry (NXDOMAIN/NODATA).
+    /// TTL should be derived from the SOA record in the authority section.
+    pub async fn insert_negative(&self, name: &str, qtype: RecordType, ttl_secs: u32) {
+        if ttl_secs == 0 {
+            return;
+        }
+        let ttl_secs = ttl_secs.min(86400); // Cap negative TTL to 1 day
+
+        let key = CacheKey {
+            name: name.to_lowercase(),
+            qtype: qtype.to_u16(),
+        };
+
+        let entry = CacheEntry {
+            records: vec![], // Empty records = negative cache
+            inserted_at: Instant::now(),
+            ttl: Duration::from_secs(ttl_secs as u64),
+        };
+
+        let mut entries = self.entries.write().await;
+        if entries.len() >= self.max_size {
+            entries.retain(|_, v| !v.is_expired());
+        }
+        if entries.len() >= self.max_size {
+            if let Some(oldest_key) = entries
+                .iter()
+                .min_by_key(|(_, v)| v.inserted_at)
+                .map(|(k, _)| k.clone())
+            {
+                entries.remove(&oldest_key);
+            }
+        }
+        entries.insert(key, entry);
+    }
+
+    /// Lookup cached records. Returns Some(vec) for positive cache (may be empty for negative),
+    /// None if not found or expired.
+    pub async fn get_with_negative(&self, name: &str, qtype: RecordType) -> Option<(Vec<DnsRecord>, bool)> {
+        let key = CacheKey {
+            name: name.to_lowercase(),
+            qtype: qtype.to_u16(),
+        };
+
+        let entries = self.entries.read().await;
+        let entry = entries.get(&key)?;
+
+        if entry.is_expired() {
+            return None;
+        }
+
+        if entry.records.is_empty() {
+            Some((vec![], true)) // negative cache hit
+        } else {
+            Some((entry.records_with_remaining_ttl(), false))
+        }
     }
 
     /// Remove expired entries (called periodically)

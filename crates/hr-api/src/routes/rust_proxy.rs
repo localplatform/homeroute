@@ -18,13 +18,13 @@ async fn status(State(state): State<ApiState>) -> Json<Value> {
     let config = state.proxy.config();
     Json(json!({
         "success": true,
-        "active": true,
-        "https_port": config.https_port,
-        "http_port": config.http_port,
-        "base_domain": config.base_domain,
-        "tls_mode": config.tls_mode,
-        "route_count": config.routes.len(),
-        "active_routes": config.active_routes().len()
+        "running": true,
+        "httpsPort": config.https_port,
+        "httpPort": config.http_port,
+        "baseDomain": config.base_domain,
+        "tlsMode": config.tls_mode,
+        "routeCount": config.routes.len(),
+        "activeRoutes": config.active_routes().len()
     }))
 }
 

@@ -54,7 +54,7 @@ function Login() {
       <div className="w-full max-w-md animate-slideUp">
         {/* Logo */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 bg-blue-600 rounded-2xl mb-4">
+          <div className="inline-flex items-center justify-center w-16 h-16 bg-blue-600  mb-4">
             <Shield className="w-8 h-8 text-white" />
           </div>
           <h1 className="text-2xl font-bold text-white">HomeRoute</h1>
@@ -62,11 +62,11 @@ function Login() {
         </div>
 
         {/* Login Card */}
-        <div className="bg-gray-800/50 backdrop-blur-sm rounded-2xl p-6 shadow-xl border border-gray-700">
+        <div className="bg-gray-800/50 backdrop-blur-sm  p-6 shadow-xl border border-gray-700">
           <form onSubmit={handleSubmit} className="space-y-6">
             {/* Error message */}
             {error && (
-              <div className="flex items-center gap-2 p-3 bg-red-500/20 border border-red-500/50 rounded-lg text-red-400">
+              <div className="flex items-center gap-2 p-3 bg-red-500/20 border border-red-500/50  text-red-400">
                 <AlertCircle className="w-5 h-5 flex-shrink-0" />
                 <span className="text-sm">{error}</span>
               </div>
@@ -83,7 +83,7 @@ function Login() {
                   type="text"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  className="w-full pl-10 pr-4 py-3 bg-gray-900/50 border border-gray-600 rounded-xl text-white placeholder-gray-500 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all"
+                  className="w-full pl-10 pr-4 py-3 bg-gray-900/50 border border-gray-600  text-white placeholder-gray-500 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all"
                   placeholder="Votre identifiant"
                   autoComplete="username"
                   autoFocus
@@ -103,7 +103,7 @@ function Login() {
                   type={showPassword ? 'text' : 'password'}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="w-full pl-10 pr-12 py-3 bg-gray-900/50 border border-gray-600 rounded-xl text-white placeholder-gray-500 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all"
+                  className="w-full pl-10 pr-12 py-3 bg-gray-900/50 border border-gray-600  text-white placeholder-gray-500 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all"
                   placeholder="Votre mot de passe"
                   autoComplete="current-password"
                   required
@@ -125,7 +125,7 @@ function Login() {
                 id="remember"
                 checked={rememberMe}
                 onChange={(e) => setRememberMe(e.target.checked)}
-                className="w-4 h-4 rounded border-gray-600 bg-gray-900 text-blue-600 focus:ring-blue-500 focus:ring-offset-0"
+                className="w-4 h-4 border-gray-600 bg-gray-900 text-blue-600 focus:ring-blue-500 focus:ring-offset-0"
               />
               <label htmlFor="remember" className="ml-2 text-sm text-gray-400">
                 Rester connecte
@@ -136,7 +136,7 @@ function Login() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3 px-4 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-600/50 disabled:cursor-not-allowed text-white font-medium rounded-xl transition-colors flex items-center justify-center gap-2"
+              className="w-full py-3 px-4 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-600/50 disabled:cursor-not-allowed text-white font-medium  transition-colors flex items-center justify-center gap-2"
             >
               {loading ? (
                 <>

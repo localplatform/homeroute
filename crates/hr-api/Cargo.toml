@@ -28,3 +28,4 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }
+tokio-stream = { workspace = true }

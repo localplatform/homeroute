@@ -3,6 +3,8 @@ import { Server, Plus, Trash2, Edit, RefreshCw, Activity, X, Check } from 'lucid
 import Card from '../components/Card';
 import Button from '../components/Button';
 import StatusBadge from '../components/StatusBadge';
+import PageHeader from '../components/PageHeader';
+import Section from '../components/Section';
 import {
   getServers,
   addServer,
@@ -166,19 +168,15 @@ export default function Servers() {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-white">Servers</h1>
-          <p className="text-gray-400 mt-1">
-            Manage remote servers for Wake-on-LAN and monitoring
-          </p>
-        </div>
+    <div>
+      <PageHeader title="Servers" icon={Server}>
         <Button onClick={() => setShowAddModal(true)}>
           <Plus className="w-4 h-4 mr-2" />
           Add Server
         </Button>
-      </div>
+      </PageHeader>
+
+      <Section title="Server List">
 
       {loading ? (
         <div className="text-center py-12 text-gray-400">Loading servers...</div>
@@ -189,7 +187,7 @@ export default function Servers() {
           </p>
         </Card>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {servers.map((server) => (
             <Card
               key={server.id}
@@ -236,7 +234,7 @@ export default function Servers() {
                     {server.groups.map((group, idx) => (
                       <span
                         key={idx}
-                        className="px-2 py-1 text-xs bg-blue-600/20 text-blue-400 rounded"
+                        className="px-2 py-1 text-xs bg-blue-600/20 text-blue-400"
                       >
                         {group}
                       </span>
@@ -280,11 +278,12 @@ export default function Servers() {
           ))}
         </div>
       )}
+      </Section>
 
       {/* Add Server Modal */}
       {showAddModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md">
+          <div className="bg-gray-800 p-6 w-full max-w-md">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-xl font-bold text-white">Add Server</h2>
               <button
@@ -304,7 +303,7 @@ export default function Servers() {
                   type="text"
                   value={formData.name}
                   onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:ring-2 focus:ring-blue-500"
+                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white focus:ring-2 focus:ring-blue-500"
                   placeholder="My Server"
                   required
                 />
@@ -319,7 +318,7 @@ export default function Servers() {
                     type="text"
                     value={formData.host}
                     onChange={(e) => setFormData({ ...formData, host: e.target.value })}
-                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white focus:ring-2 focus:ring-blue-500"
                     placeholder="192.168.1.100"
                     required
                   />
@@ -332,7 +331,7 @@ export default function Servers() {
                     type="number"
                     value={formData.port}
                     onChange={(e) => setFormData({ ...formData, port: e.target.value })}
-                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white focus:ring-2 focus:ring-blue-500"
                     placeholder="22"
                   />
                 </div>
@@ -346,7 +345,7 @@ export default function Servers() {
                   type="text"
                   value={formData.username}
                   onChange={(e) => setFormData({ ...formData, username: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:ring-2 focus:ring-blue-500"
+                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white focus:ring-2 focus:ring-blue-500"
                   placeholder="root"
                   required
                 />
@@ -360,7 +359,7 @@ export default function Servers() {
                   type="password"
                   value={formData.password}
                   onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:ring-2 focus:ring-blue-500"
+                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white focus:ring-2 focus:ring-blue-500"
                   placeholder="••••••••"
                   required
                 />
@@ -377,13 +376,13 @@ export default function Servers() {
                   type="text"
                   value={formData.groups}
                   onChange={(e) => setFormData({ ...formData, groups: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:ring-2 focus:ring-blue-500"
+                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white focus:ring-2 focus:ring-blue-500"
                   placeholder="storage, critical"
                 />
               </div>
 
               {addError && (
-                <div className="p-3 bg-red-900/20 border border-red-600 rounded text-red-400 text-sm">
+                <div className="p-3 bg-red-900/20 border border-red-600 text-red-400 text-sm">
                   {addError}
                 </div>
               )}

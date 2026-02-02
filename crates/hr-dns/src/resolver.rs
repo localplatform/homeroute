@@ -4,7 +4,7 @@ use tracing::{debug, warn};
 use crate::SharedDnsState;
 use crate::config::StaticRecord;
 use crate::packet::{self, DnsQuery, RCODE_NOERROR, RCODE_NXDOMAIN, RCODE_SERVFAIL};
-use crate::records::{DnsRecord, RecordType};
+use crate::records::{DnsRecord, RData, RecordType};
 
 /// Result of DNS resolution
 pub struct ResolveResult {
@@ -165,8 +165,17 @@ pub async fn resolve(query: &DnsQuery, state: &SharedDnsState) -> ResolveResult 
         };
     }
 
-    // 5. Cache lookup
-    if let Some(cached_records) = state_read.dns_cache.get(name, qtype).await {
+    // 5. Cache lookup (including negative cache)
+    if let Some((cached_records, is_negative)) = state_read.dns_cache.get_with_negative(name, qtype).await {
+        if is_negative {
+            debug!("Resolved {} via negative cache (NXDOMAIN)", name);
+            return ResolveResult {
+                records: vec![],
+                rcode: RCODE_NXDOMAIN,
+                cached: true,
+                blocked: false,
+            };
+        }
         debug!("Resolved {} via cache ({} records)", name, cached_records.len());
         return ResolveResult {
             records: cached_records,
@@ -177,33 +186,37 @@ pub async fn resolve(query: &DnsQuery, state: &SharedDnsState) -> ResolveResult 
     }
 
     // 6. Upstream forward
-    // Build a clean query to forward (only the first question)
-    let _query_bytes = packet::build_response(query, &[], RCODE_NOERROR);
-    // Actually we want to forward the original query bytes, but we reconstruct to ensure clean format.
-    // We'll re-build a query packet:
     let forward_bytes = build_forward_query(query);
 
     match state_read.upstream.forward(&forward_bytes).await {
         Ok(response_bytes) => {
-            match packet::parse_response_records(&response_bytes) {
-                Ok((header, records)) => {
-                    // Cache the result
-                    if !records.is_empty() {
-                        state_read.dns_cache.insert(name, qtype, &records).await;
+            match packet::parse_response_sections(&response_bytes) {
+                Ok(parsed) => {
+                    let rcode = parsed.header.rcode();
+
+                    // Cache only answer records (not authority/additional)
+                    // OPT records already filtered by parse_response_sections
+                    if !parsed.answers.is_empty() {
+                        state_read.dns_cache.insert(name, qtype, &parsed.answers).await;
+                    } else if rcode == RCODE_NXDOMAIN || (rcode == RCODE_NOERROR && parsed.answers.is_empty()) {
+                        // Negative caching (RFC 2308): cache NXDOMAIN/NODATA
+                        // Extract TTL from SOA record in authority section
+                        let neg_ttl = extract_soa_negative_ttl(&parsed.authority);
+                        if neg_ttl > 0 {
+                            state_read.dns_cache.insert_negative(name, qtype, neg_ttl).await;
+                        }
                     }
 
-                    debug!("Resolved {} via upstream ({} records)", name, records.len());
+                    debug!("Resolved {} via upstream ({} answers, rcode={})", name, parsed.answers.len(), rcode);
                     ResolveResult {
-                        records,
-                        rcode: header.rcode(),
+                        records: parsed.answers,
+                        rcode,
                         cached: false,
                         blocked: false,
                     }
                 }
                 Err(e) => {
                     warn!("Failed to parse upstream response for {}: {}", name, e);
-                    // Return raw response -- the upstream response is valid DNS, we just can't parse it
-                    // Return SERVFAIL if we truly can't handle it
                     ResolveResult {
                         records: vec![],
                         rcode: RCODE_SERVFAIL,
@@ -236,12 +249,35 @@ fn build_forward_query(query: &DnsQuery) -> Vec<u8> {
     buf.extend_from_slice(&query.header.qd_count.to_be_bytes());
     buf.extend_from_slice(&0u16.to_be_bytes()); // AN
     buf.extend_from_slice(&0u16.to_be_bytes()); // NS
-    buf.extend_from_slice(&0u16.to_be_bytes()); // AR
+    buf.extend_from_slice(&1u16.to_be_bytes()); // AR = 1 (OPT record)
 
     // Question section
     buf.extend_from_slice(&query.raw_question_bytes);
 
+    // EDNS0 OPT record (RFC 6891)
+    // NAME: root (0x00)
+    buf.push(0x00);
+    // TYPE: OPT (41)
+    buf.extend_from_slice(&41u16.to_be_bytes());
+    // CLASS: UDP payload size (1232 bytes — safe for most paths, avoids fragmentation)
+    buf.extend_from_slice(&1232u16.to_be_bytes());
+    // TTL: extended RCODE (0) + version (0) + flags (0, no DO bit)
+    buf.extend_from_slice(&0u32.to_be_bytes());
+    // RDLENGTH: 0 (no options)
+    buf.extend_from_slice(&0u16.to_be_bytes());
+
     buf
+}
+
+/// Extract the negative caching TTL from a SOA record in the authority section.
+/// Per RFC 2308: negative TTL = min(SOA.MINIMUM, SOA record TTL).
+fn extract_soa_negative_ttl(authority: &[DnsRecord]) -> u32 {
+    for record in authority {
+        if let RData::SOA { minimum, .. } = &record.rdata {
+            return (*minimum).min(record.ttl);
+        }
+    }
+    0 // No SOA found — don't cache negative response (RFC 2308)
 }
 
 fn parse_static_record(name: &str, rec: &StaticRecord, rtype: RecordType) -> Option<DnsRecord> {

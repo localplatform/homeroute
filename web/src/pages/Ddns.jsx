@@ -3,7 +3,9 @@ import { Globe, RefreshCw, Clock, Wifi, Pencil, Check, X } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
 import StatusBadge from '../components/StatusBadge';
-import { getDdnsStatus, forceDdnsUpdate, updateDdnsToken } from '../api/client';
+import PageHeader from '../components/PageHeader';
+import Section from '../components/Section';
+import { getDdnsStatus, forceDdnsUpdate, updateDdnsToken, updateDdnsConfig } from '../api/client';
 
 function Ddns() {
   const [status, setStatus] = useState(null);
@@ -13,6 +15,11 @@ function Ddns() {
   const [tokenValue, setTokenValue] = useState('');
   const [savingToken, setSavingToken] = useState(false);
   const [tokenError, setTokenError] = useState(null);
+  const [editingZoneId, setEditingZoneId] = useState(false);
+  const [zoneIdValue, setZoneIdValue] = useState('');
+  const [savingZoneId, setSavingZoneId] = useState(false);
+  const [zoneIdError, setZoneIdError] = useState(null);
+  const [savingProxied, setSavingProxied] = useState(false);
 
   useEffect(() => {
     fetchStatus();
@@ -65,6 +72,41 @@ function Ddns() {
     }
   }
 
+  async function handleSaveZoneId() {
+    if (!zoneIdValue.trim()) return;
+    setSavingZoneId(true);
+    setZoneIdError(null);
+    try {
+      const res = await updateDdnsConfig({ zone_id: zoneIdValue.trim() });
+      if (res.data.success) {
+        setEditingZoneId(false);
+        setZoneIdValue('');
+        await fetchStatus();
+      } else {
+        setZoneIdError(res.data.error || 'Erreur');
+      }
+    } catch (error) {
+      setZoneIdError(error.response?.data?.error || 'Erreur de connexion');
+    } finally {
+      setSavingZoneId(false);
+    }
+  }
+
+  async function handleToggleProxied() {
+    setSavingProxied(true);
+    try {
+      const newValue = !status?.config?.proxied;
+      const res = await updateDdnsConfig({ proxied: newValue });
+      if (res.data.success) {
+        await fetchStatus();
+      }
+    } catch (error) {
+      console.error('Error updating proxied:', error);
+    } finally {
+      setSavingProxied(false);
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -74,157 +116,219 @@ function Ddns() {
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Dynamic DNS (Cloudflare)</h1>
+    <div>
+      <PageHeader title="Dynamic DNS (Cloudflare)" icon={Globe}>
         <Button onClick={handleUpdate} loading={updating}>
           <RefreshCw className="w-4 h-4" />
           Forcer la mise à jour
         </Button>
-      </div>
+      </PageHeader>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <Card title="Enregistrement" icon={Globe}>
-          <div className="text-lg font-mono text-blue-400 break-all">
-            {status?.config?.recordName || '-'}
-          </div>
-          <p className="text-xs text-gray-500 mt-2">AAAA Record</p>
-        </Card>
+      <Section title="Configuration">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+          <Card title="Enregistrement" icon={Globe}>
+            <div className="text-lg font-mono text-blue-400 break-all">
+              {status?.config?.recordName || '-'}
+            </div>
+            <p className="text-xs text-gray-500 mt-2">AAAA Record</p>
+          </Card>
 
-        <Card title="IPv6 Actuelle" icon={Wifi}>
-          <div className="text-sm font-mono text-green-400 break-all">
-            {status?.currentIpv6 || 'Non disponible'}
-          </div>
-          <p className="text-xs text-gray-500 mt-2">Interface enp5s0</p>
-        </Card>
+          <Card title="IPv6 Actuelle" icon={Wifi}>
+            <div className="text-sm font-mono text-green-400 break-all">
+              {status?.currentIpv6 || 'Non disponible'}
+            </div>
+            <p className="text-xs text-gray-500 mt-2">Interface enp5s0</p>
+          </Card>
 
-        <Card title="Zone ID" icon={Globe}>
-          <div className="text-xs font-mono text-gray-400 break-all">
-            {status?.config?.zoneId || '-'}
-          </div>
-        </Card>
+          <Card title="Zone ID" icon={Globe}>
+            {editingZoneId ? (
+              <div className="space-y-2">
+                <input
+                  type="text"
+                  value={zoneIdValue}
+                  onChange={(e) => setZoneIdValue(e.target.value)}
+                  placeholder="Zone ID Cloudflare"
+                  className="w-full bg-gray-800 border border-gray-600 px-2 py-1 text-sm font-mono text-white focus:outline-none focus:border-blue-500"
+                  autoFocus
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleSaveZoneId();
+                    if (e.key === 'Escape') { setEditingZoneId(false); setZoneIdValue(''); setZoneIdError(null); }
+                  }}
+                />
+                {zoneIdError && <p className="text-xs text-red-400">{zoneIdError}</p>}
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleSaveZoneId}
+                    disabled={savingZoneId || !zoneIdValue.trim()}
+                    className="flex items-center gap-1 px-2 py-1 text-xs bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white"
+                  >
+                    <Check className="w-3 h-3" />
+                    {savingZoneId ? '...' : 'Valider'}
+                  </button>
+                  <button
+                    onClick={() => { setEditingZoneId(false); setZoneIdValue(''); setZoneIdError(null); }}
+                    className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-600 hover:bg-gray-700 text-white"
+                  >
+                    <X className="w-3 h-3" />
+                    Annuler
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-mono text-gray-400 break-all">
+                  {status?.config?.zoneId || '-'}
+                </div>
+                <button
+                  onClick={() => { setEditingZoneId(true); setZoneIdValue(status?.config?.zoneId || ''); }}
+                  className="p-1 text-gray-500 hover:text-blue-400 transition-colors"
+                  title="Modifier le Zone ID"
+                >
+                  <Pencil className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+          </Card>
 
-        <Card title="API Token" icon={Globe}>
-          {editingToken ? (
-            <div className="space-y-2">
+          <Card title="API Token" icon={Globe}>
+            {editingToken ? (
+              <div className="space-y-2">
+                <input
+                  type="password"
+                  value={tokenValue}
+                  onChange={(e) => setTokenValue(e.target.value)}
+                  placeholder="Nouveau token API"
+                  className="w-full bg-gray-800 border border-gray-600 px-2 py-1 text-sm font-mono text-white focus:outline-none focus:border-blue-500"
+                  autoFocus
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleSaveToken();
+                    if (e.key === 'Escape') { setEditingToken(false); setTokenValue(''); setTokenError(null); }
+                  }}
+                />
+                {tokenError && <p className="text-xs text-red-400">{tokenError}</p>}
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleSaveToken}
+                    disabled={savingToken || !tokenValue.trim()}
+                    className="flex items-center gap-1 px-2 py-1 text-xs bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white"
+                  >
+                    <Check className="w-3 h-3" />
+                    {savingToken ? '...' : 'Valider'}
+                  </button>
+                  <button
+                    onClick={() => { setEditingToken(false); setTokenValue(''); setTokenError(null); }}
+                    className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-600 hover:bg-gray-700 text-white"
+                  >
+                    <X className="w-3 h-3" />
+                    Annuler
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-mono text-gray-500">
+                  {status?.config?.apiToken || '-'}
+                </div>
+                <button
+                  onClick={() => setEditingToken(true)}
+                  className="p-1 text-gray-500 hover:text-blue-400 transition-colors"
+                  title="Modifier le token"
+                >
+                  <Pencil className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+          </Card>
+
+          <Card title="Cloudflare Proxy" icon={Globe}>
+            <label className="flex items-center gap-3 cursor-pointer">
               <input
-                type="password"
-                value={tokenValue}
-                onChange={(e) => setTokenValue(e.target.value)}
-                placeholder="Nouveau token API"
-                className="w-full bg-gray-800 border border-gray-600 rounded px-2 py-1 text-sm font-mono text-white focus:outline-none focus:border-blue-500"
-                autoFocus
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') handleSaveToken();
-                  if (e.key === 'Escape') { setEditingToken(false); setTokenValue(''); setTokenError(null); }
-                }}
+                type="checkbox"
+                checked={status?.config?.proxied ?? true}
+                onChange={handleToggleProxied}
+                disabled={savingProxied}
+                className="w-4 h-4 border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500 focus:ring-offset-0 cursor-pointer"
               />
-              {tokenError && <p className="text-xs text-red-400">{tokenError}</p>}
-              <div className="flex gap-2">
-                <button
-                  onClick={handleSaveToken}
-                  disabled={savingToken || !tokenValue.trim()}
-                  className="flex items-center gap-1 px-2 py-1 text-xs bg-green-600 hover:bg-green-700 disabled:opacity-50 rounded text-white"
-                >
-                  <Check className="w-3 h-3" />
-                  {savingToken ? '...' : 'Valider'}
-                </button>
-                <button
-                  onClick={() => { setEditingToken(false); setTokenValue(''); setTokenError(null); }}
-                  className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-600 hover:bg-gray-700 rounded text-white"
-                >
-                  <X className="w-3 h-3" />
-                  Annuler
-                </button>
+              <span className="text-sm text-gray-300">
+                {savingProxied ? 'Enregistrement...' : 'Proxied'}
+              </span>
+            </label>
+            <p className="text-xs text-gray-500 mt-2">Activer le proxy Cloudflare sur l'enregistrement DNS</p>
+          </Card>
+        </div>
+      </Section>
+
+      <Section title="État / Automatisation" contrast>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <Card title="État" icon={Clock}>
+            <dl className="space-y-4">
+              <div className="flex justify-between items-center">
+                <dt className="text-gray-400">Dernière mise à jour</dt>
+                <dd className="font-mono text-sm">
+                  {status?.lastUpdate || 'Jamais'}
+                </dd>
+              </div>
+              <div className="flex justify-between items-center">
+                <dt className="text-gray-400">Dernière IP enregistrée</dt>
+                <dd className="font-mono text-sm text-purple-400 break-all">
+                  {status?.lastIp || '-'}
+                </dd>
+              </div>
+              <div className="flex justify-between items-center">
+                <dt className="text-gray-400">État</dt>
+                <dd>
+                  {status?.currentIpv6 ? (
+                    <StatusBadge status="up">Connecté</StatusBadge>
+                  ) : (
+                    <StatusBadge status="down">Pas d&apos;IPv6</StatusBadge>
+                  )}
+                </dd>
+              </div>
+            </dl>
+          </Card>
+
+          <Card title="Automatisation" icon={RefreshCw}>
+            <div className="space-y-3">
+              <div className="bg-gray-900 p-3">
+                <div className="text-sm font-semibold mb-1">Cron Job</div>
+                <code className="text-xs text-green-400">*/2 * * * * /usr/local/bin/cloudflare-ddns-v6.sh</code>
+                <p className="text-xs text-gray-500 mt-2">Exécuté toutes les 2 minutes</p>
+              </div>
+              <div className="bg-gray-900 p-3">
+                <div className="text-sm font-semibold mb-1">Script</div>
+                <code className="text-xs text-gray-400">/usr/local/bin/cloudflare-ddns-v6.sh</code>
+              </div>
+              <div className="bg-gray-900 p-3">
+                <div className="text-sm font-semibold mb-1">Configuration</div>
+                <code className="text-xs text-gray-400">/etc/cloudflare-ddns.conf</code>
               </div>
             </div>
-          ) : (
-            <div className="flex items-center justify-between">
-              <div className="text-sm font-mono text-gray-500">
-                {status?.config?.apiToken || '-'}
-              </div>
-              <button
-                onClick={() => setEditingToken(true)}
-                className="p-1 text-gray-500 hover:text-blue-400 transition-colors"
-                title="Modifier le token"
-              >
-                <Pencil className="w-4 h-4" />
-              </button>
-            </div>
-          )}
-        </Card>
-      </div>
+          </Card>
+        </div>
+      </Section>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Status */}
-        <Card title="État" icon={Clock}>
-          <dl className="space-y-4">
-            <div className="flex justify-between items-center">
-              <dt className="text-gray-400">Dernière mise à jour</dt>
-              <dd className="font-mono text-sm">
-                {status?.lastUpdate || 'Jamais'}
-              </dd>
-            </div>
-            <div className="flex justify-between items-center">
-              <dt className="text-gray-400">Dernière IP enregistrée</dt>
-              <dd className="font-mono text-sm text-purple-400 break-all">
-                {status?.lastIp || '-'}
-              </dd>
-            </div>
-            <div className="flex justify-between items-center">
-              <dt className="text-gray-400">État</dt>
-              <dd>
-                {status?.currentIpv6 ? (
-                  <StatusBadge status="up">Connecté</StatusBadge>
-                ) : (
-                  <StatusBadge status="down">Pas d&apos;IPv6</StatusBadge>
-                )}
-              </dd>
-            </div>
-          </dl>
-        </Card>
-
-        {/* Cron Info */}
-        <Card title="Automatisation" icon={RefreshCw}>
-          <div className="space-y-3">
-            <div className="bg-gray-900 rounded p-3">
-              <div className="text-sm font-semibold mb-1">Cron Job</div>
-              <code className="text-xs text-green-400">*/2 * * * * /usr/local/bin/cloudflare-ddns-v6.sh</code>
-              <p className="text-xs text-gray-500 mt-2">Exécuté toutes les 2 minutes</p>
-            </div>
-            <div className="bg-gray-900 rounded p-3">
-              <div className="text-sm font-semibold mb-1">Script</div>
-              <code className="text-xs text-gray-400">/usr/local/bin/cloudflare-ddns-v6.sh</code>
-            </div>
-            <div className="bg-gray-900 rounded p-3">
-              <div className="text-sm font-semibold mb-1">Configuration</div>
-              <code className="text-xs text-gray-400">/etc/cloudflare-ddns.conf</code>
-            </div>
+      <Section title="Logs">
+        <Card title="Logs récents" icon={Clock}>
+          <div className="bg-gray-900 p-3 max-h-96 overflow-y-auto font-mono text-xs">
+            {status?.logs?.length > 0 ? (
+              status.logs.map((log, i) => (
+                <div
+                  key={i}
+                  className={`py-1 ${
+                    log.includes('ERREUR') ? 'text-red-400' :
+                    log.includes('MAJ') || log.includes('CREE') ? 'text-green-400' :
+                    'text-gray-400'
+                  }`}
+                >
+                  {log}
+                </div>
+              ))
+            ) : (
+              <p className="text-gray-500 text-center py-4">Aucun log</p>
+            )}
           </div>
         </Card>
-      </div>
-
-      {/* Logs */}
-      <Card title="Logs récents" icon={Clock}>
-        <div className="bg-gray-900 rounded p-3 max-h-96 overflow-y-auto font-mono text-xs">
-          {status?.logs?.length > 0 ? (
-            status.logs.map((log, i) => (
-              <div
-                key={i}
-                className={`py-1 ${
-                  log.includes('ERREUR') ? 'text-red-400' :
-                  log.includes('MAJ') || log.includes('CREE') ? 'text-green-400' :
-                  'text-gray-400'
-                }`}
-              >
-                {log}
-              </div>
-            ))
-          ) : (
-            <p className="text-gray-500 text-center py-4">Aucun log</p>
-          )}
-        </div>
-      </Card>
+      </Section>
     </div>
   );
 }

@@ -133,8 +133,12 @@ impl LeaseStore {
 
     /// Add or update a lease
     pub fn add_lease(&mut self, lease: Lease) {
-        // Remove old hostname mapping if exists
+        // If this IP was previously leased to a different MAC, clean up
+        // that MAC's stale by_mac index entry.
         if let Some(old_lease) = self.leases.get(&lease.ip) {
+            if old_lease.mac != lease.mac {
+                self.by_mac.remove(&old_lease.mac);
+            }
             if let Some(ref old_hostname) = old_lease.hostname {
                 self.by_hostname.remove(&old_hostname.to_lowercase());
             }
@@ -229,10 +233,24 @@ impl LeaseStore {
     ) -> Option<(Ipv4Addr, Option<String>)> {
         let mac_lower = mac.to_lowercase();
 
-        // 1. Existing lease for this MAC
+        // 1. Existing lease for this MAC (verify the index is still valid
+        //    and the IP is still within the configured range or a static lease)
         if let Some(ip) = self.find_ip_by_mac(&mac_lower) {
-            let hostname = self.leases.get(&ip).and_then(|l| l.hostname.clone());
-            return Some((ip, hostname));
+            if let Some(lease) = self.leases.get(&ip) {
+                if lease.mac == mac_lower {
+                    let ip_u32 = u32::from(ip);
+                    let in_range = ip_u32 >= u32::from(range_start) && ip_u32 <= u32::from(range_end);
+                    let is_static = static_leases.iter().any(|(smac, sip, _)| {
+                        smac.to_lowercase() == mac_lower && *sip == ip
+                    });
+                    if in_range || is_static {
+                        return Some((ip, lease.hostname.clone()));
+                    }
+                    // IP is outside current range — fall through to reallocate.
+                }
+            }
+            // Stale or out-of-range by_mac index.
+            // Fall through to static/pool allocation.
         }
 
         // 2. Static lease for this MAC

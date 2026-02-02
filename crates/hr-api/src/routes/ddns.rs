@@ -13,6 +13,7 @@ pub fn router() -> Router<ApiState> {
         .route("/status", get(status))
         .route("/update", post(force_update))
         .route("/token", put(update_token))
+        .route("/config", put(update_config))
 }
 
 async fn status(State(state): State<ApiState>) -> Json<Value> {
@@ -69,6 +70,7 @@ async fn status(State(state): State<ApiState>) -> Json<Value> {
                 "recordName": env.cf_record_name,
                 "zoneId": env.cf_zone_id,
                 "apiToken": masked_token,
+                "proxied": env.cf_proxied,
             },
             "logs": log_lines
         }
@@ -96,7 +98,7 @@ async fn force_update(State(state): State<ApiState>) -> Json<Value> {
         None => return Json(json!({"success": false, "error": "Impossible de determiner l'adresse IPv6"})),
     };
 
-    match update_cloudflare_record(token, zone_id, record_name, &ipv6).await {
+    match update_cloudflare_record(token, zone_id, record_name, &ipv6, env.cf_proxied).await {
         Ok(()) => {
             log_ddns(&format!("Updated {} to {}", record_name, ipv6)).await;
             Json(json!({"success": true, "ipv6": ipv6}))
@@ -138,6 +140,53 @@ async fn update_token(Json(body): Json<UpdateTokenRequest>) -> Json<Value> {
     }
 
     Json(json!({"success": true, "message": "Token mis a jour. Redemarrez le service pour appliquer."}))
+}
+
+#[derive(Deserialize)]
+struct UpdateConfigRequest {
+    zone_id: Option<String>,
+    proxied: Option<bool>,
+}
+
+async fn update_config(Json(body): Json<UpdateConfigRequest>) -> Json<Value> {
+    let env_path = "/opt/homeroute/.env";
+    let content = tokio::fs::read_to_string(env_path)
+        .await
+        .unwrap_or_default();
+
+    let mut lines: Vec<String> = content.lines().map(String::from).collect();
+
+    if let Some(zone_id) = &body.zone_id {
+        let mut found = false;
+        for line in &mut lines {
+            if line.starts_with("CF_ZONE_ID=") {
+                *line = format!("CF_ZONE_ID={}", zone_id);
+                found = true;
+            }
+        }
+        if !found {
+            lines.push(format!("CF_ZONE_ID={}", zone_id));
+        }
+    }
+
+    if let Some(proxied) = body.proxied {
+        let mut found = false;
+        for line in &mut lines {
+            if line.starts_with("CF_PROXIED=") {
+                *line = format!("CF_PROXIED={}", proxied);
+                found = true;
+            }
+        }
+        if !found {
+            lines.push(format!("CF_PROXIED={}", proxied));
+        }
+    }
+
+    if let Err(e) = tokio::fs::write(env_path, lines.join("\n") + "\n").await {
+        return Json(json!({"success": false, "error": e.to_string()}));
+    }
+
+    Json(json!({"success": true, "message": "Configuration mise a jour. Redemarrez le service pour appliquer."}))
 }
 
 async fn get_ipv6_address(interface: &str) -> Option<String> {
@@ -209,6 +258,7 @@ async fn update_cloudflare_record(
     zone_id: &str,
     record_name: &str,
     ipv6: &str,
+    proxied: bool,
 ) -> Result<(), String> {
     let client = reqwest::Client::new();
 
@@ -263,7 +313,7 @@ async fn update_cloudflare_record(
                 "name": record_name,
                 "content": ipv6,
                 "ttl": 120,
-                "proxied": false
+                "proxied": proxied
             }))
             .send()
             .await
@@ -288,7 +338,7 @@ async fn update_cloudflare_record(
                 "name": record_name,
                 "content": ipv6,
                 "ttl": 120,
-                "proxied": false
+                "proxied": proxied
             }))
             .send()
             .await

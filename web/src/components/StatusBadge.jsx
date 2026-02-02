@@ -7,7 +7,7 @@ function StatusBadge({ status, children }) {
   };
 
   return (
-    <span className={`px-2 py-0.5 rounded text-xs font-medium border ${colors[status] || colors.unknown}`}>
+    <span className={`px-2 py-0.5 text-xs font-medium border ${colors[status] || colors.unknown}`}>
       {children}
     </span>
   );

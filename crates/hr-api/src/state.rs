@@ -4,6 +4,7 @@ use hr_auth::AuthService;
 use hr_ca::CertificateAuthority;
 use hr_common::config::EnvConfig;
 use hr_common::events::EventBus;
+use hr_common::service_registry::SharedServiceRegistry;
 use hr_dns::SharedDnsState;
 use hr_dhcp::SharedDhcpState;
 use hr_proxy::ProxyState;
@@ -23,6 +24,7 @@ pub struct ApiState {
     pub events: Arc<EventBus>,
     pub env: Arc<EnvConfig>,
     pub analytics: Arc<AnalyticsStore>,
+    pub service_registry: SharedServiceRegistry,
 
     /// Path to dns-dhcp-config.json
     pub dns_dhcp_config_path: PathBuf,
