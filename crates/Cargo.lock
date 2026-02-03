@@ -846,6 +846,7 @@ dependencies = [
  "rand",
  "rand_core 0.6.4",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "tokio",

@@ -29,6 +29,7 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     let mut agent_rx = state.events.agent_status.subscribe();
     let mut metrics_rx = state.events.agent_metrics.subscribe();
     let mut service_cmd_rx = state.events.service_command.subscribe();
+    let mut agent_update_rx = state.events.agent_update.subscribe();
 
     loop {
         tokio::select! {
@@ -162,6 +163,31 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!("WebSocket service_command lagged by {}", n);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            // Agent update events
+            result = agent_update_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({
+                            "type": "agent:update",
+                            "data": {
+                                "appId": event.app_id,
+                                "slug": event.slug,
+                                "status": format!("{:?}", event.status).to_lowercase(),
+                                "version": event.version,
+                                "error": event.error,
+                            }
+                        });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("WebSocket agent_update lagged by {}", n);
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }

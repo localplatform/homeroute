@@ -81,3 +81,56 @@ systemctl reload homeroute
 # Logs
 journalctl -u homeroute -f
 ```
+
+## Workflow de mise à jour des agents (OBLIGATOIRE)
+
+Lors de la modification du binaire `hr-agent`, suivre **obligatoirement** ce workflow:
+
+### 1. Build du nouvel agent
+
+```bash
+cd /opt/homeroute && cargo build --release -p hr-agent
+```
+
+### 2. Copie vers le répertoire de distribution
+
+```bash
+cp target/release/hr-agent /opt/homeroute/data/agent-binaries/hr-agent
+```
+
+### 3. Déclenchement de la mise à jour
+
+```bash
+curl -X POST http://localhost:3017/api/applications/agents/update
+```
+
+### 4. Vérification de l'état
+
+```bash
+curl http://localhost:3017/api/applications/agents/update/status | jq
+```
+
+Vérifier que tous les agents ont:
+- `status: "connected"`
+- `current_version` = version attendue
+- `metrics_flowing: true`
+
+### 5. Correction des agents défaillants
+
+Si un agent ne se reconnecte pas après la mise à jour:
+
+```bash
+# Via API (recommandé):
+curl -X POST http://localhost:3017/api/applications/{id}/update/fix
+
+# Ou manuellement via LXC:
+lxc exec hr-{slug} -- bash -c "curl -fsSL http://10.0.0.254:3017/api/applications/agents/binary -o /usr/local/bin/hr-agent && chmod +x /usr/local/bin/hr-agent && systemctl restart hr-agent"
+```
+
+### Checklist de vérification
+
+Après déclenchement d'une mise à jour, vérifier:
+- [ ] Tous les agents montrent `status: connected`
+- [ ] Tous les agents reportent la `current_version` attendue
+- [ ] `metrics_flowing: true` pour tous les agents
+- [ ] Aucun agent en état `failed_reconnect`

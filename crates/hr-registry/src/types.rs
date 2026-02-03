@@ -190,6 +190,61 @@ pub struct UpdateApplicationRequest {
     pub power_policy: Option<PowerPolicy>,
 }
 
+// ── Agent Update Types ──────────────────────────────────────────
+
+/// Request body for triggering agent updates.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TriggerUpdateRequest {
+    /// Specific agent IDs to update (None = all connected agents).
+    #[serde(default)]
+    pub agent_ids: Option<Vec<String>>,
+}
+
+/// Result of notifying a single agent about an update.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentNotifyResult {
+    pub id: String,
+    pub slug: String,
+    pub status: String,
+}
+
+/// Result of skipping a single agent.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentSkipResult {
+    pub id: String,
+    pub slug: String,
+    pub reason: String,
+}
+
+/// Result of triggering updates to a batch of agents.
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateBatchResult {
+    pub version: String,
+    pub sha256: String,
+    pub agents_notified: Vec<AgentNotifyResult>,
+    pub agents_skipped: Vec<AgentSkipResult>,
+}
+
+/// Update status for a single agent.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentUpdateStatusInfo {
+    pub id: String,
+    pub slug: String,
+    pub container_name: String,
+    pub status: String,
+    pub current_version: Option<String>,
+    pub update_status: String,
+    pub metrics_flowing: bool,
+    pub last_heartbeat: Option<DateTime<Utc>>,
+}
+
+/// Result of checking update status for all agents.
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateStatusResult {
+    pub expected_version: String,
+    pub agents: Vec<AgentUpdateStatusInfo>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

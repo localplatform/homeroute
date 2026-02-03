@@ -12,7 +12,7 @@ use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 
 use hr_registry::protocol::{AgentMessage, PowerPolicy, ServiceAction, ServiceType};
-use hr_registry::types::{CreateApplicationRequest, UpdateApplicationRequest};
+use hr_registry::types::{CreateApplicationRequest, TriggerUpdateRequest, UpdateApplicationRequest};
 
 use crate::state::ApiState;
 
@@ -25,8 +25,11 @@ pub fn router() -> Router<ApiState> {
         .route("/{id}/services/{service_type}/start", post(start_service))
         .route("/{id}/services/{service_type}/stop", post(stop_service))
         .route("/{id}/power-policy", put(update_power_policy))
+        .route("/{id}/update/fix", post(fix_agent_update))
         .route("/agents/version", get(agent_version))
         .route("/agents/binary", get(agent_binary))
+        .route("/agents/update", post(trigger_agent_update))
+        .route("/agents/update/status", get(get_update_status))
         .route("/agents/ws", get(agent_ws))
         .route("/{id}/terminal", get(terminal_ws))
 }
@@ -226,6 +229,110 @@ async fn regenerate_token(
         Err(e) => {
             error!("Failed to regenerate token: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "error": e.to_string()}))).into_response()
+        }
+    }
+}
+
+// ── Agent update handlers ────────────────────────────────────
+
+/// Trigger update to all connected agents (or specific ones).
+async fn trigger_agent_update(
+    State(state): State<ApiState>,
+    Json(req): Json<TriggerUpdateRequest>,
+) -> impl IntoResponse {
+    let Some(registry) = &state.registry else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"success": false, "error": "Registry not available"})),
+        )
+            .into_response();
+    };
+
+    match registry.trigger_update(req.agent_ids).await {
+        Ok(result) => {
+            info!(
+                notified = result.agents_notified.len(),
+                skipped = result.agents_skipped.len(),
+                version = result.version,
+                "Agent update triggered via API"
+            );
+            Json(serde_json::json!({
+                "success": true,
+                "version": result.version,
+                "sha256": result.sha256,
+                "agents_notified": result.agents_notified,
+                "agents_skipped": result.agents_skipped
+            }))
+            .into_response()
+        }
+        Err(e) => {
+            error!("Failed to trigger agent update: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"success": false, "error": e.to_string()})),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Get update status for all agents.
+async fn get_update_status(State(state): State<ApiState>) -> impl IntoResponse {
+    let Some(registry) = &state.registry else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"success": false, "error": "Registry not available"})),
+        )
+            .into_response();
+    };
+
+    match registry.get_update_status().await {
+        Ok(result) => Json(serde_json::json!({
+            "success": true,
+            "expected_version": result.expected_version,
+            "agents": result.agents
+        }))
+        .into_response(),
+        Err(e) => {
+            error!("Failed to get update status: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"success": false, "error": e.to_string()})),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Fix a failed agent update via LXC exec.
+async fn fix_agent_update(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let Some(registry) = &state.registry else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"success": false, "error": "Registry not available"})),
+        )
+            .into_response();
+    };
+
+    match registry.fix_agent_via_lxc(&id).await {
+        Ok(output) => {
+            info!(app_id = id, "Agent fixed via LXC exec");
+            Json(serde_json::json!({
+                "success": true,
+                "output": output
+            }))
+            .into_response()
+        }
+        Err(e) => {
+            error!(app_id = id, "Failed to fix agent: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"success": false, "error": e.to_string()})),
+            )
+                .into_response()
         }
     }
 }

@@ -21,3 +21,4 @@ rand = { workspace = true }
 argon2 = { workspace = true }
 hex = { workspace = true }
 rand_core = { version = "0.6", features = ["getrandom"] }
+ring = { workspace = true }

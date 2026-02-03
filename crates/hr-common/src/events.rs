@@ -21,6 +21,8 @@ pub struct EventBus {
     pub agent_metrics: broadcast::Sender<AgentMetricsEvent>,
     /// Service command completion events (registry → websocket)
     pub service_command: broadcast::Sender<ServiceCommandEvent>,
+    /// Agent update events (registry → websocket)
+    pub agent_update: broadcast::Sender<AgentUpdateEvent>,
 }
 
 impl EventBus {
@@ -35,6 +37,7 @@ impl EventBus {
             agent_status: broadcast::channel(64).0,
             agent_metrics: broadcast::channel(64).0,
             service_command: broadcast::channel(64).0,
+            agent_update: broadcast::channel(64).0,
         }
     }
 }
@@ -142,4 +145,30 @@ pub struct ServiceCommandEvent {
     pub service_type: String,
     pub action: String,
     pub success: bool,
+}
+
+/// Agent update status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentUpdateStatus {
+    /// Update message sent to agent.
+    Notified,
+    /// Agent reconnected after update.
+    Reconnected,
+    /// Agent version verified as expected.
+    VersionVerified,
+    /// Update failed (agent did not reconnect or wrong version).
+    Failed,
+}
+
+/// Agent update event (registry → websocket for update progress).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentUpdateEvent {
+    pub app_id: String,
+    pub slug: String,
+    pub status: AgentUpdateStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }

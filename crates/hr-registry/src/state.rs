@@ -13,7 +13,7 @@ use tracing::{error, info, warn};
 
 use hr_ca::CertificateAuthority;
 use hr_common::config::EnvConfig;
-use hr_common::events::{AgentMetricsEvent, AgentStatusEvent, EventBus};
+use hr_common::events::{AgentMetricsEvent, AgentStatusEvent, AgentUpdateEvent, AgentUpdateStatus, EventBus};
 use hr_dns::AppDnsStore;
 use hr_firewall::config::FirewallRule;
 use hr_firewall::FirewallEngine;
@@ -21,7 +21,11 @@ use hr_lxd::LxdClient;
 
 use crate::cloudflare;
 use crate::protocol::{AgentMetrics, AgentRoute, PowerPolicy, RegistryMessage, ServiceAction, ServiceState, ServiceType};
-use crate::types::*;
+use crate::types::{
+    AgentNotifyResult, AgentSkipResult, AgentStatus, AgentUpdateStatusInfo,
+    Application, CreateApplicationRequest, RegistryState, UpdateApplicationRequest,
+    UpdateBatchResult, UpdateStatusResult,
+};
 
 /// An active agent connection (in-memory only).
 struct AgentConnection {
@@ -1132,6 +1136,234 @@ WantedBy=multi-user.target
             action: action.to_string(),
             success: true,
         });
+    }
+
+    // ── Agent Update ────────────────────────────────────────────────
+
+    /// Trigger update to specified agents (or all connected if None).
+    /// Sends `UpdateAvailable` message to each agent with the current binary info.
+    pub async fn trigger_update(
+        &self,
+        agent_ids: Option<Vec<String>>,
+    ) -> Result<UpdateBatchResult> {
+        use ring::digest::{Context, SHA256};
+        use std::io::Read;
+
+        // Read current binary and compute SHA256
+        let binary_path = Path::new("/opt/homeroute/data/agent-binaries/hr-agent");
+        if !binary_path.exists() {
+            anyhow::bail!("Agent binary not found at {}", binary_path.display());
+        }
+
+        let metadata = std::fs::metadata(binary_path)?;
+        let modified = metadata
+            .modified()
+            .map(|t| {
+                let dt: DateTime<Utc> = t.into();
+                dt.format("%Y%m%d-%H%M%S").to_string()
+            })
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        let mut file = std::fs::File::open(binary_path)?;
+        let mut context = Context::new(&SHA256);
+        let mut buffer = [0u8; 8192];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            context.update(&buffer[..count]);
+        }
+        let sha256 = hex::encode(context.finish().as_ref());
+
+        let download_url = format!(
+            "http://10.0.0.254:{}/api/applications/agents/binary",
+            self.env.api_port
+        );
+
+        let state = self.state.read().await;
+        let conns = self.connections.read().await;
+
+        let mut notified = Vec::new();
+        let mut skipped = Vec::new();
+
+        // Determine which apps to target
+        let target_ids: Vec<&str> = match &agent_ids {
+            Some(ids) => ids.iter().map(|s| s.as_str()).collect(),
+            None => conns.keys().map(|s| s.as_str()).collect(),
+        };
+
+        for app in &state.applications {
+            if !target_ids.contains(&app.id.as_str()) {
+                continue;
+            }
+
+            if let Some(conn) = conns.get(&app.id) {
+                let msg = RegistryMessage::UpdateAvailable {
+                    version: modified.clone(),
+                    download_url: download_url.clone(),
+                    sha256: sha256.clone(),
+                };
+
+                if conn.tx.send(msg).await.is_ok() {
+                    notified.push(AgentNotifyResult {
+                        id: app.id.clone(),
+                        slug: app.slug.clone(),
+                        status: "notified".to_string(),
+                    });
+
+                    // Emit event
+                    let _ = self.events.agent_update.send(AgentUpdateEvent {
+                        app_id: app.id.clone(),
+                        slug: app.slug.clone(),
+                        status: AgentUpdateStatus::Notified,
+                        version: Some(modified.clone()),
+                        error: None,
+                    });
+
+                    info!(app = app.slug, version = modified, "Update notification sent");
+                } else {
+                    skipped.push(AgentSkipResult {
+                        id: app.id.clone(),
+                        slug: app.slug.clone(),
+                        reason: "send_failed".to_string(),
+                    });
+                }
+            } else {
+                skipped.push(AgentSkipResult {
+                    id: app.id.clone(),
+                    slug: app.slug.clone(),
+                    reason: "not_connected".to_string(),
+                });
+            }
+        }
+
+        info!(
+            notified = notified.len(),
+            skipped = skipped.len(),
+            version = modified,
+            "Agent update triggered"
+        );
+
+        Ok(UpdateBatchResult {
+            version: modified,
+            sha256,
+            agents_notified: notified,
+            agents_skipped: skipped,
+        })
+    }
+
+    /// Get update status for all agents: whether they're connected with the expected version.
+    pub async fn get_update_status(&self) -> Result<UpdateStatusResult> {
+        use ring::digest::{Context, SHA256};
+        use std::io::Read;
+
+        // Get expected version from current binary
+        let binary_path = Path::new("/opt/homeroute/data/agent-binaries/hr-agent");
+        let expected_version = if binary_path.exists() {
+            std::fs::metadata(binary_path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(|t| {
+                    let dt: DateTime<Utc> = t.into();
+                    dt.format("%Y%m%d-%H%M%S").to_string()
+                })
+                .unwrap_or_else(|| "unknown".to_string())
+        } else {
+            "no_binary".to_string()
+        };
+
+        let state = self.state.read().await;
+        let conns = self.connections.read().await;
+        let now = Utc::now();
+
+        let agents: Vec<AgentUpdateStatusInfo> = state
+            .applications
+            .iter()
+            .map(|app| {
+                let is_connected = conns.contains_key(&app.id);
+                let version_matches = app
+                    .agent_version
+                    .as_ref()
+                    .map(|v| v == &expected_version)
+                    .unwrap_or(false);
+                let has_recent_heartbeat = app
+                    .last_heartbeat
+                    .map(|hb| now - hb < chrono::Duration::seconds(90))
+                    .unwrap_or(false);
+
+                let update_status = if !is_connected {
+                    "disconnected"
+                } else if version_matches {
+                    "success"
+                } else {
+                    "pending"
+                };
+
+                AgentUpdateStatusInfo {
+                    id: app.id.clone(),
+                    slug: app.slug.clone(),
+                    container_name: app.container_name.clone(),
+                    status: if is_connected {
+                        "connected"
+                    } else {
+                        "disconnected"
+                    }
+                    .to_string(),
+                    current_version: app.agent_version.clone(),
+                    update_status: update_status.to_string(),
+                    metrics_flowing: is_connected && has_recent_heartbeat,
+                    last_heartbeat: app.last_heartbeat,
+                }
+            })
+            .collect();
+
+        Ok(UpdateStatusResult {
+            expected_version,
+            agents,
+        })
+    }
+
+    /// Fix a failed agent update via LXC exec (fallback mechanism).
+    /// Downloads the binary directly in the container and restarts the agent.
+    pub async fn fix_agent_via_lxc(&self, app_id: &str) -> Result<String> {
+        let (container, slug) = {
+            let state = self.state.read().await;
+            let app = state
+                .applications
+                .iter()
+                .find(|a| a.id == app_id)
+                .ok_or_else(|| anyhow::anyhow!("Application not found: {}", app_id))?;
+            (app.container_name.clone(), app.slug.clone())
+        };
+
+        let api_port = self.env.api_port;
+
+        info!(container = container, slug = slug, "Fixing agent via LXC exec");
+
+        // Download new binary directly in the container and restart
+        let download_cmd = format!(
+            "curl -fsSL http://10.0.0.254:{}/api/applications/agents/binary -o /usr/local/bin/hr-agent.new && \
+             chmod +x /usr/local/bin/hr-agent.new && \
+             mv /usr/local/bin/hr-agent.new /usr/local/bin/hr-agent && \
+             systemctl restart hr-agent",
+            api_port
+        );
+
+        let output = LxdClient::exec(&container, &["bash", "-c", &download_cmd]).await?;
+
+        info!(container = container, "Agent fixed via LXC exec");
+
+        // Emit event
+        let _ = self.events.agent_update.send(AgentUpdateEvent {
+            app_id: app_id.to_string(),
+            slug: slug.to_string(),
+            status: AgentUpdateStatus::Notified,
+            version: None,
+            error: None,
+        });
+
+        Ok(output)
     }
 
     /// Persist state to disk (atomic write).
