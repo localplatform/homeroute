@@ -103,6 +103,14 @@ export const updateApplication = (id, updates) => api.put(`/applications/${id}`,
 export const deleteApplication = (id) => api.delete(`/applications/${id}`);
 export const toggleApplication = (id, enabled) => api.post(`/applications/${id}/toggle`, { enabled });
 
+// Application Service Control (powersave)
+export const startApplicationService = (appId, serviceType) =>
+  api.post(`/applications/${appId}/services/${serviceType}/start`);
+export const stopApplicationService = (appId, serviceType) =>
+  api.post(`/applications/${appId}/services/${serviceType}/stop`);
+export const updateApplicationPowerPolicy = (appId, policy) =>
+  api.put(`/applications/${appId}/power-policy`, policy);
+
 // Rust Proxy
 export const getRustProxyStatus = () => api.get('/rust-proxy/status');
 export const reloadRustProxy = () => api.post('/rust-proxy/reload');

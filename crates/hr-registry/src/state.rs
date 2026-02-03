@@ -13,14 +13,14 @@ use tracing::{error, info, warn};
 
 use hr_ca::CertificateAuthority;
 use hr_common::config::EnvConfig;
-use hr_common::events::{AgentStatusEvent, EventBus};
+use hr_common::events::{AgentMetricsEvent, AgentStatusEvent, EventBus};
 use hr_dns::AppDnsStore;
 use hr_firewall::config::FirewallRule;
 use hr_firewall::FirewallEngine;
 use hr_lxd::LxdClient;
 
 use crate::cloudflare;
-use crate::protocol::{AgentRoute, RegistryMessage};
+use crate::protocol::{AgentMetrics, AgentRoute, PowerPolicy, RegistryMessage, ServiceAction, ServiceState, ServiceType};
 use crate::types::*;
 
 /// An active agent connection (in-memory only).
@@ -118,6 +118,9 @@ impl AgentRegistry {
             frontend: req.frontend,
             apis: req.apis,
             code_server_enabled: req.code_server_enabled,
+            services: req.services,
+            power_policy: req.power_policy,
+            metrics: None,
             cert_ids: vec![],
             cloudflare_record_ids: vec![],
         };
@@ -242,6 +245,12 @@ impl AgentRegistry {
         }
         if let Some(code_server_enabled) = req.code_server_enabled {
             app.code_server_enabled = code_server_enabled;
+        }
+        if let Some(services) = req.services {
+            app.services = services;
+        }
+        if let Some(power_policy) = req.power_policy {
+            app.power_policy = power_policy;
         }
 
         let app = app.clone();
@@ -689,7 +698,7 @@ impl AgentRegistry {
         emit("Configuration de l'agent...");
         let api_port = self.env.api_port;
         let config_content = format!(
-            r#"homeroute_address = "fd00:cafe::1"
+            r#"homeroute_address = "10.0.0.254"
 homeroute_port = {api_port}
 token = "{token}"
 service_name = "{service_name}"
@@ -757,13 +766,14 @@ WantedBy=multi-user.target
         LxdClient::push_file(container, &tmp_cs_config, "root/.config/code-server/config.yaml").await?;
         let _ = tokio::fs::remove_file(&tmp_cs_config).await;
 
-        // VS Code settings: dark theme, disable built-in AI features
+        // VS Code settings: dark theme, disable built-in AI features, disable auto port forwarding
         LxdClient::exec(container, &["mkdir", "-p", "/root/.local/share/code-server/User"]).await?;
         let cs_settings = r#"{
   "workbench.colorTheme": "Default Dark Modern",
   "chat.disableAIFeatures": true,
   "workbench.startupEditor": "none",
-  "telemetry.telemetryLevel": "off"
+  "telemetry.telemetryLevel": "off",
+  "remote.autoForwardPorts": false
 }
 "#;
         let tmp_cs_settings = PathBuf::from(format!("/tmp/cs-settings-{service_name}.json"));
@@ -782,6 +792,12 @@ Type=simple
 ExecStart=/usr/local/bin/code-server --bind-addr 127.0.0.1:13337 /root/workspace
 Restart=always
 RestartSec=5
+Environment=HOME=/root
+
+# Ensure all child processes (extensions, LSP, file watchers) are killed on stop
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target
@@ -791,17 +807,19 @@ WantedBy=multi-user.target
         LxdClient::push_file(container, &tmp_cs_unit, "etc/systemd/system/code-server.service").await?;
         let _ = tokio::fs::remove_file(&tmp_cs_unit).await;
 
-        // One-shot service to install Claude Code extension in the background
-        // (avoids blocking deploy on slow network downloads)
+        // One-shot service to install/update Claude Code extension on every boot
+        // Uninstalls first to ensure latest version is always fetched
         let cs_setup_unit = r#"[Unit]
-Description=code-server extension setup (one-shot)
+Description=code-server Claude Code extension updater
 After=network-online.target code-server.service
 Wants=network-online.target
 
 [Service]
 Type=oneshot
+ExecStartPre=-/usr/local/bin/code-server --uninstall-extension Anthropic.claude-code
 ExecStart=/usr/local/bin/code-server --install-extension Anthropic.claude-code
 RemainAfterExit=true
+Environment=HOME=/root
 
 [Install]
 WantedBy=multi-user.target
@@ -917,7 +935,8 @@ WantedBy=multi-user.target
             .await
             .unwrap_or_default();
 
-        let auth_url = format!("http://[fd00:cafe::1]:{}/api/auth/forward-check", self.env.api_port);
+        let auth_url = format!("http://10.0.0.254:{}/api/auth/forward-check", self.env.api_port);
+        let dashboard_url = format!("https://hr.{}", self.env.base_domain);
 
         // Push full config
         tx.send(RegistryMessage::Config {
@@ -926,6 +945,9 @@ WantedBy=multi-user.target
             routes: agent_routes,
             ca_pem,
             homeroute_auth_url: auth_url,
+            dashboard_url,
+            services: app.services.clone(),
+            power_policy: app.power_policy.clone(),
         })
         .await
         .map_err(|_| anyhow::anyhow!("Failed to send config to agent"))?;
@@ -981,9 +1003,10 @@ WantedBy=multi-user.target
             .unwrap_or_default();
 
         let auth_url = format!(
-            "http://[fd00:cafe::1]:{}/api/auth/forward-check",
+            "http://10.0.0.254:{}/api/auth/forward-check",
             self.env.api_port
         );
+        let dashboard_url = format!("https://hr.{}", self.env.base_domain);
 
         let _ = conn
             .tx
@@ -996,8 +1019,119 @@ WantedBy=multi-user.target
                 routes: agent_routes,
                 ca_pem,
                 homeroute_auth_url: auth_url,
+                dashboard_url,
+                services: app.services.clone(),
+                power_policy: app.power_policy.clone(),
             })
             .await;
+    }
+
+    // ── Service control & metrics ──────────────────────────────────
+
+    /// Send a service start/stop command to a connected agent.
+    pub async fn send_service_command(
+        &self,
+        app_id: &str,
+        service_type: ServiceType,
+        action: ServiceAction,
+    ) -> Result<bool> {
+        let conns = self.connections.read().await;
+        let Some(conn) = conns.get(app_id) else {
+            return Ok(false);
+        };
+
+        conn.tx
+            .send(RegistryMessage::ServiceCommand {
+                service_type,
+                action,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("Failed to send command to agent"))?;
+
+        info!(
+            app_id,
+            service_type = ?service_type,
+            action = ?action,
+            "Service command sent to agent"
+        );
+        Ok(true)
+    }
+
+    /// Update power policy for an application and push to connected agent.
+    pub async fn update_power_policy(&self, app_id: &str, policy: PowerPolicy) -> Result<bool> {
+        // Update in state
+        {
+            let mut state = self.state.write().await;
+            let Some(app) = state.applications.iter_mut().find(|a| a.id == app_id) else {
+                return Ok(false);
+            };
+            app.power_policy = policy.clone();
+        }
+        self.persist().await?;
+
+        // Push to connected agent
+        let conns = self.connections.read().await;
+        if let Some(conn) = conns.get(app_id) {
+            let _ = conn
+                .tx
+                .send(RegistryMessage::PowerPolicyUpdate(policy))
+                .await;
+            info!(app_id, "Power policy update sent to agent");
+        }
+
+        Ok(true)
+    }
+
+    /// Handle metrics received from an agent: update in-memory state and broadcast to WebSocket.
+    pub async fn handle_metrics(&self, app_id: &str, metrics: AgentMetrics) {
+        // Convert ServiceState to string for broadcast
+        let code_server_status = format!("{:?}", metrics.code_server_status).to_lowercase();
+        let app_status = format!("{:?}", metrics.app_status).to_lowercase();
+        let db_status = format!("{:?}", metrics.db_status).to_lowercase();
+
+        // Update in-memory metrics (not persisted)
+        {
+            let mut state = self.state.write().await;
+            if let Some(app) = state.applications.iter_mut().find(|a| a.id == app_id) {
+                app.metrics = Some(metrics.clone());
+            }
+        }
+
+        // Broadcast to WebSocket
+        let _ = self.events.agent_metrics.send(AgentMetricsEvent {
+            app_id: app_id.to_string(),
+            code_server_status,
+            app_status,
+            db_status,
+            memory_bytes: metrics.memory_bytes,
+            cpu_percent: metrics.cpu_percent,
+            code_server_idle_secs: metrics.code_server_idle_secs,
+            app_idle_secs: metrics.app_idle_secs,
+        });
+    }
+
+    /// Handle service state changed event from agent (broadcasts to WebSocket).
+    pub fn handle_service_state_changed(
+        &self,
+        app_id: &str,
+        service_type: ServiceType,
+        new_state: ServiceState,
+    ) {
+        use hr_common::events::ServiceCommandEvent;
+
+        let action = match new_state {
+            ServiceState::Running => "started",
+            ServiceState::Stopped | ServiceState::ManuallyOff => "stopped",
+            ServiceState::Starting => "starting",
+            ServiceState::Stopping => "stopping",
+        };
+
+        let _ = self.events.service_command.send(ServiceCommandEvent {
+            app_id: app_id.to_string(),
+            service_type: format!("{:?}", service_type).to_lowercase(),
+            action: action.to_string(),
+            success: true,
+        });
     }
 
     /// Persist state to disk (atomic write).

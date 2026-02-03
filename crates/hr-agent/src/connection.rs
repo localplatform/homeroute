@@ -4,18 +4,20 @@ use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use hr_registry::protocol::{AgentMessage, RegistryMessage};
 
 use crate::config::AgentConfig;
 use crate::ipv6;
 
-/// Connect to HomeRoute, authenticate, and return channels for bidirectional communication.
-/// Returns (config_rx, shutdown_rx) — config_rx receives RegistryMessages, shutdown_rx signals shutdown.
+/// Connect to HomeRoute, authenticate, and handle bidirectional communication.
+/// - `registry_tx`: Channel to send received RegistryMessages to the main loop.
+/// - `outbound_rx`: Channel to receive AgentMessages to send to the registry (metrics, etc.).
 pub async fn run_connection(
     config: &AgentConfig,
     registry_tx: mpsc::Sender<RegistryMessage>,
+    mut outbound_rx: mpsc::Receiver<AgentMessage>,
 ) -> Result<()> {
     let url = config.ws_url();
     info!(url, "Connecting to HomeRoute registry");
@@ -116,6 +118,21 @@ pub async fn run_connection(
                         break;
                     }
                     _ => {}
+                }
+            }
+
+            // Outbound messages (metrics, service state changes, etc.)
+            Some(agent_msg) = outbound_rx.recv() => {
+                let json = match serde_json::to_string(&agent_msg) {
+                    Ok(j) => j,
+                    Err(e) => {
+                        warn!("Failed to serialize agent message: {e}");
+                        continue;
+                    }
+                };
+                if ws_sink.send(Message::Text(json.into())).await.is_err() {
+                    error!("Failed to send agent message");
+                    break;
                 }
             }
 

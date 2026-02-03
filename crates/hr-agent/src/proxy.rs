@@ -1,5 +1,6 @@
 //! HTTPS reverse proxy with SNI-based multi-domain routing.
 //! Each domain gets its own certificate and routes to a specific localhost port.
+//! Includes powersave integration: wake-on-request and activity tracking.
 
 use std::collections::HashMap;
 use std::io::BufReader;
@@ -18,7 +19,16 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info, warn};
 
-use hr_registry::protocol::AgentRoute;
+use hr_registry::protocol::{AgentRoute, ServiceType};
+
+use crate::pages;
+use crate::powersave::{PowersaveManager, WakeResult};
+
+/// Interval for WebSocket keep-alive activity recording.
+const WS_KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Port that code-server listens on.
+const CODE_SERVER_PORT: u16 = 13337;
 
 /// Route configuration for a single domain
 #[derive(Clone)]
@@ -26,6 +36,8 @@ struct RouteEntry {
     target_port: u16,
     auth_required: bool,
     allowed_groups: Vec<String>,
+    /// Service type for powersave (determined by port).
+    service_type: ServiceType,
 }
 
 /// SNI resolver for the agent's multi-domain TLS
@@ -66,6 +78,12 @@ impl ResolvesServerCert for AgentSniResolver {
 pub struct ProxyState {
     routes: RwLock<HashMap<String, RouteEntry>>,
     auth_url: RwLock<String>,
+    /// Optional powersave manager for wake-on-request.
+    powersave: RwLock<Option<Arc<PowersaveManager>>>,
+    /// Dashboard URL for down page links.
+    dashboard_url: RwLock<String>,
+    /// App ID (service_name/slug) for filtering WebSocket metrics.
+    app_id: RwLock<String>,
 }
 
 impl ProxyState {
@@ -73,6 +91,9 @@ impl ProxyState {
         Self {
             routes: RwLock::new(HashMap::new()),
             auth_url: RwLock::new(String::new()),
+            powersave: RwLock::new(None),
+            dashboard_url: RwLock::new(String::new()),
+            app_id: RwLock::new(String::new()),
         }
     }
 
@@ -83,6 +104,33 @@ impl ProxyState {
 
     fn auth_url(&self) -> String {
         self.auth_url.read().unwrap().clone()
+    }
+
+    fn powersave(&self) -> Option<Arc<PowersaveManager>> {
+        self.powersave.read().unwrap().clone()
+    }
+
+    fn dashboard_url(&self) -> String {
+        self.dashboard_url.read().unwrap().clone()
+    }
+
+    fn app_id(&self) -> String {
+        self.app_id.read().unwrap().clone()
+    }
+
+    /// Set the powersave manager.
+    pub fn set_powersave(&self, pm: Arc<PowersaveManager>) {
+        *self.powersave.write().unwrap() = Some(pm);
+    }
+
+    /// Set the dashboard URL.
+    pub fn set_dashboard_url(&self, url: String) {
+        *self.dashboard_url.write().unwrap() = url;
+    }
+
+    /// Set the app ID (service_name/slug).
+    pub fn set_app_id(&self, id: String) {
+        *self.app_id.write().unwrap() = id;
     }
 }
 
@@ -128,16 +176,24 @@ impl AgentProxy {
             self.resolver
                 .insert(route.domain.clone(), Arc::new(cert_key));
 
+            // Determine service type based on port
+            let service_type = if route.target_port == CODE_SERVER_PORT {
+                ServiceType::CodeServer
+            } else {
+                ServiceType::App
+            };
+
             route_map.insert(
                 route.domain.clone(),
                 RouteEntry {
                     target_port: route.target_port,
                     auth_required: route.auth_required,
                     allowed_groups: route.allowed_groups.clone(),
+                    service_type,
                 },
             );
 
-            info!(domain = route.domain, port = route.target_port, "Route configured");
+            info!(domain = route.domain, port = route.target_port, service_type = ?service_type, "Route configured");
         }
 
         *self.state.routes.write().unwrap() = route_map;
@@ -145,6 +201,11 @@ impl AgentProxy {
 
         info!(count = routes.len(), "Proxy routes updated");
         Ok(())
+    }
+
+    /// Get a reference to the proxy state for external configuration.
+    pub fn state(&self) -> &Arc<ProxyState> {
+        &self.state
     }
 
     /// Spawn the proxy listener in a background task. Returns the JoinHandle.
@@ -268,6 +329,11 @@ async fn handle_request(
 ) -> hyper::Response<http_body_util::combinators::BoxBody<hyper::body::Bytes, std::convert::Infallible>> {
     use http_body_util::{BodyExt, Empty, Full};
 
+    // Internal status endpoint for loading page polling
+    if req.uri().path() == "/_hr/status" {
+        return handle_status_request(&state).await;
+    }
+
     let host = req
         .headers()
         .get("host")
@@ -287,6 +353,52 @@ async fn handle_request(
                 .unwrap();
         }
     };
+
+    // Check powersave state and wake if needed
+    if let Some(powersave) = state.powersave() {
+        // Only show loading/down pages for document requests (HTML navigation)
+        // For assets (JS/CSS/images), just proxy through and let them fail normally
+        let is_document_request = req
+            .headers()
+            .get("accept")
+            .and_then(|v| v.to_str().ok())
+            .map(|accept| accept.contains("text/html"))
+            .unwrap_or(false);
+
+        let service_name = match route.service_type {
+            ServiceType::CodeServer => "Code Server (IDE)",
+            ServiceType::App => "Application",
+            ServiceType::Db => "Database",
+        };
+
+        let dashboard = state.dashboard_url();
+        let app_id = state.app_id();
+        match powersave.ensure_running(route.service_type, route.target_port).await {
+            WakeResult::AlreadyRunning => {
+                // Continue to proxy
+            }
+            WakeResult::Starting => {
+                if is_document_request {
+                    // Return loading page with WebSocket connection to dashboard
+                    return pages::loading_response(service_name, &dashboard, &app_id);
+                }
+                // For non-document requests, continue to proxy (will fail with 502 if backend not ready)
+            }
+            WakeResult::ManuallyOff => {
+                if is_document_request {
+                    // Return down page
+                    return pages::down_response(service_name, &dashboard);
+                }
+                // For non-document requests, return 503
+                return hyper::Response::builder()
+                    .status(503)
+                    .body(Full::new(hyper::body::Bytes::from("Service unavailable"))
+                        .map_err(|never: std::convert::Infallible| match never {})
+                        .boxed())
+                    .unwrap();
+            }
+        }
+    }
 
     // Forward-auth check
     if route.auth_required {
@@ -349,7 +461,14 @@ async fn handle_request(
     let target_url = format!("http://127.0.0.1:{}{}", route.target_port, &path_and_query);
 
     if is_websocket {
-        return handle_websocket_upgrade(req, route.target_port, &path_and_query).await;
+        return handle_websocket_upgrade(
+            req,
+            route.target_port,
+            &path_and_query,
+            state.powersave(),
+            route.service_type,
+        )
+        .await;
     }
 
     // Normal HTTP proxy
@@ -376,7 +495,33 @@ async fn handle_request(
         .build_http();
 
     match client.request(req).await {
-        Ok(resp) => resp.map(|b| b.map_err(|_| unreachable!()).boxed()),
+        Ok(resp) => {
+            // Add anti-cache headers for HTML responses to ensure fresh content
+            // when services restart after being stopped
+            let is_html = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .map(|ct| ct.contains("text/html"))
+                .unwrap_or(false);
+
+            if is_html {
+                let (mut parts, body) = resp.into_parts();
+                parts.headers.insert(
+                    "Cache-Control",
+                    hyper::header::HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+                );
+                parts
+                    .headers
+                    .insert("Pragma", hyper::header::HeaderValue::from_static("no-cache"));
+                parts
+                    .headers
+                    .insert("Expires", hyper::header::HeaderValue::from_static("0"));
+                hyper::Response::from_parts(parts, body.map_err(|_| unreachable!()).boxed())
+            } else {
+                resp.map(|b| b.map_err(|_| unreachable!()).boxed())
+            }
+        }
         Err(e) => {
             error!(target_url, "Upstream error: {e}");
             hyper::Response::builder()
@@ -394,6 +539,8 @@ async fn handle_websocket_upgrade(
     mut req: hyper::Request<hyper::body::Incoming>,
     target_port: u16,
     path_and_query: &str,
+    powersave: Option<Arc<PowersaveManager>>,
+    service_type: ServiceType,
 ) -> hyper::Response<http_body_util::combinators::BoxBody<hyper::body::Bytes, std::convert::Infallible>> {
     use http_body_util::{BodyExt, Empty, Full};
     use hyper::client::conn::http1::Builder;
@@ -481,6 +628,33 @@ async fn handle_websocket_upgrade(
         .body(Empty::new().map_err(|never| match never {}).boxed())
         .unwrap();
 
+    // Notification to signal when the WebSocket connection is closed
+    let shutdown = Arc::new(tokio::sync::Notify::new());
+
+    // Spawn keep-alive task that records activity periodically
+    if let Some(pm) = powersave {
+        let pm_clone = pm.clone();
+        let shutdown_clone = shutdown.clone();
+        debug!(service_type = ?service_type, "WebSocket keep-alive task started");
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = shutdown_clone.notified() => {
+                        break;
+                    }
+                    _ = tokio::time::sleep(WS_KEEPALIVE_INTERVAL) => {
+                        debug!(service_type = ?service_type, "WebSocket keep-alive: recording activity");
+                        pm_clone.record_activity(service_type);
+                    }
+                }
+            }
+            debug!(service_type = ?service_type, "WebSocket keep-alive task ended");
+        });
+    } else {
+        warn!(service_type = ?service_type, "WebSocket: no powersave manager, keep-alive disabled");
+    }
+
     tokio::spawn(async move {
         match tokio::try_join!(client_upgrade, backend_upgrade) {
             Ok((client_io, backend_io)) => {
@@ -506,6 +680,8 @@ async fn handle_websocket_upgrade(
                 error!("WebSocket upgrade bridging failed: {e}");
             }
         }
+        // Signal the keep-alive task to stop immediately
+        shutdown.notify_one();
     });
 
     client_response
@@ -579,6 +755,42 @@ async fn forward_auth_check(
         403 => AuthCheckResult::Forbidden,
         status => AuthCheckResult::Error(format!("Unexpected auth status: {status}")),
     }
+}
+
+// ── Internal status endpoint ────────────────────────────────
+
+/// Handle /_hr/status request - returns current service states as JSON.
+async fn handle_status_request(
+    state: &Arc<ProxyState>,
+) -> hyper::Response<http_body_util::combinators::BoxBody<hyper::body::Bytes, std::convert::Infallible>> {
+    use http_body_util::{BodyExt, Full};
+
+    let (code_server_status, app_status, db_status) = if let Some(pm) = state.powersave() {
+        (
+            format!("{:?}", pm.get_state(ServiceType::CodeServer)).to_lowercase(),
+            format!("{:?}", pm.get_state(ServiceType::App)).to_lowercase(),
+            format!("{:?}", pm.get_state(ServiceType::Db)).to_lowercase(),
+        )
+    } else {
+        ("unknown".to_string(), "unknown".to_string(), "unknown".to_string())
+    };
+
+    let json = format!(
+        r#"{{"codeServerStatus":"{}","appStatus":"{}","dbStatus":"{}"}}"#,
+        code_server_status, app_status, db_status
+    );
+
+    hyper::Response::builder()
+        .status(200)
+        .header("Content-Type", "application/json")
+        .header("Cache-Control", "no-cache, no-store, must-revalidate")
+        .header("Access-Control-Allow-Origin", "*")
+        .body(
+            Full::new(hyper::body::Bytes::from(json))
+                .map_err(|never: std::convert::Infallible| match never {})
+                .boxed(),
+        )
+        .unwrap()
 }
 
 // ── Helpers ─────────────────────────────────────────────────

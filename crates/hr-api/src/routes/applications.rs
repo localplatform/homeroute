@@ -9,9 +9,9 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
-use hr_registry::protocol::AgentMessage;
+use hr_registry::protocol::{AgentMessage, PowerPolicy, ServiceAction, ServiceType};
 use hr_registry::types::{CreateApplicationRequest, UpdateApplicationRequest};
 
 use crate::state::ApiState;
@@ -22,6 +22,9 @@ pub fn router() -> Router<ApiState> {
         .route("/{id}", put(update_application).delete(delete_application))
         .route("/{id}/toggle", post(toggle_application))
         .route("/{id}/token", get(regenerate_token))
+        .route("/{id}/services/{service_type}/start", post(start_service))
+        .route("/{id}/services/{service_type}/stop", post(stop_service))
+        .route("/{id}/power-policy", put(update_power_policy))
         .route("/agents/version", get(agent_version))
         .route("/agents/binary", get(agent_binary))
         .route("/agents/ws", get(agent_ws))
@@ -119,6 +122,88 @@ async fn toggle_application(
         Ok(None) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"success": false, "error": "Not found"}))).into_response(),
         Err(e) => {
             error!("Failed to toggle application: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "error": e.to_string()}))).into_response()
+        }
+    }
+}
+
+async fn start_service(
+    State(state): State<ApiState>,
+    Path((id, service_type_str)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let Some(registry) = &state.registry else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"success": false, "error": "Registry not available"}))).into_response();
+    };
+
+    let service_type = match service_type_str.as_str() {
+        "code-server" => ServiceType::CodeServer,
+        "app" => ServiceType::App,
+        "db" => ServiceType::Db,
+        _ => {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"success": false, "error": "Invalid service type"}))).into_response();
+        }
+    };
+
+    match registry.send_service_command(&id, service_type, ServiceAction::Start).await {
+        Ok(true) => {
+            info!(app_id = id, service = service_type_str, "Service start command sent");
+            Json(serde_json::json!({"success": true})).into_response()
+        }
+        Ok(false) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"success": false, "error": "Application not found or not connected"}))).into_response(),
+        Err(e) => {
+            error!("Failed to send start command: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "error": e.to_string()}))).into_response()
+        }
+    }
+}
+
+async fn stop_service(
+    State(state): State<ApiState>,
+    Path((id, service_type_str)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let Some(registry) = &state.registry else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"success": false, "error": "Registry not available"}))).into_response();
+    };
+
+    let service_type = match service_type_str.as_str() {
+        "code-server" => ServiceType::CodeServer,
+        "app" => ServiceType::App,
+        "db" => ServiceType::Db,
+        _ => {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"success": false, "error": "Invalid service type"}))).into_response();
+        }
+    };
+
+    match registry.send_service_command(&id, service_type, ServiceAction::Stop).await {
+        Ok(true) => {
+            info!(app_id = id, service = service_type_str, "Service stop command sent");
+            Json(serde_json::json!({"success": true})).into_response()
+        }
+        Ok(false) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"success": false, "error": "Application not found or not connected"}))).into_response(),
+        Err(e) => {
+            error!("Failed to send stop command: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "error": e.to_string()}))).into_response()
+        }
+    }
+}
+
+async fn update_power_policy(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Json(policy): Json<PowerPolicy>,
+) -> impl IntoResponse {
+    let Some(registry) = &state.registry else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"success": false, "error": "Registry not available"}))).into_response();
+    };
+
+    match registry.update_power_policy(&id, policy).await {
+        Ok(true) => {
+            info!(app_id = id, "Power policy updated");
+            Json(serde_json::json!({"success": true})).into_response()
+        }
+        Ok(false) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"success": false, "error": "Application not found"}))).into_response(),
+        Err(e) => {
+            error!("Failed to update power policy: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "error": e.to_string()}))).into_response()
         }
     }
@@ -334,6 +419,20 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
                             }
                             Ok(AgentMessage::Auth { .. }) => {
                                 // Duplicate auth, ignore
+                            }
+                            Ok(AgentMessage::Metrics(m)) => {
+                                // Forward metrics to registry for storage and broadcast
+                                registry.handle_metrics(&app_id, m).await;
+                            }
+                            Ok(AgentMessage::ServiceStateChanged { service_type, new_state }) => {
+                                info!(
+                                    app_id,
+                                    service_type = ?service_type,
+                                    new_state = ?new_state,
+                                    "Agent reported service state change"
+                                );
+                                // Broadcast to WebSocket clients
+                                registry.handle_service_state_changed(&app_id, service_type, new_state);
                             }
                             Err(e) => {
                                 warn!(app_id, "Invalid agent message: {e}");

@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::net::Ipv6Addr;
 
+use crate::protocol::{AgentMetrics, PowerPolicy, ServiceConfig};
+
 /// Port that code-server listens on inside each container.
 pub const CODE_SERVER_PORT: u16 = 13337;
 
@@ -33,6 +35,16 @@ pub struct Application {
     /// Whether code-server IDE is enabled for this application.
     #[serde(default = "default_true")]
     pub code_server_enabled: bool,
+
+    /// Systemd services to manage for powersave.
+    #[serde(default)]
+    pub services: ServiceConfig,
+    /// Power-saving policy.
+    #[serde(default)]
+    pub power_policy: PowerPolicy,
+    /// Current metrics from agent (volatile, not persisted to disk).
+    #[serde(skip)]
+    pub metrics: Option<AgentMetrics>,
 
     /// Certificate IDs (one per domain: frontend + each API).
     #[serde(default)]
@@ -161,6 +173,10 @@ pub struct CreateApplicationRequest {
     pub apis: Vec<ApiEndpoint>,
     #[serde(default = "default_true")]
     pub code_server_enabled: bool,
+    #[serde(default)]
+    pub services: ServiceConfig,
+    #[serde(default)]
+    pub power_policy: PowerPolicy,
 }
 
 /// Request body for updating an application.
@@ -170,6 +186,8 @@ pub struct UpdateApplicationRequest {
     pub frontend: Option<FrontendEndpoint>,
     pub apis: Option<Vec<ApiEndpoint>>,
     pub code_server_enabled: Option<bool>,
+    pub services: Option<ServiceConfig>,
+    pub power_policy: Option<PowerPolicy>,
 }
 
 #[cfg(test)]
@@ -204,6 +222,9 @@ mod tests {
                 local_only: false,
             }],
             code_server_enabled,
+            services: ServiceConfig::default(),
+            power_policy: PowerPolicy::default(),
+            metrics: None,
             cert_ids: vec![],
             cloudflare_record_ids: vec![],
         }

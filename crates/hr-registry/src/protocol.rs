@@ -1,5 +1,87 @@
 use serde::{Deserialize, Serialize};
 
+// ── Shared Types ────────────────────────────────────────────────
+
+/// State of a managed service (code-server, app, or db).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceState {
+    /// Service is running normally.
+    Running,
+    /// Service is stopped (auto-stopped due to idle or never started).
+    Stopped,
+    /// Service is currently starting.
+    Starting,
+    /// Service is currently stopping.
+    Stopping,
+    /// Service was manually stopped by user (no auto-wake).
+    ManuallyOff,
+}
+
+impl Default for ServiceState {
+    fn default() -> Self {
+        Self::Stopped
+    }
+}
+
+/// Type of service being managed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceType {
+    CodeServer,
+    App,
+    Db,
+}
+
+/// Action to perform on a service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceAction {
+    Start,
+    Stop,
+}
+
+/// Configuration of which systemd services to manage.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ServiceConfig {
+    /// App service units (e.g., ["myapp.service"]).
+    #[serde(default)]
+    pub app: Vec<String>,
+    /// Database service units (e.g., ["postgresql.service"]).
+    #[serde(default)]
+    pub db: Vec<String>,
+}
+
+/// Power-saving policy configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PowerPolicy {
+    /// Idle timeout for code-server in seconds (None = never auto-stop).
+    #[serde(default)]
+    pub code_server_idle_timeout_secs: Option<u64>,
+    /// Idle timeout for app/db services in seconds (None = never auto-stop).
+    #[serde(default)]
+    pub app_idle_timeout_secs: Option<u64>,
+}
+
+/// Metrics reported by the agent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentMetrics {
+    /// code-server service state.
+    pub code_server_status: ServiceState,
+    /// App services combined state.
+    pub app_status: ServiceState,
+    /// Database services combined state.
+    pub db_status: ServiceState,
+    /// RAM used in bytes.
+    pub memory_bytes: u64,
+    /// CPU usage percentage (0.0 - 100.0).
+    pub cpu_percent: f32,
+    /// Seconds since last code-server activity.
+    pub code_server_idle_secs: u64,
+    /// Seconds since last app/db activity.
+    pub app_idle_secs: u64,
+}
+
 // ── Messages from Agent → Registry ──────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +109,15 @@ pub enum AgentMessage {
     /// Agent reports an error.
     #[serde(rename = "error")]
     Error { message: String },
+    /// Agent reports system and service metrics.
+    #[serde(rename = "metrics")]
+    Metrics(AgentMetrics),
+    /// Agent notifies that a service state changed.
+    #[serde(rename = "service_state_changed")]
+    ServiceStateChanged {
+        service_type: ServiceType,
+        new_state: ServiceState,
+    },
 }
 
 // ── Messages from Registry → Agent ──────────────────────────────
@@ -49,6 +140,15 @@ pub enum RegistryMessage {
         routes: Vec<AgentRoute>,
         ca_pem: String,
         homeroute_auth_url: String,
+        /// Public HTTPS dashboard URL for loading pages.
+        #[serde(default)]
+        dashboard_url: String,
+        /// Services to manage for powersave.
+        #[serde(default)]
+        services: ServiceConfig,
+        /// Power-saving policy.
+        #[serde(default)]
+        power_policy: PowerPolicy,
     },
     /// Partial update: IPv6 changed (prefix rotation).
     #[serde(rename = "ipv6_update")]
@@ -66,6 +166,15 @@ pub enum RegistryMessage {
     /// Graceful shutdown request.
     #[serde(rename = "shutdown")]
     Shutdown,
+    /// Update power policy (partial update).
+    #[serde(rename = "power_policy_update")]
+    PowerPolicyUpdate(PowerPolicy),
+    /// Command to start/stop a specific service type.
+    #[serde(rename = "service_command")]
+    ServiceCommand {
+        service_type: ServiceType,
+        action: ServiceAction,
+    },
 }
 
 /// A single route the agent must serve (one per domain).

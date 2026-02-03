@@ -31,9 +31,15 @@ impl AgentConfig {
 
     /// WebSocket URL to connect to HomeRoute registry
     pub fn ws_url(&self) -> String {
+        // IPv6 addresses need brackets, IPv4 addresses don't
+        let host = if self.homeroute_address.contains(':') {
+            format!("[{}]", self.homeroute_address)
+        } else {
+            self.homeroute_address.clone()
+        };
         format!(
-            "ws://[{}]:{}/api/applications/agents/ws",
-            self.homeroute_address, self.homeroute_port
+            "ws://{}:{}/api/applications/agents/ws",
+            host, self.homeroute_port
         )
     }
 }

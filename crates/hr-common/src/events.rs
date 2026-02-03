@@ -17,6 +17,10 @@ pub struct EventBus {
     pub updates: broadcast::Sender<UpdateEvent>,
     /// Agent status change events (registry → websocket)
     pub agent_status: broadcast::Sender<AgentStatusEvent>,
+    /// Agent metrics events (registry → websocket)
+    pub agent_metrics: broadcast::Sender<AgentMetricsEvent>,
+    /// Service command completion events (registry → websocket)
+    pub service_command: broadcast::Sender<ServiceCommandEvent>,
 }
 
 impl EventBus {
@@ -29,6 +33,8 @@ impl EventBus {
             config_changed: broadcast::channel(16).0,
             updates: broadcast::channel(256).0,
             agent_status: broadcast::channel(64).0,
+            agent_metrics: broadcast::channel(64).0,
+            service_command: broadcast::channel(64).0,
         }
     }
 }
@@ -114,4 +120,26 @@ pub enum UpdateEvent {
     UpgradeOutput { line: String },
     UpgradeComplete { upgrade_type: String, success: bool, duration: u64, error: Option<String> },
     UpgradeCancelled,
+}
+
+/// Agent metrics event (registry → websocket for frontend display).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentMetricsEvent {
+    pub app_id: String,
+    pub code_server_status: String,
+    pub app_status: String,
+    pub db_status: String,
+    pub memory_bytes: u64,
+    pub cpu_percent: f32,
+    pub code_server_idle_secs: u64,
+    pub app_idle_secs: u64,
+}
+
+/// Service command completion event (registry → websocket).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceCommandEvent {
+    pub app_id: String,
+    pub service_type: String,
+    pub action: String,
+    pub success: bool,
 }

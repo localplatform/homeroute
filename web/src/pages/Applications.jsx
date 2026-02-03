@@ -22,6 +22,11 @@ import {
   Terminal,
   Code2,
   Loader2,
+  Play,
+  Square,
+  Cpu,
+  HardDrive,
+  Database,
 } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
@@ -33,7 +38,9 @@ import {
   deleteApplication,
   toggleApplication,
   getReverseProxyConfig,
-  getUserGroups
+  getUserGroups,
+  startApplicationService,
+  stopApplicationService,
 } from '../api/client';
 
 const STATUS_BADGES = {
@@ -81,6 +88,9 @@ function Applications() {
 
   // Edit form
   const [editForm, setEditForm] = useState(null);
+
+  // Agent metrics state: { [appId]: { codeServerStatus, appStatus, dbStatus, memoryBytes, cpuPercent, ... } }
+  const [appMetrics, setAppMetrics] = useState({});
 
   // WebSocket for real-time updates
   const wsRef = useRef(null);
@@ -135,6 +145,22 @@ function Applications() {
                 : app
             );
           });
+        } else if (msg.type === 'agent:metrics') {
+          // Update agent metrics for an application
+          const { appId, codeServerStatus, appStatus, dbStatus, memoryBytes, cpuPercent, codeServerIdleSecs, appIdleSecs } = msg.data;
+          setAppMetrics(prev => ({
+            ...prev,
+            [appId]: { codeServerStatus, appStatus, dbStatus, memoryBytes, cpuPercent, codeServerIdleSecs, appIdleSecs }
+          }));
+        } else if (msg.type === 'agent:service-command') {
+          // Service command completed
+          const { serviceType, action, success } = msg.data;
+          if (success) {
+            setMessage({
+              type: 'success',
+              text: `${serviceType} ${action}`
+            });
+          }
         }
       } catch {}
     };
@@ -227,6 +253,9 @@ function Applications() {
     if (!editForm) return;
     setSaving(true);
     try {
+      // Parse comma-separated services into arrays
+      const parseServices = (str) => str ? str.split(',').map(s => s.trim()).filter(Boolean) : [];
+
       const payload = {
         name: editForm.name,
         frontend: {
@@ -243,6 +272,18 @@ function Applications() {
           local_only: a.local_only || false,
         })),
         code_server_enabled: editForm.code_server_enabled,
+        services: {
+          app: parseServices(editForm.services?.app),
+          db: parseServices(editForm.services?.db),
+        },
+        power_policy: {
+          code_server_idle_timeout_secs: editForm.powerPolicy?.codeServerTimeoutMins
+            ? editForm.powerPolicy.codeServerTimeoutMins * 60
+            : null,
+          app_idle_timeout_secs: editForm.powerPolicy?.appTimeoutMins
+            ? editForm.powerPolicy.appTimeoutMins * 60
+            : null,
+        },
       };
 
       const res = await updateApplication(editingApp.id, payload);
@@ -294,6 +335,14 @@ function Applications() {
       frontend: { ...app.frontend, target_port: String(app.frontend.target_port) },
       apis: (app.apis || []).map(a => ({ ...a, target_port: String(a.target_port) })),
       code_server_enabled: app.code_server_enabled !== false,
+      services: {
+        app: (app.services?.app || []).join(', '),
+        db: (app.services?.db || []).join(', '),
+      },
+      powerPolicy: {
+        codeServerTimeoutMins: Math.floor((app.power_policy?.code_server_idle_timeout_secs || 0) / 60),
+        appTimeoutMins: Math.floor((app.power_policy?.app_idle_timeout_secs || 0) / 60),
+      },
     });
     setShowEditModal(true);
   }
@@ -305,6 +354,39 @@ function Applications() {
     } catch {
       setMessage({ type: 'error', text: 'Echec de la copie' });
     }
+  }
+
+  async function handleServiceStart(appId, serviceType) {
+    try {
+      const res = await startApplicationService(appId, serviceType);
+      if (!res.data.success) {
+        setMessage({ type: 'error', text: res.data.error || 'Erreur' });
+      }
+      // Success notification will come via WebSocket
+    } catch {
+      setMessage({ type: 'error', text: 'Erreur de connexion' });
+    }
+  }
+
+  async function handleServiceStop(appId, serviceType) {
+    try {
+      const res = await stopApplicationService(appId, serviceType);
+      if (!res.data.success) {
+        setMessage({ type: 'error', text: res.data.error || 'Erreur' });
+      }
+      // Success notification will come via WebSocket
+    } catch {
+      setMessage({ type: 'error', text: 'Erreur de connexion' });
+    }
+  }
+
+  // Format bytes to human readable
+  function formatBytes(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
   }
 
   if (loading) {
@@ -355,196 +437,218 @@ function Applications() {
         </Card>
       </div>
 
-      {/* Applications List */}
-      <div className="space-y-px">
+      {/* Applications Table */}
+      <Card>
         {applications.length === 0 ? (
-          <Card>
-            <div className="text-center py-8 text-gray-500">
-              <Boxes className="w-12 h-12 mx-auto mb-2 opacity-50" />
-              <p>Aucune application</p>
-              <p className="text-xs mt-2">Creez une application pour deployer un conteneur LXC avec un agent</p>
-            </div>
-          </Card>
+          <div className="text-center py-8 text-gray-500">
+            <Boxes className="w-12 h-12 mx-auto mb-2 opacity-50" />
+            <p>Aucune application</p>
+            <p className="text-xs mt-2">Creez une application pour deployer un conteneur LXC avec un agent</p>
+          </div>
         ) : (
-          applications.map(app => {
-            const isDeploying = app.status === 'deploying';
-            return (
-            <Card key={app.id}>
-              {isDeploying ? (
-                /* ── Deploying state: animated provisioning card ── */
-                <div className="relative overflow-hidden">
-                  {/* Animated gradient bar */}
-                  <div className="absolute inset-x-0 top-0 h-0.5">
-                    <div className="h-full w-full bg-gradient-to-r from-transparent via-blue-500 to-transparent animate-shimmer" style={{ backgroundSize: '200% 100%' }} />
-                  </div>
-                  <div className="flex items-center gap-4">
-                    {/* Animated icon */}
-                    <div className="relative flex-shrink-0">
-                      <div className="w-12 h-12 rounded-lg bg-blue-900/30 border border-blue-800/50 flex items-center justify-center">
-                        <Loader2 className="w-6 h-6 text-blue-400 animate-spin" />
-                      </div>
-                      <div className="absolute -inset-1 rounded-lg bg-blue-500/10 animate-pulse" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-3 mb-1">
-                        <h3 className="text-lg font-semibold truncate">{app.name}</h3>
-                        <span className="text-xs px-2 py-0.5 text-blue-400 bg-blue-900/30 font-medium">
-                          Provisionnement
-                        </span>
-                      </div>
-                      <p className="text-sm text-blue-300/80 font-mono truncate">
-                        {app._deployMessage || 'Demarrage...'}
-                      </p>
-                      <div className="flex items-center gap-3 mt-2 text-xs text-gray-500">
-                        <span className="flex items-center gap-1">
-                          <Container className="w-3 h-3" />
-                          {app.container_name}
-                        </span>
-                        <span className="font-mono">{app.slug}.{baseDomain}</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                /* ── Normal state: full app card ── */
-                <div className="flex items-start justify-between gap-4">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-3 mb-2">
-                      <h3 className="text-lg font-semibold truncate">{app.name}</h3>
-                      <StatusBadge status={app.status} />
-                      {!app.enabled && (
-                        <span className="text-xs text-gray-500 bg-gray-800 px-2 py-0.5">Desactive</span>
-                      )}
-                    </div>
-
-                    {/* Domains */}
-                    <div className="space-y-1 mb-3">
-                      <div className="flex items-center gap-2 text-sm">
-                        <Globe className="w-3.5 h-3.5 text-blue-400" />
-                        <a
-                          href={`https://${app.slug}.${baseDomain}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="font-mono text-blue-400 hover:underline"
-                        >
-                          {app.slug}.{baseDomain}
-                        </a>
-                        <span className="text-gray-600">:{app.frontend.target_port}</span>
-                        {app.frontend.auth_required && (
-                          <span className="flex items-center gap-1 text-xs text-purple-400 bg-purple-900/30 px-1.5 py-0.5">
-                            <Key className="w-3 h-3" /> Auth
-                          </span>
-                        )}
-                        {app.frontend.local_only && (
-                          <span className="flex items-center gap-1 text-xs text-yellow-400 bg-yellow-900/30 px-1.5 py-0.5">
-                            <Shield className="w-3 h-3" /> Local
-                          </span>
-                        )}
-                      </div>
-                      {(app.apis || []).map((api, i) => (
-                        <div key={i} className="flex items-center gap-2 text-sm">
-                          <Server className="w-3.5 h-3.5 text-green-400" />
-                          <a
-                            href={`https://${app.slug}-${api.slug}.${baseDomain}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="font-mono text-green-400 hover:underline"
-                          >
-                            {app.slug}-{api.slug}.{baseDomain}
-                          </a>
-                          <span className="text-gray-600">:{api.target_port}</span>
-                          {api.auth_required && (
-                            <span className="flex items-center gap-1 text-xs text-purple-400 bg-purple-900/30 px-1.5 py-0.5">
-                              <Key className="w-3 h-3" /> Auth
-                            </span>
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="text-xs text-gray-500 border-b border-gray-700">
+                  <th className="text-left py-2 px-3 font-medium">Application</th>
+                  <th className="text-left py-2 px-3 font-medium">Status</th>
+                  <th className="text-left py-2 px-3 font-medium">Services</th>
+                  <th className="text-right py-2 px-3 font-medium">CPU</th>
+                  <th className="text-right py-2 px-3 font-medium">RAM</th>
+                  <th className="text-right py-2 px-3 font-medium">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {applications.map(app => {
+                  const isDeploying = app.status === 'deploying';
+                  const metrics = appMetrics[app.id];
+                  return (
+                    <tr key={app.id} className="border-b border-gray-800 hover:bg-gray-800/30">
+                      {/* Application info */}
+                      <td className="py-3 px-3">
+                        <div className="flex items-center gap-2">
+                          {isDeploying ? (
+                            <Loader2 className="w-4 h-4 text-blue-400 animate-spin flex-shrink-0" />
+                          ) : (
+                            <Container className="w-4 h-4 text-blue-400 flex-shrink-0" />
                           )}
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="font-medium truncate">{app.name}</span>
+                              {!app.enabled && (
+                                <span className="text-xs text-gray-500 bg-gray-800 px-1.5 py-0.5">off</span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2 text-xs text-gray-500">
+                              <a
+                                href={`https://${app.slug}.${baseDomain}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="font-mono hover:text-blue-400"
+                              >
+                                {app.slug}.{baseDomain}
+                              </a>
+                              {app.frontend.auth_required && <Key className="w-3 h-3 text-purple-400" />}
+                              {app.frontend.local_only && <Shield className="w-3 h-3 text-yellow-400" />}
+                            </div>
+                          </div>
                         </div>
-                      ))}
-                      {app.code_server_enabled !== false && baseDomain && (
-                        <div className="flex items-center gap-2 text-sm">
-                          <Code2 className="w-3.5 h-3.5 text-cyan-400" />
-                          <a
-                            href={`https://${app.slug}.code.${baseDomain}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="font-mono text-cyan-400 hover:underline"
+                      </td>
+
+                      {/* Status */}
+                      <td className="py-3 px-3">
+                        {isDeploying ? (
+                          <div>
+                            <span className="text-xs px-2 py-0.5 text-blue-400 bg-blue-900/30">Deploiement</span>
+                            <p className="text-xs text-gray-500 mt-1 truncate max-w-32">{app._deployMessage}</p>
+                          </div>
+                        ) : (
+                          <StatusBadge status={app.status} />
+                        )}
+                      </td>
+
+                      {/* Services */}
+                      <td className="py-3 px-3">
+                        {!metrics ? (
+                          <span className="text-xs text-gray-600">-</span>
+                        ) : (
+                          <div className="flex items-center gap-2 text-xs">
+                            {/* code-server */}
+                            {app.code_server_enabled !== false && (
+                              <button
+                                onClick={() => metrics.codeServerStatus === 'running'
+                                  ? handleServiceStop(app.id, 'code-server')
+                                  : handleServiceStart(app.id, 'code-server')
+                                }
+                                className={`flex items-center gap-1 px-1.5 py-0.5 transition-colors ${
+                                  metrics.codeServerStatus === 'running'
+                                    ? 'text-green-400 bg-green-900/30 hover:bg-green-900/50'
+                                    : metrics.codeServerStatus === 'starting'
+                                    ? 'text-blue-400 bg-blue-900/30'
+                                    : 'text-gray-400 bg-gray-700/30 hover:bg-gray-700/50'
+                                }`}
+                                title={`code-server: ${metrics.codeServerStatus}`}
+                              >
+                                <Code2 className="w-3 h-3" />
+                                {metrics.codeServerStatus === 'running' ? <Square className="w-2.5 h-2.5" /> : <Play className="w-2.5 h-2.5" />}
+                              </button>
+                            )}
+                            {/* App */}
+                            {(app.services?.app?.length > 0) && (
+                              <button
+                                onClick={() => metrics.appStatus === 'running'
+                                  ? handleServiceStop(app.id, 'app')
+                                  : handleServiceStart(app.id, 'app')
+                                }
+                                className={`flex items-center gap-1 px-1.5 py-0.5 transition-colors ${
+                                  metrics.appStatus === 'running'
+                                    ? 'text-green-400 bg-green-900/30 hover:bg-green-900/50'
+                                    : metrics.appStatus === 'starting'
+                                    ? 'text-blue-400 bg-blue-900/30'
+                                    : 'text-gray-400 bg-gray-700/30 hover:bg-gray-700/50'
+                                }`}
+                                title={`app: ${metrics.appStatus}`}
+                              >
+                                <Server className="w-3 h-3" />
+                                {metrics.appStatus === 'running' ? <Square className="w-2.5 h-2.5" /> : <Play className="w-2.5 h-2.5" />}
+                              </button>
+                            )}
+                            {/* DB */}
+                            {(app.services?.db?.length > 0) && (
+                              <button
+                                onClick={() => metrics.dbStatus === 'running'
+                                  ? handleServiceStop(app.id, 'db')
+                                  : handleServiceStart(app.id, 'db')
+                                }
+                                className={`flex items-center gap-1 px-1.5 py-0.5 transition-colors ${
+                                  metrics.dbStatus === 'running'
+                                    ? 'text-green-400 bg-green-900/30 hover:bg-green-900/50'
+                                    : metrics.dbStatus === 'starting'
+                                    ? 'text-blue-400 bg-blue-900/30'
+                                    : 'text-gray-400 bg-gray-700/30 hover:bg-gray-700/50'
+                                }`}
+                                title={`db: ${metrics.dbStatus}`}
+                              >
+                                <Database className="w-3 h-3" />
+                                {metrics.dbStatus === 'running' ? <Square className="w-2.5 h-2.5" /> : <Play className="w-2.5 h-2.5" />}
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </td>
+
+                      {/* CPU */}
+                      <td className="py-3 px-3 text-right">
+                        <span className={`font-mono text-sm ${
+                          metrics?.cpuPercent > 80 ? 'text-red-400' :
+                          metrics?.cpuPercent > 50 ? 'text-yellow-400' :
+                          metrics?.cpuPercent > 0 ? 'text-green-400' : 'text-gray-600'
+                        }`}>
+                          {metrics?.cpuPercent !== undefined ? `${metrics.cpuPercent.toFixed(1)}%` : '-'}
+                        </span>
+                      </td>
+
+                      {/* RAM */}
+                      <td className="py-3 px-3 text-right">
+                        <span className="font-mono text-sm text-gray-400">
+                          {metrics?.memoryBytes ? formatBytes(metrics.memoryBytes) : '-'}
+                        </span>
+                      </td>
+
+                      {/* Actions */}
+                      <td className="py-3 px-3">
+                        <div className="flex items-center justify-end gap-1">
+                          {app.code_server_enabled !== false && baseDomain && (
+                            <a
+                              href={`https://${app.slug}.code.${baseDomain}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="p-1.5 text-cyan-400 hover:text-cyan-300 hover:bg-cyan-900/30 transition-colors"
+                              title="IDE"
+                            >
+                              <Code2 className="w-4 h-4" />
+                            </a>
+                          )}
+                          <button
+                            onClick={() => setTerminalApp(app)}
+                            className="p-1.5 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-900/30 transition-colors"
+                            title="Terminal"
                           >
-                            {app.slug}.code.{baseDomain}
-                          </a>
-                          <span className="text-gray-600">:13337</span>
-                          <span className="flex items-center gap-1 text-xs text-purple-400 bg-purple-900/30 px-1.5 py-0.5">
-                            <Key className="w-3 h-3" /> Auth
-                          </span>
+                            <Terminal className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => handleToggle(app.id, !app.enabled)}
+                            className={`p-1.5 transition-colors ${
+                              app.enabled ? 'text-green-400 hover:bg-green-900/30' : 'text-gray-500 hover:bg-gray-700/30'
+                            }`}
+                            title={app.enabled ? 'Desactiver' : 'Activer'}
+                          >
+                            <Power className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => openEditModal(app)}
+                            className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 transition-colors"
+                            title="Modifier"
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => handleDelete(app.id, app.name)}
+                            className="p-1.5 text-red-400 hover:text-red-300 hover:bg-red-900/30 transition-colors"
+                            title="Supprimer"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
                         </div>
-                      )}
-                    </div>
-
-                    {/* Info row */}
-                    <div className="flex items-center gap-4 text-xs text-gray-500">
-                      <span className="flex items-center gap-1">
-                        <Container className="w-3 h-3" />
-                        {app.container_name}
-                      </span>
-                      {app.ipv6_address && (
-                        <span className="font-mono">{app.ipv6_address}</span>
-                      )}
-                      {app.agent_version && (
-                        <span>v{app.agent_version}</span>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Actions */}
-                  <div className="flex items-center gap-1 flex-shrink-0">
-                    {app.code_server_enabled !== false && baseDomain && (
-                      <a
-                        href={`https://${app.slug}.code.${baseDomain}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="p-1.5 text-cyan-400 hover:text-cyan-300 hover:bg-cyan-900/30 transition-colors"
-                        title="Ouvrir IDE (code-server)"
-                      >
-                        <Code2 className="w-4 h-4" />
-                      </a>
-                    )}
-                    <button
-                      onClick={() => setTerminalApp(app)}
-                      className="p-1.5 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-900/30 transition-colors"
-                      title="Terminal"
-                    >
-                      <Terminal className="w-4 h-4" />
-                    </button>
-                    <button
-                      onClick={() => handleToggle(app.id, !app.enabled)}
-                      className={`p-1.5 transition-colors ${
-                        app.enabled ? 'text-green-400 bg-green-900/30 hover:bg-green-900/50' : 'text-gray-500 bg-gray-700/30 hover:bg-gray-700/50'
-                      }`}
-                      title={app.enabled ? 'Desactiver' : 'Activer'}
-                    >
-                      <Power className="w-4 h-4" />
-                    </button>
-                    <button
-                      onClick={() => openEditModal(app)}
-                      className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 transition-colors"
-                      title="Modifier"
-                    >
-                      <Pencil className="w-4 h-4" />
-                    </button>
-                    <button
-                      onClick={() => handleDelete(app.id, app.name)}
-                      className="p-1.5 text-red-400 hover:text-red-300 hover:bg-red-900/30 transition-colors"
-                      title="Supprimer"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
-              )}
-            </Card>
-            );
-          })
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
-      </div>
+      </Card>
 
       {/* Create Modal */}
       {showCreateModal && (
@@ -972,6 +1076,78 @@ function Applications() {
                   </div>
                 </div>
               )}
+
+              {/* Systemd Services (powersave) */}
+              <div className="border border-gray-700 p-4">
+                <div className="text-sm font-medium mb-3 flex items-center gap-2">
+                  <Server className="w-4 h-4 text-orange-400" />
+                  Services systemd (powersave)
+                </div>
+                <p className="text-xs text-gray-500 mb-3">
+                  Definir les services systemd a demarrer/arreter. Separez par des virgules.
+                </p>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Services App</label>
+                    <input
+                      type="text"
+                      placeholder="myapp.service, myapp-worker.service"
+                      value={editForm.services?.app || ''}
+                      onChange={e => setEditForm({ ...editForm, services: { ...editForm.services, app: e.target.value } })}
+                      className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 text-sm font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Services DB</label>
+                    <input
+                      type="text"
+                      placeholder="postgresql.service"
+                      value={editForm.services?.db || ''}
+                      onChange={e => setEditForm({ ...editForm, services: { ...editForm.services, db: e.target.value } })}
+                      className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 text-sm font-mono"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Power Policy - Idle Timeouts */}
+              <div className="border border-gray-700 p-4">
+                <div className="text-sm font-medium mb-3 flex items-center gap-2">
+                  <Clock className="w-4 h-4 text-purple-400" />
+                  Powersave - Timeouts d&apos;inactivite
+                </div>
+                <p className="text-xs text-gray-500 mb-3">
+                  Arret automatique apres inactivite. 0 = desactive.
+                </p>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Code-server (minutes)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={editForm.powerPolicy?.codeServerTimeoutMins || 0}
+                      onChange={e => setEditForm({
+                        ...editForm,
+                        powerPolicy: { ...editForm.powerPolicy, codeServerTimeoutMins: parseInt(e.target.value) || 0 }
+                      })}
+                      className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">App/DB (minutes)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={editForm.powerPolicy?.appTimeoutMins || 0}
+                      onChange={e => setEditForm({
+                        ...editForm,
+                        powerPolicy: { ...editForm.powerPolicy, appTimeoutMins: parseInt(e.target.value) || 0 }
+                      })}
+                      className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 text-sm"
+                    />
+                  </div>
+                </div>
+              </div>
             </div>
             <div className="flex justify-end gap-2 mt-6">
               <Button variant="secondary" onClick={() => { setShowEditModal(false); setEditingApp(null); }}>Annuler</Button>

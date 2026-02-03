@@ -1,16 +1,25 @@
 mod config;
 mod connection;
 mod ipv6;
+mod metrics;
+mod pages;
+mod powersave;
 mod proxy;
+mod services;
 mod update;
 
 use std::net::Ipv6Addr;
+use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
-use hr_registry::protocol::RegistryMessage;
+use hr_registry::protocol::{AgentMessage, AgentMetrics, RegistryMessage, ServiceConfig, ServiceState};
+
+use crate::metrics::MetricsCollector;
+use crate::powersave::{PowersaveManager, ServiceStateChange};
+use crate::services::ServiceManager;
 
 const CONFIG_PATH: &str = "/etc/hr-agent.toml";
 const MAX_BACKOFF_SECS: u64 = 60;
@@ -35,12 +44,27 @@ async fn main() -> Result<()> {
     let cfg = config::AgentConfig::load(CONFIG_PATH)?;
     info!(
         service = cfg.service_name,
-        homeroute = format!("[{}]:{}", cfg.homeroute_address, cfg.homeroute_port),
+        homeroute = format!("{}:{}", cfg.homeroute_address, cfg.homeroute_port),
         "Config loaded"
     );
 
     // Create the proxy (not yet listening — needs routes from HomeRoute)
     let mut agent_proxy = proxy::AgentProxy::new()?;
+
+    // Create metrics collector
+    let metrics_collector = Arc::new(MetricsCollector::new());
+
+    // Create service manager with empty config (will be updated from registry)
+    let service_manager = Arc::new(RwLock::new(ServiceManager::new(&ServiceConfig::default())));
+
+    // Create powersave manager
+    let powersave_manager = Arc::new(PowersaveManager::new(Arc::clone(&service_manager)));
+
+    // Connect powersave manager to the proxy for wake-on-request
+    agent_proxy.state().set_powersave(Arc::clone(&powersave_manager));
+
+    // Set app ID for WebSocket metrics filtering
+    agent_proxy.state().set_app_id(cfg.service_name.clone());
 
     // Current assigned IPv6 address (if any)
     let mut current_ipv6: Option<String> = None;
@@ -52,13 +76,63 @@ async fn main() -> Result<()> {
 
     loop {
         let (registry_tx, mut registry_rx) = mpsc::channel::<RegistryMessage>(32);
+        let (outbound_tx, outbound_rx) = mpsc::channel::<AgentMessage>(64);
+
+        // Channel for service state changes (powersave -> main for potential logging)
+        let (state_change_tx, mut state_change_rx) = mpsc::channel::<ServiceStateChange>(16);
 
         info!(backoff_secs = backoff, "Connecting to HomeRoute...");
 
         // Spawn the WebSocket connection in a task so we can process messages concurrently
         let cfg_clone = cfg.clone();
         let mut conn_handle = tokio::spawn(async move {
-            connection::run_connection(&cfg_clone, registry_tx).await
+            connection::run_connection(&cfg_clone, registry_tx, outbound_rx).await
+        });
+
+        // Spawn metrics sender task (1 second interval)
+        let metrics_tx = outbound_tx.clone();
+        let metrics_coll = Arc::clone(&metrics_collector);
+        let powersave_mgr = Arc::clone(&powersave_manager);
+        let metrics_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+
+                // Collect metrics
+                let memory_bytes = metrics_coll.memory_bytes().await;
+                let cpu_percent = metrics_coll.cpu_percent().await;
+
+                // Get service states from powersave manager
+                let code_server_status = powersave_mgr.get_state(hr_registry::protocol::ServiceType::CodeServer);
+                let app_status = powersave_mgr.get_state(hr_registry::protocol::ServiceType::App);
+                let db_status = powersave_mgr.get_state(hr_registry::protocol::ServiceType::Db);
+
+                // Get idle times
+                let code_server_idle_secs = powersave_mgr.idle_secs(hr_registry::protocol::ServiceType::CodeServer);
+                let app_idle_secs = powersave_mgr.idle_secs(hr_registry::protocol::ServiceType::App);
+
+                let metrics = AgentMetrics {
+                    code_server_status,
+                    app_status,
+                    db_status,
+                    memory_bytes,
+                    cpu_percent,
+                    code_server_idle_secs,
+                    app_idle_secs,
+                };
+
+                if metrics_tx.send(AgentMessage::Metrics(metrics)).await.is_err() {
+                    // Channel closed, connection ended
+                    break;
+                }
+            }
+        });
+
+        // Spawn idle checker task
+        let powersave_for_idle = Arc::clone(&powersave_manager);
+        let state_tx_for_idle = state_change_tx.clone();
+        let idle_checker_handle = tokio::spawn(async move {
+            powersave_for_idle.run_idle_checker(state_tx_for_idle).await;
         });
 
         // Process messages while the connection is alive
@@ -94,7 +168,17 @@ async fn main() -> Result<()> {
                                 connected = true;
                                 backoff = INITIAL_BACKOFF_SECS;
                             }
-                            handle_registry_message(&cfg, &mut agent_proxy, &mut current_ipv6, &mut proxy_handle, msg).await;
+                            handle_registry_message(
+                                &cfg,
+                                &mut agent_proxy,
+                                &mut current_ipv6,
+                                &mut proxy_handle,
+                                &service_manager,
+                                &powersave_manager,
+                                &state_change_tx,
+                                &outbound_tx,
+                                msg
+                            ).await;
                         }
                         None => {
                             // Channel closed — connection is done
@@ -102,12 +186,35 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                // Service state changes from powersave
+                Some(change) = state_change_rx.recv() => {
+                    info!(
+                        service_type = ?change.service_type,
+                        new_state = ?change.new_state,
+                        "Service state changed"
+                    );
+                    // Could send ServiceStateChanged message here if needed
+                }
             }
         }
 
+        // Cancel background tasks
+        metrics_handle.abort();
+        idle_checker_handle.abort();
+
         // Drain any remaining messages
         while let Ok(msg) = registry_rx.try_recv() {
-            handle_registry_message(&cfg, &mut agent_proxy, &mut current_ipv6, &mut proxy_handle, msg).await;
+            handle_registry_message(
+                &cfg,
+                &mut agent_proxy,
+                &mut current_ipv6,
+                &mut proxy_handle,
+                &service_manager,
+                &powersave_manager,
+                &state_change_tx,
+                &outbound_tx,
+                msg
+            ).await;
         }
 
         // Wait before reconnecting
@@ -119,11 +226,16 @@ async fn main() -> Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_registry_message(
     cfg: &config::AgentConfig,
     proxy: &mut proxy::AgentProxy,
     current_ipv6: &mut Option<String>,
     proxy_handle: &mut Option<tokio::task::JoinHandle<()>>,
+    service_manager: &Arc<RwLock<ServiceManager>>,
+    powersave_manager: &Arc<PowersaveManager>,
+    state_change_tx: &mpsc::Sender<ServiceStateChange>,
+    outbound_tx: &mpsc::Sender<AgentMessage>,
     msg: RegistryMessage,
 ) {
     match msg {
@@ -131,13 +243,26 @@ async fn handle_registry_message(
             ipv6_address,
             routes,
             homeroute_auth_url,
+            dashboard_url,
+            services,
+            power_policy,
             ..
         } => {
             info!(
                 routes = routes.len(),
                 ipv6 = ipv6_address,
+                dashboard_url = dashboard_url,
                 "Received full config from HomeRoute"
             );
+
+            // Update service manager config
+            {
+                let mut mgr = service_manager.write().unwrap();
+                mgr.update_config(&services);
+            }
+
+            // Update power policy
+            powersave_manager.set_policy(&power_policy);
 
             // Apply IPv6 address
             if !ipv6_address.is_empty() {
@@ -148,6 +273,11 @@ async fn handle_registry_message(
             if let Err(e) = proxy.apply_routes(&routes, &homeroute_auth_url) {
                 error!("Failed to apply routes: {e}");
                 return;
+            }
+
+            // Set dashboard URL for loading/down pages
+            if !dashboard_url.is_empty() {
+                proxy.state().set_dashboard_url(dashboard_url);
             }
 
             // Start or restart the proxy if we have an IPv6 address
@@ -194,6 +324,36 @@ async fn handle_registry_message(
             if let Err(e) = update::apply_update(&download_url, &sha256, &version).await {
                 error!("Auto-update failed: {e}");
             }
+        }
+
+        RegistryMessage::PowerPolicyUpdate(policy) => {
+            info!(
+                code_server_timeout = ?policy.code_server_idle_timeout_secs,
+                app_timeout = ?policy.app_idle_timeout_secs,
+                "Power policy update received"
+            );
+            powersave_manager.set_policy(&policy);
+        }
+
+        RegistryMessage::ServiceCommand { service_type, action } => {
+            info!(
+                service_type = ?service_type,
+                action = ?action,
+                "Service command received"
+            );
+            powersave_manager.handle_command(service_type, action, state_change_tx).await;
+
+            // Wait 1s for service to fully start/stop before notifying registry
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+            // Send state change notification to registry
+            let new_state = powersave_manager.get_state(service_type);
+            let _ = outbound_tx
+                .send(AgentMessage::ServiceStateChanged {
+                    service_type,
+                    new_state,
+                })
+                .await;
         }
     }
 }
@@ -254,4 +414,21 @@ async fn start_proxy(
             error!("Failed to start proxy listener: {e}");
         }
     }
+}
+
+/// Extract base URL from a full URL (e.g., "https://hr.example.com/api/..." -> "https://hr.example.com").
+fn extract_base_url(url: &str) -> Option<String> {
+    // Find scheme separator
+    let scheme_end = url.find("://")?;
+    let after_scheme = &url[scheme_end + 3..];
+
+    // Find end of host (first slash after scheme, or end of string)
+    let host_end = after_scheme.find('/').unwrap_or(after_scheme.len());
+    let host = &after_scheme[..host_end];
+
+    if host.is_empty() {
+        return None;
+    }
+
+    Some(format!("{}://{}", &url[..scheme_end], host))
 }
