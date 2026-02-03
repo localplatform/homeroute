@@ -173,6 +173,9 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    // Shared store for application DNS records (registry ↔ DNS resolver)
+    let app_dns_store: hr_dns::AppDnsStore = Arc::new(RwLock::new(std::collections::HashMap::new()));
+
     let dns_state: hr_dns::SharedDnsState = Arc::new(RwLock::new(DnsState {
         config: dns_dhcp_config.dns.clone(),
         dns_cache,
@@ -183,6 +186,7 @@ async fn main() -> anyhow::Result<()> {
         adblock_enabled: dns_dhcp_config.adblock.enabled,
         adblock_block_response: dns_dhcp_config.adblock.block_response.clone(),
         dns_events: Some(events.dns_traffic.clone()),
+        app_dns_store: app_dns_store.clone(),
     }));
 
     // ── Initialize proxy ───────────────────────────────────────────────
@@ -545,6 +549,7 @@ async fn main() -> anyhow::Result<()> {
         firewall_engine.clone(),
         Arc::new(env.clone()),
         events.clone(),
+        app_dns_store.clone(),
     ));
 
     // Ensure LXD profile exists

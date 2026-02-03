@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 hr-common = { path = "../hr-common" }
 hr-ca = { path = "../hr-ca" }
+hr-dns = { path = "../hr-dns" }
 hr-firewall = { path = "../hr-firewall" }
 hr-lxd = { path = "../hr-lxd" }
 tokio = { workspace = true }

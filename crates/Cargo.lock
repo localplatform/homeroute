@@ -840,6 +840,7 @@ dependencies = [
  "hex",
  "hr-ca",
  "hr-common",
+ "hr-dns",
  "hr-firewall",
  "hr-lxd",
  "rand",

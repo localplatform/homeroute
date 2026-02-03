@@ -14,6 +14,7 @@ use tracing::{error, info, warn};
 use hr_ca::CertificateAuthority;
 use hr_common::config::EnvConfig;
 use hr_common::events::{AgentStatusEvent, EventBus};
+use hr_dns::AppDnsStore;
 use hr_firewall::config::FirewallRule;
 use hr_firewall::FirewallEngine;
 use hr_lxd::LxdClient;
@@ -37,6 +38,8 @@ pub struct AgentRegistry {
     firewall: Option<Arc<FirewallEngine>>,
     env: Arc<EnvConfig>,
     events: Arc<EventBus>,
+    /// Shared DNS store for application domains → IPv6 addresses
+    app_dns_store: AppDnsStore,
 }
 
 impl AgentRegistry {
@@ -47,6 +50,7 @@ impl AgentRegistry {
         firewall: Option<Arc<FirewallEngine>>,
         env: Arc<EnvConfig>,
         events: Arc<EventBus>,
+        app_dns_store: AppDnsStore,
     ) -> Self {
         let state = match std::fs::read_to_string(&state_path) {
             Ok(content) => {
@@ -71,6 +75,7 @@ impl AgentRegistry {
             firewall,
             env,
             events,
+            app_dns_store,
         }
     }
 
@@ -261,6 +266,9 @@ impl AgentRegistry {
             }
         };
 
+        // Remove from DNS store
+        self.remove_app_dns(&app).await;
+
         // Send shutdown to agent if connected
         {
             let conns = self.connections.read().await;
@@ -398,6 +406,14 @@ impl AgentRegistry {
             return Err(e);
         }
 
+        // Update the shared DNS store with app domains → IPv6
+        {
+            let state = self.state.read().await;
+            if let Some(app) = state.applications.iter().find(|a| a.id == app_id) {
+                self.update_app_dns(app).await;
+            }
+        }
+
         self.persist().await?;
         Ok(())
     }
@@ -408,12 +424,22 @@ impl AgentRegistry {
             let mut conns = self.connections.write().await;
             conns.remove(app_id);
         }
+
+        // Remove app domains from DNS store and update status
         {
             let mut state = self.state.write().await;
             if let Some(app) = state.applications.iter_mut().find(|a| a.id == app_id) {
                 app.status = AgentStatus::Disconnected;
+                // Clone app for DNS removal (outside the write lock)
             }
         }
+        {
+            let state = self.state.read().await;
+            if let Some(app) = state.applications.iter().find(|a| a.id == app_id) {
+                self.remove_app_dns(app).await;
+            }
+        }
+
         let _ = self.persist().await;
         info!(app_id, "Agent disconnected");
     }
@@ -524,11 +550,13 @@ impl AgentRegistry {
     /// addresses, updates Cloudflare and firewall, pushes updates to agents.
     pub async fn on_prefix_changed(&self, prefix_str: Option<String>) {
         let Some(prefix_str) = prefix_str else {
-            // Prefix withdrawn — clear all agent addresses
+            // Prefix withdrawn — clear all agent addresses and DNS store
             let mut state = self.state.write().await;
             for app in &mut state.applications {
                 app.ipv6_address = None;
             }
+            // Clear DNS store
+            self.app_dns_store.write().await.clear();
             let _ = self.persist_inner(&state).await;
             return;
         };
@@ -591,6 +619,46 @@ impl AgentRegistry {
         }
 
         let _ = self.persist_inner(&state).await;
+
+        // Update DNS store for all apps with their new IPv6 addresses
+        for app in &state.applications {
+            self.update_app_dns(app).await;
+        }
+    }
+
+    // ── DNS store helpers ────────────────────────────────────────
+
+    /// Update the shared DNS store with an application's domains.
+    /// Called when an agent connects or its IPv6 address changes.
+    async fn update_app_dns(&self, app: &Application) {
+        let Some(ipv6) = app.ipv6_address else {
+            return;
+        };
+        if !app.enabled {
+            return;
+        }
+
+        let base_domain = &self.env.base_domain;
+        let domains = app.domains(base_domain);
+
+        let mut store = self.app_dns_store.write().await;
+        for domain in domains {
+            store.insert(domain.to_lowercase(), ipv6);
+        }
+        info!(app = app.slug, ipv6 = %ipv6, "Updated DNS store with app domains");
+    }
+
+    /// Remove an application's domains from the shared DNS store.
+    /// Called when an agent disconnects or is removed.
+    async fn remove_app_dns(&self, app: &Application) {
+        let base_domain = &self.env.base_domain;
+        let domains = app.domains(base_domain);
+
+        let mut store = self.app_dns_store.write().await;
+        for domain in &domains {
+            store.remove(&domain.to_lowercase());
+        }
+        info!(app = app.slug, "Removed app domains from DNS store");
     }
 
     // ── Internal helpers ────────────────────────────────────────
