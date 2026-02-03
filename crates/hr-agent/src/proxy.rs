@@ -446,6 +446,11 @@ async fn handle_websocket_upgrade(
         .unwrap_or_else(|_| "/".parse().unwrap());
     *req.uri_mut() = target_uri;
 
+    // Set Host header to backend address for code-server compatibility
+    if let Ok(val) = hyper::header::HeaderValue::from_str(&backend_addr) {
+        req.headers_mut().insert("host", val);
+    }
+
     let backend_response = match sender.send_request(req).await {
         Ok(r) => r,
         Err(e) => {
