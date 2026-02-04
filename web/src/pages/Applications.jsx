@@ -380,6 +380,45 @@ function Applications() {
     }
   }
 
+  // Start stack: db first, then app (with delay)
+  async function handleStackStart(appId) {
+    try {
+      // Start DB first
+      await startApplicationService(appId, 'db');
+      // Wait 500ms then start app
+      setTimeout(async () => {
+        await startApplicationService(appId, 'app');
+      }, 500);
+    } catch {
+      setMessage({ type: 'error', text: 'Erreur de connexion' });
+    }
+  }
+
+  // Stop stack: app first, then db (with delay)
+  async function handleStackStop(appId) {
+    try {
+      // Stop app first
+      await stopApplicationService(appId, 'app');
+      // Wait 500ms then stop db
+      setTimeout(async () => {
+        await stopApplicationService(appId, 'db');
+      }, 500);
+    } catch {
+      setMessage({ type: 'error', text: 'Erreur de connexion' });
+    }
+  }
+
+  // Get combined stack status from app and db
+  function getStackStatus(appStatus, dbStatus) {
+    if (appStatus === 'running' && dbStatus === 'running') return 'running';
+    if (appStatus === 'stopped' && dbStatus === 'stopped') return 'stopped';
+    if (appStatus === 'starting' || dbStatus === 'starting') return 'starting';
+    if (appStatus === 'stopping' || dbStatus === 'stopping') return 'stopping';
+    // Mixed state (one running, one stopped) - show as partial
+    if (appStatus === 'running' || dbStatus === 'running') return 'partial';
+    return 'stopped';
+  }
+
   // Format bytes to human readable
   function formatBytes(bytes) {
     if (bytes === 0) return '0 B';
@@ -533,46 +572,33 @@ function Applications() {
                                 {metrics.codeServerStatus === 'running' ? <Square className="w-2.5 h-2.5" /> : <Play className="w-2.5 h-2.5" />}
                               </button>
                             )}
-                            {/* App */}
-                            {(app.services?.app?.length > 0) && (
-                              <button
-                                onClick={() => metrics.appStatus === 'running'
-                                  ? handleServiceStop(app.id, 'app')
-                                  : handleServiceStart(app.id, 'app')
-                                }
-                                className={`flex items-center gap-1 px-1.5 py-0.5 transition-colors ${
-                                  metrics.appStatus === 'running'
-                                    ? 'text-green-400 bg-green-900/30 hover:bg-green-900/50'
-                                    : metrics.appStatus === 'starting'
-                                    ? 'text-blue-400 bg-blue-900/30'
-                                    : 'text-gray-400 bg-gray-700/30 hover:bg-gray-700/50'
-                                }`}
-                                title={`app: ${metrics.appStatus}`}
-                              >
-                                <Server className="w-3 h-3" />
-                                {metrics.appStatus === 'running' ? <Square className="w-2.5 h-2.5" /> : <Play className="w-2.5 h-2.5" />}
-                              </button>
-                            )}
-                            {/* DB */}
-                            {(app.services?.db?.length > 0) && (
-                              <button
-                                onClick={() => metrics.dbStatus === 'running'
-                                  ? handleServiceStop(app.id, 'db')
-                                  : handleServiceStart(app.id, 'db')
-                                }
-                                className={`flex items-center gap-1 px-1.5 py-0.5 transition-colors ${
-                                  metrics.dbStatus === 'running'
-                                    ? 'text-green-400 bg-green-900/30 hover:bg-green-900/50'
-                                    : metrics.dbStatus === 'starting'
-                                    ? 'text-blue-400 bg-blue-900/30'
-                                    : 'text-gray-400 bg-gray-700/30 hover:bg-gray-700/50'
-                                }`}
-                                title={`db: ${metrics.dbStatus}`}
-                              >
-                                <Database className="w-3 h-3" />
-                                {metrics.dbStatus === 'running' ? <Square className="w-2.5 h-2.5" /> : <Play className="w-2.5 h-2.5" />}
-                              </button>
-                            )}
+                            {/* Stack (App + DB combined) */}
+                            {(app.services?.app?.length > 0 || app.services?.db?.length > 0) && (() => {
+                              const stackStatus = getStackStatus(metrics.appStatus, metrics.dbStatus);
+                              const isRunning = stackStatus === 'running' || stackStatus === 'partial';
+                              return (
+                                <button
+                                  onClick={() => isRunning
+                                    ? handleStackStop(app.id)
+                                    : handleStackStart(app.id)
+                                  }
+                                  className={`flex items-center gap-1 px-1.5 py-0.5 transition-colors ${
+                                    stackStatus === 'running'
+                                      ? 'text-green-400 bg-green-900/30 hover:bg-green-900/50'
+                                      : stackStatus === 'partial'
+                                      ? 'text-yellow-400 bg-yellow-900/30 hover:bg-yellow-900/50'
+                                      : stackStatus === 'starting' || stackStatus === 'stopping'
+                                      ? 'text-blue-400 bg-blue-900/30'
+                                      : 'text-gray-400 bg-gray-700/30 hover:bg-gray-700/50'
+                                  }`}
+                                  title={`stack: app=${metrics.appStatus}, db=${metrics.dbStatus}`}
+                                >
+                                  <Server className="w-3 h-3" />
+                                  <Database className="w-3 h-3" />
+                                  {isRunning ? <Square className="w-2.5 h-2.5" /> : <Play className="w-2.5 h-2.5" />}
+                                </button>
+                              );
+                            })()}
                           </div>
                         )}
                       </td>
