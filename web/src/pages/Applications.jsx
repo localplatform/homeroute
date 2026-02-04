@@ -153,12 +153,21 @@ function Applications() {
             [appId]: { codeServerStatus, appStatus, dbStatus, memoryBytes, cpuPercent, codeServerIdleSecs, appIdleSecs }
           }));
         } else if (msg.type === 'agent:service-command') {
-          // Service command completed
-          const { serviceType, action, success } = msg.data;
-          if (success) {
-            setMessage({
-              type: 'success',
-              text: `${serviceType} ${action}`
+          // Service state changed - update metrics immediately for instant UI feedback
+          const { appId, serviceType, action, success } = msg.data;
+          if (success && appId) {
+            // Map action to status: started->running, stopped->stopped, starting->starting, stopping->stopping
+            const statusMap = { started: 'running', stopped: 'stopped', starting: 'starting', stopping: 'stopping' };
+            const newStatus = statusMap[action] || action;
+
+            // Update the correct status field based on serviceType
+            setAppMetrics(prev => {
+              const current = prev[appId] || {};
+              const updated = { ...current };
+              if (serviceType === 'app') updated.appStatus = newStatus;
+              else if (serviceType === 'db') updated.dbStatus = newStatus;
+              else if (serviceType === 'codeserver') updated.codeServerStatus = newStatus;
+              return { ...prev, [appId]: updated };
             });
           }
         }

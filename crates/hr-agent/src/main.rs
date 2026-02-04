@@ -341,17 +341,28 @@ async fn handle_registry_message(
                 action = ?action,
                 "Service command received"
             );
-            powersave_manager.handle_command(service_type, action, state_change_tx).await;
 
-            // Wait 1s for service to fully start/stop before notifying registry
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
-            // Send state change notification to registry
-            let new_state = powersave_manager.get_state(service_type);
+            // Immediately send transitional state (Starting/Stopping) for instant UI feedback
+            let transitional_state = match action {
+                hr_registry::protocol::ServiceAction::Start => ServiceState::Starting,
+                hr_registry::protocol::ServiceAction::Stop => ServiceState::Stopping,
+            };
             let _ = outbound_tx
                 .send(AgentMessage::ServiceStateChanged {
                     service_type,
-                    new_state,
+                    new_state: transitional_state,
+                })
+                .await;
+
+            // Execute the command
+            powersave_manager.handle_command(service_type, action, state_change_tx).await;
+
+            // Send final state after command completes
+            let final_state = powersave_manager.get_state(service_type);
+            let _ = outbound_tx
+                .send(AgentMessage::ServiceStateChanged {
+                    service_type,
+                    new_state: final_state,
                 })
                 .await;
         }
