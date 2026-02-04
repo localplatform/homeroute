@@ -2,7 +2,7 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, Server, Network, Shield, ShieldCheck, Globe, Settings,
   ArrowLeftRight, RefreshCw, Zap, Users, BarChart3, LogOut,
-  User, Power, HardDrive, KeyRound, Boxes
+  User, Power, HardDrive, Lock, Boxes
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
@@ -22,7 +22,7 @@ const navGroups = [
       { to: '/ddns', icon: Globe, label: 'Dynamic DNS' },
       { to: '/reverseproxy', icon: ArrowLeftRight, label: 'Reverse Proxy' },
       { to: '/applications', icon: Boxes, label: 'Applications' },
-      { to: '/ca', icon: KeyRound, label: 'Certificats (CA)' },
+      { to: '/certificates', icon: Lock, label: 'Certificats' },
     ],
   },
   {
