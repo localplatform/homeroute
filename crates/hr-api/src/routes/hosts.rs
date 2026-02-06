@@ -204,8 +204,24 @@ async fn add_host(Json(body): Json<AddHostRequest>) -> Json<Value> {
         })
     });
 
+    // Detect LAN interface: the interface whose IP matches the host address
+    let detected_lan_interface = interfaces.as_ref().ok().and_then(|ifaces| {
+        ifaces.iter().find_map(|i| {
+            let ifname = i.get("ifname").and_then(|n| n.as_str())?;
+            // Check addr_info array for matching IP
+            if let Some(addr_info) = i.get("addr_info").and_then(|a| a.as_array()) {
+                for addr in addr_info {
+                    if addr.get("local").and_then(|l| l.as_str()) == Some(&body.host) {
+                        return Some(ifname.to_string());
+                    }
+                }
+            }
+            None
+        })
+    });
+
     // Deploy hr-host-agent on the remote host
-    if let Err(e) = deploy_host_agent(&body.host, body.port, &body.username, body.password.as_deref(), &body.name).await {
+    if let Err(e) = deploy_host_agent(&body.host, body.port, &body.username, body.password.as_deref(), &body.name, detected_lan_interface.as_deref()).await {
         return Json(json!({"success": false, "error": format!("Agent deploy failed: {}", e)}));
     }
     tracing::info!("hr-host-agent deployed on {}", body.host);
@@ -504,7 +520,30 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
                                 HostAgentMessage::ContainerList(containers) => {
                                     registry.update_host_containers(&host_id, containers).await;
                                 }
-                                _ => {}
+                                HostAgentMessage::ImportComplete { transfer_id, container_name } => {
+                                    tracing::info!(transfer_id = %transfer_id, container = %container_name, "Host import complete");
+                                    registry.on_host_import_complete(&host_id, &transfer_id, &container_name).await;
+                                }
+                                HostAgentMessage::ImportFailed { transfer_id, error } => {
+                                    tracing::error!(transfer_id = %transfer_id, %error, "Host import failed");
+                                    registry.on_host_import_failed(&host_id, &transfer_id, &error).await;
+                                }
+                                HostAgentMessage::ExecResult { request_id, success, stdout, stderr } => {
+                                    tracing::info!(request_id = %request_id, success, "Host exec result");
+                                    registry.on_host_exec_result(&host_id, &request_id, success, &stdout, &stderr).await;
+                                }
+                                HostAgentMessage::ExportReady { transfer_id, .. } => {
+                                    tracing::info!(transfer_id = %transfer_id, "Host export ready");
+                                }
+                                HostAgentMessage::ExportFailed { transfer_id, error } => {
+                                    tracing::error!(transfer_id = %transfer_id, %error, "Host export failed");
+                                    registry.on_host_export_failed(&host_id, &transfer_id, &error).await;
+                                }
+                                HostAgentMessage::TransferChunk { .. } => {}
+                                HostAgentMessage::TransferComplete { transfer_id } => {
+                                    tracing::info!(transfer_id = %transfer_id, "Host transfer complete");
+                                }
+                                HostAgentMessage::Auth { .. } => {}
                             }
                         }
                     }
@@ -751,7 +790,7 @@ async fn get_remote_interfaces(
 
 // ── Host-agent deployment ────────────────────────────────────────────────
 
-async fn deploy_host_agent(host: &str, port: u16, user: &str, password: Option<&str>, host_name: &str) -> Result<(), String> {
+async fn deploy_host_agent(host: &str, port: u16, user: &str, password: Option<&str>, host_name: &str, lan_interface: Option<&str>) -> Result<(), String> {
     if tokio::fs::metadata(HOST_AGENT_BINARY).await.is_err() {
         return Err("hr-host-agent binary not found".to_string());
     }
@@ -778,11 +817,15 @@ async fn deploy_host_agent(host: &str, port: u16, user: &str, password: Option<&
     }
 
     // 2. Install via sshpass + sudo -S (password piped to stdin)
+    let lan_line = match lan_interface {
+        Some(iface) => format!("lan_interface = \"{}\"\n", iface),
+        None => String::new(),
+    };
     let config = format!(
         r#"homeroute_url = "{HOMEROUTE_LAN_IP}:{API_PORT}"
 token = ""
 host_name = "{host_name}"
-"#,
+{lan_line}"#,
     );
 
     let service_unit = r#"[Unit]

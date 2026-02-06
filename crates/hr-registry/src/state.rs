@@ -39,6 +39,12 @@ pub struct HostConnection {
     pub containers: Vec<ContainerInfo>,
 }
 
+pub enum MigrationResult {
+    ImportComplete { container_name: String },
+    ImportFailed { error: String },
+    ExportFailed { error: String },
+}
+
 pub struct AgentRegistry {
     state: Arc<RwLock<RegistryState>>,
     state_path: PathBuf,
@@ -46,6 +52,8 @@ pub struct AgentRegistry {
     pub host_connections: Arc<RwLock<HashMap<String, HostConnection>>>,
     env: Arc<EnvConfig>,
     events: Arc<EventBus>,
+    migration_signals: Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<MigrationResult>>>>,
+    exec_signals: Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<(bool, String, String)>>>>,
 }
 
 impl AgentRegistry {
@@ -77,6 +85,8 @@ impl AgentRegistry {
             host_connections: Arc::new(RwLock::new(HashMap::new())),
             env,
             events,
+            migration_signals: Arc::new(RwLock::new(HashMap::new())),
+            exec_signals: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -519,6 +529,67 @@ impl AgentRegistry {
                 .map_err(|e| format!("Failed to send to host {}: {}", host_id, e)),
             None => Err(format!("Host {} not connected", host_id)),
         }
+    }
+
+    // ── Migration & exec signal handling ──────────────────────
+
+    pub async fn register_migration_signal(&self, transfer_id: &str) -> tokio::sync::oneshot::Receiver<MigrationResult> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.migration_signals.write().await.insert(transfer_id.to_string(), tx);
+        rx
+    }
+
+    pub async fn on_host_import_complete(&self, _host_id: &str, transfer_id: &str, container_name: &str) {
+        if let Some(tx) = self.migration_signals.write().await.remove(transfer_id) {
+            let _ = tx.send(MigrationResult::ImportComplete { container_name: container_name.to_string() });
+        }
+    }
+
+    pub async fn on_host_import_failed(&self, _host_id: &str, transfer_id: &str, error: &str) {
+        if let Some(tx) = self.migration_signals.write().await.remove(transfer_id) {
+            let _ = tx.send(MigrationResult::ImportFailed { error: error.to_string() });
+        }
+    }
+
+    pub async fn on_host_export_failed(&self, _host_id: &str, transfer_id: &str, error: &str) {
+        if let Some(tx) = self.migration_signals.write().await.remove(transfer_id) {
+            let _ = tx.send(MigrationResult::ExportFailed { error: error.to_string() });
+        }
+    }
+
+    pub async fn on_host_exec_result(&self, _host_id: &str, request_id: &str, success: bool, stdout: &str, stderr: &str) {
+        if let Some(tx) = self.exec_signals.write().await.remove(request_id) {
+            let _ = tx.send((success, stdout.to_string(), stderr.to_string()));
+        }
+    }
+
+    pub async fn exec_in_remote_container(&self, host_id: &str, container_name: &str, command: Vec<String>) -> Result<(bool, String, String)> {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.exec_signals.write().await.insert(request_id.clone(), tx);
+
+        self.send_host_command(host_id, crate::protocol::HostRegistryMessage::ExecInContainer {
+            request_id: request_id.clone(),
+            container_name: container_name.to_string(),
+            command,
+        }).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(_)) => {
+                anyhow::bail!("Exec signal channel closed");
+            }
+            Err(_) => {
+                self.exec_signals.write().await.remove(&request_id);
+                anyhow::bail!("Exec timeout after 60s");
+            }
+        }
+    }
+
+    /// Look up an application by id.
+    pub async fn get_application(&self, id: &str) -> Option<Application> {
+        let state = self.state.read().await;
+        state.applications.iter().find(|a| a.id == id).cloned()
     }
 
     // ── Internal helpers ────────────────────────────────────────

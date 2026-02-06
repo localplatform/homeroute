@@ -109,6 +109,8 @@ async fn run_connection(config: &Config) -> Result<(), String> {
     // Track active imports: transfer_id → (container_name, file)
     let mut active_imports: HashMap<String, (String, tokio::fs::File)> = HashMap::new();
 
+    let lan_interface = config.lan_interface.clone();
+
     // Heartbeat task
     let tx_hb = tx.clone();
     let heartbeat_handle = tokio::spawn(async move {
@@ -223,14 +225,72 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                                     use tokio::io::AsyncWriteExt;
                                     let _ = file.flush().await;
                                     drop(file);
+                                    let lan_iface = lan_interface.clone();
                                     let tx_import = tx.clone();
                                     tokio::spawn(async move {
-                                        handle_import(tx_import, transfer_id, container_name).await;
+                                        handle_import(tx_import, transfer_id, container_name, lan_iface).await;
                                     });
                                 }
                             }
-                            Ok(msg) => {
-                                warn!("Unhandled message: {:?}", msg);
+                            Ok(HostRegistryMessage::DeleteContainer { container_name }) => {
+                                info!(container = %container_name, "Deleting container");
+                                let _ = tokio::process::Command::new("lxc")
+                                    .args(["delete", &container_name, "--force"])
+                                    .output()
+                                    .await;
+                                // Also delete workspace storage volume
+                                let vol_name = format!("{container_name}-workspace");
+                                let _ = tokio::process::Command::new("lxc")
+                                    .args(["storage", "volume", "delete", "default", &vol_name])
+                                    .output()
+                                    .await;
+                            }
+                            Ok(HostRegistryMessage::StartContainer { container_name }) => {
+                                info!(container = %container_name, "Starting container");
+                                let _ = tokio::process::Command::new("lxc")
+                                    .args(["start", &container_name])
+                                    .output()
+                                    .await;
+                            }
+                            Ok(HostRegistryMessage::StopContainer { container_name }) => {
+                                info!(container = %container_name, "Stopping container");
+                                let _ = tokio::process::Command::new("lxc")
+                                    .args(["stop", &container_name, "--force"])
+                                    .output()
+                                    .await;
+                            }
+                            Ok(HostRegistryMessage::ExecInContainer { request_id, container_name, command }) => {
+                                info!(container = %container_name, "Executing command in container");
+                                let tx_exec = tx.clone();
+                                tokio::spawn(async move {
+                                    let mut lxc_args = vec!["exec".to_string(), container_name, "--".to_string()];
+                                    lxc_args.extend(command);
+                                    let lxc_refs: Vec<&str> = lxc_args.iter().map(|s| s.as_str()).collect();
+                                    let result = tokio::process::Command::new("lxc")
+                                        .args(&lxc_refs)
+                                        .output()
+                                        .await;
+                                    let (success, stdout, stderr) = match result {
+                                        Ok(out) => (
+                                            out.status.success(),
+                                            String::from_utf8_lossy(&out.stdout).to_string(),
+                                            String::from_utf8_lossy(&out.stderr).to_string(),
+                                        ),
+                                        Err(e) => (false, String::new(), e.to_string()),
+                                    };
+                                    let _ = tx_exec.send(HostAgentMessage::ExecResult {
+                                        request_id,
+                                        success,
+                                        stdout,
+                                        stderr,
+                                    }).await;
+                                });
+                            }
+                            Ok(HostRegistryMessage::CreateContainer { .. }) | Ok(HostRegistryMessage::PushAgentUpdate { .. }) => {
+                                warn!("Message type not yet implemented");
+                            }
+                            Ok(HostRegistryMessage::AuthResult { .. }) => {
+                                // Already handled during auth phase
                             }
                             Err(e) => {
                                 warn!("Failed to parse message: {}", e);
@@ -256,6 +316,74 @@ async fn run_connection(config: &Config) -> Result<(), String> {
 
     heartbeat_handle.abort();
     metrics_handle.abort();
+    Ok(())
+}
+
+async fn ensure_lxd_profile(lan_interface: Option<&str>) -> Result<(), String> {
+    // Check if the profile already exists
+    let check = tokio::process::Command::new("lxc")
+        .args(["profile", "show", "homeroute-agent"])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run lxc profile show: {}", e))?;
+
+    if check.status.success() {
+        return Ok(());
+    }
+
+    // Create the profile
+    info!("Creating LXD profile 'homeroute-agent'");
+    let create = tokio::process::Command::new("lxc")
+        .args(["profile", "create", "homeroute-agent"])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to create profile: {}", e))?;
+
+    if !create.status.success() {
+        let stderr = String::from_utf8_lossy(&create.stderr);
+        return Err(format!("lxc profile create failed: {}", stderr));
+    }
+
+    // Add NIC device
+    let parent_arg = match lan_interface {
+        Some(iface) => format!("parent={}", iface),
+        None => "parent=br-lan".to_string(),
+    };
+    let nictype_arg = match lan_interface {
+        Some(_) => "nictype=macvlan",
+        None => "nictype=bridged",
+    };
+
+    let nic = tokio::process::Command::new("lxc")
+        .args([
+            "profile", "device", "add", "homeroute-agent", "eth0", "nic",
+            nictype_arg, &parent_arg,
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to add NIC device: {}", e))?;
+
+    if !nic.status.success() {
+        let stderr = String::from_utf8_lossy(&nic.stderr);
+        return Err(format!("lxc profile device add (nic) failed: {}", stderr));
+    }
+
+    // Add root disk device
+    let disk = tokio::process::Command::new("lxc")
+        .args([
+            "profile", "device", "add", "homeroute-agent", "root", "disk",
+            "path=/", "pool=default",
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to add root disk device: {}", e))?;
+
+    if !disk.status.success() {
+        let stderr = String::from_utf8_lossy(&disk.stderr);
+        return Err(format!("lxc profile device add (disk) failed: {}", stderr));
+    }
+
+    info!("LXD profile 'homeroute-agent' created successfully");
     Ok(())
 }
 
@@ -379,8 +507,28 @@ async fn handle_import(
     tx: tokio::sync::mpsc::Sender<HostAgentMessage>,
     transfer_id: String,
     container_name: String,
+    lan_interface: Option<String>,
 ) {
     let import_path = format!("/tmp/{}.tar.gz", transfer_id);
+
+    // Ensure LXD profile exists before importing
+    if let Err(e) = ensure_lxd_profile(lan_interface.as_deref()).await {
+        error!("Failed to ensure LXD profile: {}", e);
+        let _ = tx.send(HostAgentMessage::ImportFailed {
+            transfer_id: transfer_id.clone(),
+            error: format!("Failed to setup LXD profile: {}", e),
+        }).await;
+        let _ = tokio::fs::remove_file(&import_path).await;
+        return;
+    }
+
+    // Pre-create workspace storage volume so import doesn't fail on missing volume reference
+    let vol_name = format!("{container_name}-workspace");
+    info!(volume = %vol_name, "Pre-creating workspace storage volume for import");
+    let _ = tokio::process::Command::new("lxc")
+        .args(["storage", "volume", "create", "default", &vol_name])
+        .output()
+        .await;
 
     // Import the container
     info!(path = %import_path, container = %container_name, "Importing container");
@@ -391,16 +539,43 @@ async fn handle_import(
 
     match import {
         Ok(output) if output.status.success() => {
-            // Start the container
-            let _ = tokio::process::Command::new("lxc")
+            // Assign the profile to the imported container
+            let profile_assign = tokio::process::Command::new("lxc")
+                .args(["profile", "assign", &container_name, "default,homeroute-agent"])
+                .output()
+                .await;
+
+            if let Err(e) = &profile_assign {
+                warn!("Failed to assign profile to {}: {}", container_name, e);
+            }
+
+            // Start the container and check the result
+            let start = tokio::process::Command::new("lxc")
                 .args(["start", &container_name])
                 .output()
                 .await;
 
-            let _ = tx.send(HostAgentMessage::ImportComplete {
-                transfer_id: transfer_id.clone(),
-                container_name,
-            }).await;
+            match start {
+                Ok(start_output) if start_output.status.success() => {
+                    let _ = tx.send(HostAgentMessage::ImportComplete {
+                        transfer_id: transfer_id.clone(),
+                        container_name,
+                    }).await;
+                }
+                Ok(start_output) => {
+                    let stderr = String::from_utf8_lossy(&start_output.stderr);
+                    let _ = tx.send(HostAgentMessage::ImportFailed {
+                        transfer_id: transfer_id.clone(),
+                        error: format!("Container imported but lxc start failed: {}", stderr),
+                    }).await;
+                }
+                Err(e) => {
+                    let _ = tx.send(HostAgentMessage::ImportFailed {
+                        transfer_id: transfer_id.clone(),
+                        error: format!("Container imported but start command failed: {}", e),
+                    }).await;
+                }
+            }
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);

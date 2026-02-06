@@ -45,7 +45,7 @@ pub struct Application {
     #[serde(default)]
     pub power_policy: PowerPolicy,
     /// Current metrics from agent (volatile, not persisted to disk).
-    #[serde(skip)]
+    #[serde(skip_deserializing)]
     pub metrics: Option<AgentMetrics>,
 }
 

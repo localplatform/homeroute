@@ -38,11 +38,9 @@ export const getDhcpLeases = () => api.get('/dns-dhcp/leases');
 // Network
 export const getInterfaces = () => api.get('/network/interfaces');
 export const getRoutes = () => api.get('/network/routes');
-export const getIpv6Routes = () => api.get('/network/routes6');
 export const getLanClients = () => api.get('/network/clients');
 
-// NAT/Firewall (legacy)
-export const getNatRules = () => api.get('/nat/rules');
+// NAT/Firewall
 export const getFilterRules = () => api.get('/nat/filter');
 export const getMasqueradeRules = () => api.get('/nat/masquerade');
 export const getPortForwards = () => api.get('/nat/forwards');
@@ -86,16 +84,6 @@ export const renewCertificates = () => api.post('/reverseproxy/certificates/rene
 export const reloadProxy = () => api.post('/reverseproxy/reload');
 export const getCertificatesStatus = () => api.get('/reverseproxy/certificates/status');
 
-// Reverse Proxy - Environments
-export const getReverseProxyEnvironments = () => api.get('/reverseproxy/environments');
-
-// Reverse Proxy - Applications (legacy)
-export const getReverseProxyApplications = () => api.get('/reverseproxy/applications');
-export const addReverseProxyApplication = (app) => api.post('/reverseproxy/applications', app);
-export const updateReverseProxyApplication = (id, updates) => api.put(`/reverseproxy/applications/${id}`, updates);
-export const deleteReverseProxyApplication = (id) => api.delete(`/reverseproxy/applications/${id}`);
-export const toggleReverseProxyApplication = (id, enabled) => api.post(`/reverseproxy/applications/${id}/toggle`, { enabled });
-
 // Applications (Agent-based LXC)
 export const getApplications = () => api.get('/applications');
 export const createApplication = (app) => api.post('/applications', app);
@@ -108,21 +96,16 @@ export const startApplicationService = (appId, serviceType) =>
   api.post(`/applications/${appId}/services/${serviceType}/start`);
 export const stopApplicationService = (appId, serviceType) =>
   api.post(`/applications/${appId}/services/${serviceType}/stop`);
-export const updateApplicationPowerPolicy = (appId, policy) =>
-  api.put(`/applications/${appId}/power-policy`, policy);
-
 // Application Migration
 export const migrateApplication = (id, targetHostId) => api.post(`/applications/${id}/migrate`, { target_host_id: targetHostId });
-export const getMigrationStatus = (id) => api.get(`/applications/${id}/migration-status`);
+export const getActiveMigrations = () => api.get('/applications/active-migrations');
 
 // Rust Proxy
 export const getRustProxyStatus = () => api.get('/rust-proxy/status');
-export const reloadRustProxy = () => api.post('/rust-proxy/reload');
 
 // Auth - Session (login page)
 export const login = (username, password, remember_me = false) => api.post('/auth/login', { username, password, remember_me });
 export const logout = () => api.post('/auth/logout');
-export const checkAuth = () => api.get('/auth/check');
 export const getMe = () => api.get('/auth/me');
 
 // System Updates
@@ -142,7 +125,6 @@ export const cancelUpgrade = () => api.post('/updates/upgrade/cancel');
 export const getCpuInfo = () => api.get('/energy/cpu');
 
 // Energy - Modes (unified: economy/auto/performance)
-export const getEnergyModes = () => api.get('/energy/modes');
 export const getCurrentEnergyMode = () => api.get('/energy/mode');
 export const setEnergyMode = (mode) => api.post(`/energy/mode/${mode}`);
 
@@ -153,8 +135,6 @@ export const saveEnergySchedule = (config) => api.post('/energy/schedule', confi
 // Energy - Auto-select
 export const getAutoSelectConfig = () => api.get('/energy/autoselect');
 export const saveAutoSelectConfig = (config) => api.post('/energy/autoselect', config);
-export const getNetworkRps = () => api.get('/energy/autoselect/rps');
-export const getAutoSelectStatus = () => api.get('/energy/autoselect/status');
 export const getSelectableInterfaces = () => api.get('/energy/interfaces');
 
 // Energy - Benchmark
@@ -186,19 +166,13 @@ export default api;
 // ========== Hosts (unified servers + WoL) ==========
 
 export const getHosts = () => api.get('/hosts');
-export const getHost = (id) => api.get(`/hosts/${id}`);
 export const addHost = (data) => api.post('/hosts', data);
 export const updateHost = (id, data) => api.put(`/hosts/${id}`, data);
 export const deleteHost = (id) => api.delete(`/hosts/${id}`);
 export const testHostConnection = (id) => api.post(`/hosts/${id}/test`);
-export const getHostInfo = (id) => api.post(`/hosts/${id}/info`);
-export const getHostGroups = () => api.get('/hosts/groups');
-
 // Hosts - Power actions
 export const wakeHost = (id) => api.post(`/hosts/${id}/wake`);
 export const shutdownHost = (id) => api.post(`/hosts/${id}/shutdown`);
 export const rebootHost = (id) => api.post(`/hosts/${id}/reboot`);
-export const bulkWakeHosts = (hostIds) => api.post('/hosts/bulk/wake', { hostIds });
-export const bulkShutdownHosts = (hostIds) => api.post('/hosts/bulk/shutdown', { hostIds });
 
 

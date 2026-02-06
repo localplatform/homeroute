@@ -8,6 +8,9 @@ pub struct Config {
     pub host_name: String,
     #[serde(default = "default_reconnect")]
     pub reconnect_interval_secs: u64,
+    /// Physical LAN interface for macvlan (e.g., "enp7s0f0"). Required for container migrations.
+    #[serde(default)]
+    pub lan_interface: Option<String>,
 }
 
 fn default_reconnect() -> u64 {

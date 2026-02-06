@@ -8,6 +8,7 @@ use serde_json::json;
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
 
+use hr_common::events::MigrationPhase;
 use crate::state::ApiState;
 
 pub fn router() -> Router<ApiState> {
@@ -31,6 +32,31 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     let mut service_cmd_rx = state.events.service_command.subscribe();
     let mut agent_update_rx = state.events.agent_update.subscribe();
     let mut migration_rx = state.events.migration_progress.subscribe();
+
+    // Send current active migrations so reconnecting clients get up-to-date state
+    {
+        let migrations = state.migrations.read().await;
+        for m in migrations.values() {
+            if !matches!(m.phase, MigrationPhase::Complete | MigrationPhase::Failed) {
+                let msg = json!({
+                    "type": "migration:progress",
+                    "data": {
+                        "appId": m.app_id,
+                        "transferId": m.transfer_id,
+                        "phase": m.phase,
+                        "progressPct": m.progress_pct,
+                        "bytesTransferred": m.bytes_transferred,
+                        "totalBytes": m.total_bytes,
+                        "error": m.error,
+                    }
+                });
+                if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                    debug!("WebSocket client disconnected during migration sync");
+                    return;
+                }
+            }
+        }
+    }
 
     loop {
         tokio::select! {

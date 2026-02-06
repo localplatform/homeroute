@@ -24,8 +24,6 @@ import {
   Loader2,
   Play,
   Square,
-  Cpu,
-  HardDrive,
   Database,
   ArrowRightLeft,
 } from 'lucide-react';
@@ -44,6 +42,7 @@ import {
   stopApplicationService,
   migrateApplication,
   getHosts,
+  getActiveMigrations,
 } from '../api/client';
 
 const STATUS_BADGES = {
@@ -105,14 +104,59 @@ function Applications() {
 
   const fetchData = useCallback(async () => {
     try {
-      const [appsRes, configRes, groupsRes] = await Promise.all([
+      const [appsRes, configRes, groupsRes, hostsRes] = await Promise.all([
         getApplications(),
         getReverseProxyConfig(),
         getUserGroups().catch(() => ({ data: { success: false } })),
+        getHosts().catch(() => ({ data: { hosts: [] } })),
       ]);
-      if (appsRes.data.success) setApplications(appsRes.data.applications || []);
+      if (appsRes.data.success) {
+        const apps = appsRes.data.applications || [];
+        setApplications(apps);
+        // Pre-populate metrics from initial REST response (avoids visual delay)
+        const initialMetrics = {};
+        for (const app of apps) {
+          if (app.metrics) {
+            initialMetrics[app.id] = {
+              codeServerStatus: app.metrics.code_server_status,
+              appStatus: app.metrics.app_status,
+              dbStatus: app.metrics.db_status,
+              memoryBytes: app.metrics.memory_bytes,
+              cpuPercent: app.metrics.cpu_percent,
+              codeServerIdleSecs: app.metrics.code_server_idle_secs,
+              appIdleSecs: app.metrics.app_idle_secs,
+            };
+          }
+        }
+        if (Object.keys(initialMetrics).length > 0) {
+          setAppMetrics(prev => ({ ...initialMetrics, ...prev }));
+        }
+      }
       if (configRes.data.success) setBaseDomain(configRes.data.config?.baseDomain || '');
       if (groupsRes.data?.success) setUserGroups(groupsRes.data.groups || []);
+      const hostList = hostsRes.data?.hosts || [];
+      setHosts(hostList);
+
+      // Restore active migrations
+      try {
+        const migRes = await getActiveMigrations();
+        const active = migRes.data.migrations || [];
+        const migState = {};
+        for (const m of active) {
+          migState[m.app_id] = {
+            phase: m.phase,
+            progressPct: m.progress_pct,
+            bytesTransferred: m.bytes_transferred,
+            totalBytes: m.total_bytes,
+            error: m.error,
+          };
+        }
+        if (Object.keys(migState).length > 0) {
+          setMigrations(migState);
+        }
+      } catch (e) {
+        // Ignore - migrations restore is best-effort
+      }
     } catch (error) {
       console.error('Error:', error);
       setMessage({ type: 'error', text: 'Erreur de chargement' });
@@ -633,6 +677,11 @@ function Applications() {
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-2">
                               <span className="font-medium truncate">{app.name}</span>
+                              {app.host_id && app.host_id !== 'local' && (
+                                <span className="text-[10px] px-1.5 py-0.5 bg-indigo-900/40 text-indigo-300 rounded">
+                                  {hosts.find(h => h.id === app.host_id)?.name || app.host_id}
+                                </span>
+                              )}
                               {!app.enabled && (
                                 <span className="text-xs text-gray-500 bg-gray-800 px-1.5 py-0.5">off</span>
                               )}

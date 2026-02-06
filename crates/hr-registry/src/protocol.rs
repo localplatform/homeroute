@@ -207,6 +207,12 @@ pub enum HostAgentMessage {
         transfer_id: String,
         error: String,
     },
+    ExecResult {
+        request_id: String,
+        success: bool,
+        stdout: String,
+        stderr: String,
+    },
 }
 
 /// Host system metrics
@@ -273,6 +279,11 @@ pub enum HostRegistryMessage {
     },
     TransferComplete {
         transfer_id: String,
+    },
+    ExecInContainer {
+        request_id: String,
+        container_name: String,
+        command: Vec<String>,
     },
 }
 

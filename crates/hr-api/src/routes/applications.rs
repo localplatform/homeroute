@@ -22,6 +22,7 @@ use crate::state::{ApiState, MigrationState};
 pub fn router() -> Router<ApiState> {
     Router::new()
         .route("/", get(list_applications).post(create_application))
+        .route("/active-migrations", get(active_migrations))
         .route("/{id}", put(update_application).delete(delete_application))
         .route("/{id}/toggle", post(toggle_application))
         .route("/{id}/token", get(regenerate_token))
@@ -324,6 +325,16 @@ async fn migration_status(
     }
 }
 
+async fn active_migrations(
+    State(state): State<ApiState>,
+) -> impl IntoResponse {
+    let migrations = state.migrations.read().await;
+    let active: Vec<_> = migrations.values()
+        .filter(|m| !matches!(m.phase, MigrationPhase::Complete | MigrationPhase::Failed))
+        .collect();
+    Json(serde_json::json!({ "migrations": active })).into_response()
+}
+
 async fn regenerate_token(
     State(state): State<ApiState>,
     Path(id): Path<String>,
@@ -416,7 +427,7 @@ async fn get_update_status(State(state): State<ApiState>) -> impl IntoResponse {
     }
 }
 
-/// Fix a failed agent update via LXC exec.
+/// Fix a failed agent update via LXC exec (local) or remote exec (remote host).
 async fn fix_agent_update(
     State(state): State<ApiState>,
     Path(id): Path<String>,
@@ -429,22 +440,54 @@ async fn fix_agent_update(
             .into_response();
     };
 
-    match registry.fix_agent_via_lxc(&id).await {
-        Ok(output) => {
-            info!(app_id = id, "Agent fixed via LXC exec");
-            Json(serde_json::json!({
-                "success": true,
-                "output": output
-            }))
-            .into_response()
+    // Look up the app to determine if local or remote
+    let app = registry.get_application(&id).await;
+    match app {
+        Some(app) if app.host_id == "local" => {
+            match registry.fix_agent_via_lxc(&id).await {
+                Ok(output) => {
+                    info!(app_id = id, "Agent fixed via LXC exec");
+                    Json(serde_json::json!({"success": true, "output": output})).into_response()
+                }
+                Err(e) => {
+                    error!(app_id = id, "Failed to fix agent: {e}");
+                    (StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"success": false, "error": e.to_string()}))).into_response()
+                }
+            }
         }
-        Err(e) => {
-            error!(app_id = id, "Failed to fix agent: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"success": false, "error": e.to_string()})),
-            )
-                .into_response()
+        Some(app) => {
+            let api_port = state.env.api_port;
+            let cmd = vec![
+                "bash".to_string(), "-c".to_string(),
+                format!(
+                    "curl -fsSL http://10.0.0.254:{}/api/applications/agents/binary -o /usr/local/bin/hr-agent.new && \
+                     chmod +x /usr/local/bin/hr-agent.new && \
+                     mv /usr/local/bin/hr-agent.new /usr/local/bin/hr-agent && \
+                     systemctl restart hr-agent",
+                    api_port
+                ),
+            ];
+            match registry.exec_in_remote_container(&app.host_id, &app.container_name, cmd).await {
+                Ok((true, stdout, _)) => {
+                    info!(app_id = id, "Agent fixed via remote exec");
+                    Json(serde_json::json!({"success": true, "output": stdout})).into_response()
+                }
+                Ok((false, _, stderr)) => {
+                    error!(app_id = id, "Remote fix failed: {}", stderr);
+                    (StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"success": false, "error": stderr}))).into_response()
+                }
+                Err(e) => {
+                    error!(app_id = id, "Remote exec failed: {e}");
+                    (StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"success": false, "error": e.to_string()}))).into_response()
+                }
+            }
+        }
+        None => {
+            (StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"success": false, "error": "Application not found"}))).into_response()
         }
     }
 }
@@ -789,6 +832,9 @@ async fn run_migration(
 
                 // If target is remote, send chunks via host-agent
                 if target_host_id != "local" {
+                    // Register migration signal BEFORE starting transfer
+                    let import_rx = registry.register_migration_signal(&transfer_id).await;
+
                     // Tell target to prepare for import
                     if let Err(e) = registry.send_host_command(
                         &target_host_id,
@@ -815,6 +861,7 @@ async fn run_migration(
 
                     let mut buf = vec![0u8; 65536];
                     let mut transferred: u64 = 0;
+                    let mut chunk_count: u64 = 0;
                     loop {
                         let n = match file.read(&mut buf).await {
                             Ok(0) => break,
@@ -840,8 +887,20 @@ async fn run_migration(
                         }
 
                         transferred += n as u64;
+                        chunk_count += 1;
                         let pct = (20 + (transferred * 60 / total_bytes.max(1))) as u8;
-                        update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Transferring, pct.min(80), transferred, total_bytes, None).await;
+
+                        // Throttle: broadcast every 8 chunks (~512KB) or on last chunk
+                        if chunk_count % 8 == 0 || transferred >= total_bytes {
+                            update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Transferring, pct.min(80), transferred, total_bytes, None).await;
+                        } else {
+                            // Update in-memory state only (no broadcast)
+                            let mut m = migrations.write().await;
+                            if let Some(state) = m.get_mut(&transfer_id) {
+                                state.progress_pct = pct.min(80);
+                                state.bytes_transferred = transferred;
+                            }
+                        }
                     }
 
                     // Tell target transfer is complete
@@ -858,14 +917,50 @@ async fn run_migration(
                     // Phase 4: Importing (target does this)
                     update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Importing, 85, transferred, total_bytes, None).await;
 
-                    // Wait for ImportComplete from target host-agent (poll registry for a signal)
-                    // For now, just wait a reasonable amount of time
-                    // TODO: Use a proper channel/notification from the host-agent
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    // Wait for ImportComplete/ImportFailed from target host-agent
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(120),
+                        import_rx,
+                    ).await {
+                        Ok(Ok(hr_registry::MigrationResult::ImportComplete { .. })) => {
+                            info!(transfer_id, "Import confirmed by target host");
+                        }
+                        Ok(Ok(hr_registry::MigrationResult::ImportFailed { error })) => {
+                            update_migration_phase(&migrations, &events, &app_id, &transfer_id,
+                                MigrationPhase::Failed, 0, 0, 0,
+                                Some(format!("Migration failed on target: {}", error))).await;
+                            return;
+                        }
+                        Ok(Ok(hr_registry::MigrationResult::ExportFailed { error })) => {
+                            update_migration_phase(&migrations, &events, &app_id, &transfer_id,
+                                MigrationPhase::Failed, 0, 0, 0,
+                                Some(format!("Migration failed on target: {}", error))).await;
+                            return;
+                        }
+                        Ok(Err(_)) => {
+                            update_migration_phase(&migrations, &events, &app_id, &transfer_id,
+                                MigrationPhase::Failed, 0, 0, 0,
+                                Some("Migration signal lost".to_string())).await;
+                            return;
+                        }
+                        Err(_) => {
+                            update_migration_phase(&migrations, &events, &app_id, &transfer_id,
+                                MigrationPhase::Failed, 0, 0, 0,
+                                Some("Import timed out after 120s".to_string())).await;
+                            return;
+                        }
+                    }
 
                 } else {
                     // Target is local — import directly
                     update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Importing, 80, total_bytes, total_bytes, None).await;
+
+                    // Pre-create workspace storage volume so import doesn't fail on missing volume reference
+                    let vol_name = format!("{container_name}-workspace");
+                    let _ = tokio::process::Command::new("lxc")
+                        .args(["storage", "volume", "create", "default", &vol_name])
+                        .output()
+                        .await;
 
                     let import_result = tokio::process::Command::new("lxc")
                         .args(["import", &export_path])
@@ -900,6 +995,9 @@ async fn run_migration(
         }
     } else {
         // Source is remote: tell source host-agent to export
+        // Register signal to detect export failures
+        let export_rx = registry.register_migration_signal(&transfer_id).await;
+
         if let Err(e) = registry.send_host_command(
             &source_host_id,
             HostRegistryMessage::StartExport {
@@ -911,15 +1009,43 @@ async fn run_migration(
             return;
         }
 
-        // Wait for chunks to be relayed (the host-agent WebSocket handler in hosts.rs
-        // needs to relay ExportReady/TransferChunk/TransferComplete to target)
-        // For now, poll migration state updates
-        // TODO: implement relay in hosts.rs host_agent_ws handler
-        update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Transferring, 30, 0, 0, None).await;
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        // Wait for export result from the source host-agent
+        // NOTE: Full remote→local chunk relay is not yet implemented.
+        // For now, we detect export failures early instead of blind-sleeping.
+        update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Exporting, 30, 0, 0, None).await;
 
-        update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Importing, 85, 0, 0, None).await;
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            export_rx,
+        ).await {
+            Ok(Ok(hr_registry::MigrationResult::ExportFailed { error })) => {
+                update_migration_phase(&migrations, &events, &app_id, &transfer_id,
+                    MigrationPhase::Failed, 0, 0, 0,
+                    Some(format!("Export failed on source: {}", error))).await;
+                return;
+            }
+            Ok(Ok(hr_registry::MigrationResult::ImportFailed { error })) => {
+                update_migration_phase(&migrations, &events, &app_id, &transfer_id,
+                    MigrationPhase::Failed, 0, 0, 0,
+                    Some(format!("Import failed: {}", error))).await;
+                return;
+            }
+            Ok(Ok(hr_registry::MigrationResult::ImportComplete { .. })) => {
+                info!(transfer_id, "Remote migration confirmed");
+            }
+            Ok(Err(_)) => {
+                update_migration_phase(&migrations, &events, &app_id, &transfer_id,
+                    MigrationPhase::Failed, 0, 0, 0,
+                    Some("Migration signal lost".to_string())).await;
+                return;
+            }
+            Err(_) => {
+                update_migration_phase(&migrations, &events, &app_id, &transfer_id,
+                    MigrationPhase::Failed, 0, 0, 0,
+                    Some("Remote migration timed out after 120s".to_string())).await;
+                return;
+            }
+        }
     }
 
     // Phase 5: Starting
