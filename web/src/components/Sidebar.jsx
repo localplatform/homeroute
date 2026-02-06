@@ -2,7 +2,7 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, Server, Network, Shield, ShieldCheck, Globe, Settings,
   ArrowLeftRight, RefreshCw, Zap, Users, LogOut,
-  User, Power, HardDrive, Lock, Boxes
+  User, HardDrive, Lock, Boxes
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 

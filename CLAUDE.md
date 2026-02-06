@@ -21,9 +21,11 @@ crates/
 ├── hr-ipv6/         # IPv6 RA + DHCPv6 stateless
 ├── hr-adblock/      # Moteur adblock (FxHashSet, sources, whitelist)
 ├── hr-acme/         # Let's Encrypt ACME (wildcards DNS-01 via Cloudflare)
-├── hr-analytics/    # Capture trafic + agrégation (SQLite)
-├── hr-servers/      # Gestion serveurs (monitoring, WoL, scheduler)
-├── hr-system/       # Système (énergie, updates, réseau, DDNS Cloudflare)
+├── hr-firewall/     # Firewall IPv6 (nftables)
+├── hr-lxd/          # Gestion containers LXD
+├── hr-registry/     # Registry des applications/agents
+├── hr-agent/        # Agent binaire déployé dans les containers LXC
+├── hr-host-agent/   # Agent hôte
 ├── hr-api/          # Routeur API HTTP (axum, routes /api/*, WebSocket)
 ```
 
@@ -40,9 +42,7 @@ crates/
 |---------|--------|--------|
 | Sessions | SQLite | `/opt/homeroute/data/auth.db` |
 | Users | YAML | `/opt/homeroute/data/users.yml` |
-| Analytics | SQLite | `/opt/homeroute/data/analytics.db` |
-| Serveurs | JSON | `/data/servers.json` |
-| WoL schedules | JSON | `/data/wol-schedules.json` |
+| Hosts | JSON | `/opt/homeroute/data/hosts.json` |
 | Config proxy | JSON | `/var/lib/server-dashboard/rust-proxy-config.json` |
 | Config DNS/DHCP | JSON | `/var/lib/server-dashboard/dns-dhcp-config.json` |
 | Config reverseproxy | JSON | `/var/lib/server-dashboard/reverseproxy-config.json` |

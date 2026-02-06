@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import {
-  HardDrive, Plus, Trash2, Edit, RefreshCw, Activity, X, Check,
-  Power, Play, Square, RotateCw
+  HardDrive, Plus, Trash2, RefreshCw, Activity, X, Check,
+  Play, Square, RotateCw
 } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';

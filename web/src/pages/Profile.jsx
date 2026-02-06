@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom';
-import { Shield, User, Mail, Users, LogOut, ArrowLeft } from 'lucide-react';
+import { Shield, User, Mail, Users, LogOut } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import PageHeader from '../components/PageHeader';
 

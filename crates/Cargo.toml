@@ -10,8 +10,6 @@ members = [
     "hr-dhcp",
     "hr-ipv6",
     "hr-adblock",
-    "hr-servers",
-    "hr-system",
     "hr-api",
     "hr-firewall",
     "hr-lxd",
@@ -59,16 +57,13 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 
 # Auth
 argon2 = "0.5"
-cookie = "0.18"
 
 # Utilities
 uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 ipnet = "2.9"
 rand = "0.9"
-bytes = "1.0"
 hex = "0.4"
-time = "0.3"
 
 # HTTP client
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
@@ -89,9 +84,6 @@ socket2 = { version = "0.5", features = ["all"] }
 
 # Certificate generation
 rcgen = "0.13"
-
-# Cron scheduling
-tokio-cron-scheduler = "0.13"
 
 # WebSocket client (for hr-agent)
 tokio-tungstenite = "0.26"
