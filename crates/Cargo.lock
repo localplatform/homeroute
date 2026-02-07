@@ -807,7 +807,9 @@ dependencies = [
  "anyhow",
  "axum",
  "chrono",
+ "futures-util",
  "hr-auth",
+ "hr-common",
  "hr-registry",
  "hyper",
  "hyper-util",
@@ -819,6 +821,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
+ "tokio-stream",
  "tracing",
 ]
 

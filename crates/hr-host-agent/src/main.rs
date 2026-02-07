@@ -452,6 +452,7 @@ async fn handle_export(
     let size_bytes = metadata.len();
     let _ = tx.send(HostAgentMessage::ExportReady {
         transfer_id: transfer_id.clone(),
+        container_name: container_name.clone(),
         size_bytes,
     }).await;
 

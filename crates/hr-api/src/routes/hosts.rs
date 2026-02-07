@@ -32,6 +32,11 @@ pub fn router() -> Router<ApiState> {
         .route("/{id}/reboot", post(reboot_host))
         .route("/bulk/wake", post(bulk_wake))
         .route("/bulk/shutdown", post(bulk_shutdown))
+        // Container management on remote hosts
+        .route("/{id}/containers/{name}/start", post(start_container))
+        .route("/{id}/containers/{name}/stop", post(stop_container))
+        .route("/{id}/containers/{name}/delete", post(delete_container))
+        .route("/{id}/exec", post(exec_on_host))
         // Host-agent WebSocket
         .route("/agent/ws", get(host_agent_ws))
 }
@@ -407,6 +412,87 @@ async fn bulk_shutdown(Json(body): Json<BulkRequest>) -> Json<Value> {
     Json(json!({"success": true, "results": results}))
 }
 
+// ── Remote container management ──────────────────────────────────────────
+
+async fn start_container(
+    Path((id, name)): Path<(String, String)>,
+    State(state): State<ApiState>,
+) -> Json<Value> {
+    let registry = match &state.registry {
+        Some(r) => r,
+        None => return Json(json!({"success": false, "error": "No registry"})),
+    };
+    let container_name = if name.starts_with("hr-") { name } else { format!("hr-{name}") };
+    match registry.send_host_command(
+        &id,
+        hr_registry::protocol::HostRegistryMessage::StartContainer { container_name: container_name.clone() },
+    ).await {
+        Ok(_) => Json(json!({"success": true, "message": format!("Start command sent for {container_name}")})),
+        Err(e) => Json(json!({"success": false, "error": e})),
+    }
+}
+
+async fn stop_container(
+    Path((id, name)): Path<(String, String)>,
+    State(state): State<ApiState>,
+) -> Json<Value> {
+    let registry = match &state.registry {
+        Some(r) => r,
+        None => return Json(json!({"success": false, "error": "No registry"})),
+    };
+    let container_name = if name.starts_with("hr-") { name } else { format!("hr-{name}") };
+    match registry.send_host_command(
+        &id,
+        hr_registry::protocol::HostRegistryMessage::StopContainer { container_name: container_name.clone() },
+    ).await {
+        Ok(_) => Json(json!({"success": true, "message": format!("Stop command sent for {container_name}")})),
+        Err(e) => Json(json!({"success": false, "error": e})),
+    }
+}
+
+async fn delete_container(
+    Path((id, name)): Path<(String, String)>,
+    State(state): State<ApiState>,
+) -> Json<Value> {
+    let registry = match &state.registry {
+        Some(r) => r,
+        None => return Json(json!({"success": false, "error": "No registry"})),
+    };
+    let container_name = if name.starts_with("hr-") { name } else { format!("hr-{name}") };
+    match registry.send_host_command(
+        &id,
+        hr_registry::protocol::HostRegistryMessage::DeleteContainer { container_name: container_name.clone() },
+    ).await {
+        Ok(_) => Json(json!({"success": true, "message": format!("Delete command sent for {container_name}")})),
+        Err(e) => Json(json!({"success": false, "error": e})),
+    }
+}
+
+#[derive(Deserialize)]
+struct ExecRequest {
+    container_name: String,
+    command: Vec<String>,
+}
+
+async fn exec_on_host(
+    Path(id): Path<String>,
+    State(state): State<ApiState>,
+    Json(body): Json<ExecRequest>,
+) -> Json<Value> {
+    let registry = match &state.registry {
+        Some(r) => r,
+        None => return Json(json!({"success": false, "error": "No registry"})),
+    };
+    match registry.exec_in_remote_container(&id, &body.container_name, body.command).await {
+        Ok((success, stdout, stderr)) => Json(json!({
+            "success": success,
+            "stdout": stdout,
+            "stderr": stderr,
+        })),
+        Err(e) => Json(json!({"success": false, "error": format!("{e}")})),
+    }
+}
+
 // ── Host-agent WebSocket ─────────────────────────────────────────────────
 
 async fn host_agent_ws(
@@ -491,6 +577,9 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
     // Mark host online
     update_host_status(&host_id, "online", &state.events.host_status).await;
 
+    // Track active transfers for remote→local migration (transfer_id → file + container_name)
+    let mut active_transfers: std::collections::HashMap<String, (tokio::fs::File, String)> = std::collections::HashMap::new();
+
     // Bidirectional message loop
     loop {
         tokio::select! {
@@ -532,16 +621,68 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
                                     tracing::info!(request_id = %request_id, success, "Host exec result");
                                     registry.on_host_exec_result(&host_id, &request_id, success, &stdout, &stderr).await;
                                 }
-                                HostAgentMessage::ExportReady { transfer_id, .. } => {
-                                    tracing::info!(transfer_id = %transfer_id, "Host export ready");
+                                HostAgentMessage::ExportReady { transfer_id, container_name, size_bytes } => {
+                                    // Use container_name from message, or fall back to registry lookup
+                                    let cname = if container_name.is_empty() {
+                                        registry.take_transfer_container_name(&transfer_id).await.unwrap_or_default()
+                                    } else {
+                                        container_name
+                                    };
+                                    tracing::info!(transfer_id = %transfer_id, container = %cname, size_bytes, "Host export ready, creating local transfer file");
+                                    let path = format!("/tmp/{}.tar.gz", transfer_id);
+                                    match tokio::fs::File::create(&path).await {
+                                        Ok(file) => {
+                                            active_transfers.insert(transfer_id.clone(), (file, cname));
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(transfer_id = %transfer_id, %e, "Failed to create transfer file");
+                                            registry.on_host_import_failed(&host_id, &transfer_id, &format!("Failed to create local file: {e}")).await;
+                                        }
+                                    }
                                 }
                                 HostAgentMessage::ExportFailed { transfer_id, error } => {
                                     tracing::error!(transfer_id = %transfer_id, %error, "Host export failed");
+                                    active_transfers.remove(&transfer_id);
+                                    let _ = tokio::fs::remove_file(format!("/tmp/{}.tar.gz", transfer_id)).await;
                                     registry.on_host_export_failed(&host_id, &transfer_id, &error).await;
                                 }
-                                HostAgentMessage::TransferChunk { .. } => {}
+                                HostAgentMessage::TransferChunk { transfer_id, data } => {
+                                    use base64::Engine;
+                                    use tokio::io::AsyncWriteExt;
+                                    if let Some((file, _)) = active_transfers.get_mut(&transfer_id) {
+                                        match base64::engine::general_purpose::STANDARD.decode(&data) {
+                                            Ok(bytes) => {
+                                                if let Err(e) = file.write_all(&bytes).await {
+                                                    tracing::error!(transfer_id = %transfer_id, %e, "Failed to write chunk");
+                                                    active_transfers.remove(&transfer_id);
+                                                    let _ = tokio::fs::remove_file(format!("/tmp/{}.tar.gz", transfer_id)).await;
+                                                    registry.on_host_import_failed(&host_id, &transfer_id, &format!("Write error: {e}")).await;
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::error!(transfer_id = %transfer_id, %e, "Failed to decode chunk");
+                                                active_transfers.remove(&transfer_id);
+                                                let _ = tokio::fs::remove_file(format!("/tmp/{}.tar.gz", transfer_id)).await;
+                                                registry.on_host_import_failed(&host_id, &transfer_id, &format!("Base64 decode error: {e}")).await;
+                                            }
+                                        }
+                                    }
+                                }
                                 HostAgentMessage::TransferComplete { transfer_id } => {
-                                    tracing::info!(transfer_id = %transfer_id, "Host transfer complete");
+                                    tracing::info!(transfer_id = %transfer_id, "Host transfer complete, starting local import");
+                                    if let Some((file, cname)) = active_transfers.remove(&transfer_id) {
+                                        // Close the file handle
+                                        drop(file);
+                                        // Spawn import task so we don't block the WS loop
+                                        let tid = transfer_id.clone();
+                                        let reg = registry.clone();
+                                        let hid = host_id.clone();
+                                        tokio::spawn(async move {
+                                            handle_local_import(reg, hid, tid, cname).await;
+                                        });
+                                    } else {
+                                        tracing::warn!(transfer_id = %transfer_id, "TransferComplete for unknown transfer");
+                                    }
                                 }
                                 HostAgentMessage::Auth { .. } => {}
                             }
@@ -559,11 +700,120 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
         }
     }
 
+    // Clean up any pending transfers
+    for (tid, _) in active_transfers {
+        let _ = tokio::fs::remove_file(format!("/tmp/{}.tar.gz", tid)).await;
+    }
+
     // Mark host offline
     update_host_status(&host_id, "offline", &state.events.host_status).await;
 
     registry.on_host_disconnected(&host_id).await;
     tracing::info!("Host agent disconnected: {} ({})", host_name, host_id);
+}
+
+// ── Local import for remote→local migration ─────────────────────────────
+
+/// Import a container locally after receiving all chunks from a remote host-agent.
+/// This mirrors the host-agent's `handle_import()` but runs on the master.
+async fn handle_local_import(
+    registry: std::sync::Arc<hr_registry::AgentRegistry>,
+    source_host_id: String,
+    transfer_id: String,
+    container_name: String,
+) {
+    let import_path = format!("/tmp/{}.tar.gz", transfer_id);
+
+    // Verify the file exists and is non-empty
+    match tokio::fs::metadata(&import_path).await {
+        Ok(m) if m.len() == 0 => {
+            tracing::error!(transfer_id = %transfer_id, "Transfer file is empty");
+            registry.on_host_import_failed(&source_host_id, &transfer_id, "Transfer file is empty").await;
+            let _ = tokio::fs::remove_file(&import_path).await;
+            return;
+        }
+        Err(e) => {
+            tracing::error!(transfer_id = %transfer_id, %e, "Transfer file missing");
+            registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Transfer file missing: {e}")).await;
+            return;
+        }
+        Ok(m) => {
+            tracing::info!(transfer_id = %transfer_id, size_bytes = m.len(), "Starting local LXC import");
+        }
+    }
+
+    // Pre-create workspace storage volume so import doesn't fail on missing volume reference
+    if !container_name.is_empty() {
+        let vol_name = format!("{container_name}-workspace");
+        tracing::info!(volume = %vol_name, "Pre-creating workspace storage volume for import");
+        let _ = tokio::process::Command::new("lxc")
+            .args(["storage", "volume", "create", "default", &vol_name])
+            .output()
+            .await;
+    }
+
+    // Import the container
+    let import = tokio::process::Command::new("lxc")
+        .args(["import", &import_path])
+        .output()
+        .await;
+
+    match import {
+        Ok(output) if output.status.success() => {
+            tracing::info!(transfer_id = %transfer_id, container = %container_name, "LXC import successful");
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::error!(transfer_id = %transfer_id, %stderr, "LXC import failed");
+            registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("lxc import failed: {stderr}")).await;
+            let _ = tokio::fs::remove_file(&import_path).await;
+            return;
+        }
+        Err(e) => {
+            tracing::error!(transfer_id = %transfer_id, %e, "LXC import command error");
+            registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Import command error: {e}")).await;
+            let _ = tokio::fs::remove_file(&import_path).await;
+            return;
+        }
+    }
+
+    // Assign profile and start
+    tracing::info!(transfer_id = %transfer_id, container = %container_name, "Container imported, assigning profile and starting");
+
+    // Assign the homeroute-agent profile (like the host-agent does)
+    let profile_assign = tokio::process::Command::new("lxc")
+        .args(["profile", "assign", &container_name, "default,homeroute-agent"])
+        .output()
+        .await;
+    if let Err(e) = &profile_assign {
+        tracing::warn!(container = %container_name, %e, "Failed to assign profile");
+    }
+
+    // Start the container
+    let start = tokio::process::Command::new("lxc")
+        .args(["start", &container_name])
+        .output()
+        .await;
+
+    match start {
+        Ok(output) if output.status.success() => {
+            tracing::info!(transfer_id = %transfer_id, container = %container_name, "Container started successfully");
+            // Signal migration success — this unblocks the migration task in applications.rs
+            registry.on_host_import_complete("local", &transfer_id, &container_name).await;
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::error!(transfer_id = %transfer_id, %stderr, "Container imported but start failed");
+            registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Start failed: {stderr}")).await;
+        }
+        Err(e) => {
+            tracing::error!(transfer_id = %transfer_id, %e, "Start command error");
+            registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Start command error: {e}")).await;
+        }
+    }
+
+    // Cleanup transfer file
+    let _ = tokio::fs::remove_file(&import_path).await;
 }
 
 // ── Agent status helpers ─────────────────────────────────────────────────

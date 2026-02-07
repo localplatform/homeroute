@@ -628,31 +628,7 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
         return;
     }
 
-    // Set up app routes so hr-proxy forwards requests to the container
-    {
-        let apps = registry.list_applications().await;
-        if let Some(app) = apps.iter().find(|a| a.id == app_id) {
-            if let Some(target_ip) = app.ipv4_address {
-                let base_domain = &state.env.base_domain;
-                for route_info in app.routes(base_domain) {
-                    let service_type = if route_info.domain.contains(".code.") {
-                        ServiceType::CodeServer
-                    } else {
-                        ServiceType::App
-                    };
-                    state.proxy.set_app_route(route_info.domain, AppRoute {
-                        app_id: app.id.clone(),
-                        host_id: app.host_id.clone(),
-                        target_ip,
-                        target_port: route_info.target_port,
-                        auth_required: route_info.auth_required,
-                        allowed_groups: route_info.allowed_groups,
-                        service_type,
-                    });
-                }
-            }
-        }
-    }
+    // Routes are now published by the agent via PublishRoutes message.
 
     // Send auth success
     let success = hr_registry::protocol::RegistryMessage::AuthResult {
@@ -707,6 +683,32 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
                                 );
                                 // Broadcast to WebSocket clients
                                 registry.handle_service_state_changed(&app_id, service_type, new_state);
+                            }
+                            Ok(AgentMessage::PublishRoutes { routes }) => {
+                                info!(app_id, count = routes.len(), "Agent published routes");
+                                let apps = registry.list_applications().await;
+                                if let Some(app) = apps.iter().find(|a| a.id == app_id) {
+                                    if let Some(target_ip) = app.ipv4_address {
+                                        // Clear old routes for this app
+                                        let base_domain = &state.env.base_domain;
+                                        for domain in app.domains(base_domain) {
+                                            state.proxy.remove_app_route(&domain);
+                                        }
+                                        // Set new routes from agent
+                                        for route in &routes {
+                                            state.proxy.set_app_route(route.domain.clone(), AppRoute {
+                                                app_id: app.id.clone(),
+                                                host_id: app.host_id.clone(),
+                                                target_ip,
+                                                target_port: route.target_port,
+                                                auth_required: route.auth_required,
+                                                allowed_groups: route.allowed_groups.clone(),
+                                                service_type: route.service_type,
+                                                wake_page_enabled: app.wake_page_enabled,
+                                            });
+                                        }
+                                    }
+                                }
                             }
                             Err(e) => {
                                 warn!(app_id, "Invalid agent message: {e}");
@@ -997,6 +999,8 @@ async fn run_migration(
         // Source is remote: tell source host-agent to export
         // Register signal to detect export failures
         let export_rx = registry.register_migration_signal(&transfer_id).await;
+        // Store transfer_id → container_name mapping so the WS handler can look it up
+        registry.set_transfer_container_name(&transfer_id, &container_name).await;
 
         if let Err(e) = registry.send_host_command(
             &source_host_id,
@@ -1009,13 +1013,15 @@ async fn run_migration(
             return;
         }
 
-        // Wait for export result from the source host-agent
-        // NOTE: Full remote→local chunk relay is not yet implemented.
-        // For now, we detect export failures early instead of blind-sleeping.
+        // Wait for the full remote→local pipeline:
+        // 1. Remote host-agent exports & streams chunks via WebSocket
+        // 2. Master's WS handler receives chunks, writes to /tmp/{transfer_id}.tar.gz
+        // 3. On TransferComplete, master runs lxc import + lxc start
+        // 4. Master signals ImportComplete on the migration channel
         update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Exporting, 30, 0, 0, None).await;
 
         match tokio::time::timeout(
-            std::time::Duration::from_secs(120),
+            std::time::Duration::from_secs(600),
             export_rx,
         ).await {
             Ok(Ok(hr_registry::MigrationResult::ExportFailed { error })) => {
@@ -1042,7 +1048,7 @@ async fn run_migration(
             Err(_) => {
                 update_migration_phase(&migrations, &events, &app_id, &transfer_id,
                     MigrationPhase::Failed, 0, 0, 0,
-                    Some("Remote migration timed out after 120s".to_string())).await;
+                    Some("Remote migration timed out after 600s".to_string())).await;
                 return;
             }
         }

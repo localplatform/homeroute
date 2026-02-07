@@ -11,7 +11,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
-use hr_registry::protocol::{AgentMessage, AgentMetrics, RegistryMessage, ServiceConfig, ServiceState};
+use hr_registry::protocol::{AgentMessage, AgentMetrics, AgentRoute, RegistryMessage, ServiceConfig, ServiceState, ServiceType};
 
 use crate::metrics::MetricsCollector;
 use crate::powersave::{PowersaveManager, ServiceStateChange};
@@ -202,7 +202,7 @@ async fn handle_registry_message(
     msg: RegistryMessage,
 ) {
     match msg {
-        RegistryMessage::Config { services, power_policy, .. } => {
+        RegistryMessage::Config { services, power_policy, base_domain, slug, frontend, apis, code_server_enabled, .. } => {
             info!("Received config from HomeRoute");
 
             // Update service manager config
@@ -213,6 +213,41 @@ async fn handle_registry_message(
 
             // Update power policy
             powersave_manager.set_policy(&power_policy);
+
+            // Build and publish routes
+            let mut routes = Vec::new();
+            if let Some(ref fe) = frontend {
+                routes.push(AgentRoute {
+                    domain: format!("{}.{}", slug, base_domain),
+                    target_port: fe.target_port,
+                    service_type: ServiceType::App,
+                    auth_required: fe.auth_required,
+                    allowed_groups: fe.allowed_groups.clone(),
+                });
+            }
+            for api in &apis {
+                routes.push(AgentRoute {
+                    domain: format!("{}-{}.{}", slug, api.slug, base_domain),
+                    target_port: api.target_port,
+                    service_type: ServiceType::App,
+                    auth_required: api.auth_required,
+                    allowed_groups: api.allowed_groups.clone(),
+                });
+            }
+            if code_server_enabled {
+                routes.push(AgentRoute {
+                    domain: format!("{}.code.{}", slug, base_domain),
+                    target_port: 13337,
+                    service_type: ServiceType::CodeServer,
+                    auth_required: true,
+                    allowed_groups: vec![],
+                });
+            }
+            if !routes.is_empty() {
+                let routes_count = routes.len();
+                let _ = outbound_tx.send(AgentMessage::PublishRoutes { routes }).await;
+                info!("Published {} routes to HomeRoute", routes_count);
+            }
         }
 
         RegistryMessage::Shutdown => {

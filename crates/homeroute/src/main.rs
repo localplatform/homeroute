@@ -492,6 +492,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Connect proxy to registry for ActivityPing and Wake-on-Demand
     proxy_state.set_registry(registry.clone());
+    proxy_state.set_events(events.clone());
 
     // Populate app routes for all applications with IPv4 addresses
     {
@@ -510,6 +511,7 @@ async fn main() -> anyhow::Result<()> {
                             auth_required: route.auth_required,
                             allowed_groups: route.allowed_groups,
                             service_type: hr_registry::ServiceType::App,
+                            wake_page_enabled: app.wake_page_enabled,
                         },
                     );
                 }

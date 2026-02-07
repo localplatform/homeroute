@@ -54,6 +54,8 @@ pub struct AgentRegistry {
     events: Arc<EventBus>,
     migration_signals: Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<MigrationResult>>>>,
     exec_signals: Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<(bool, String, String)>>>>,
+    /// Maps transfer_id → container_name for in-flight migrations (set when StartExport is sent)
+    pub transfer_container_names: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl AgentRegistry {
@@ -87,6 +89,7 @@ impl AgentRegistry {
             events,
             migration_signals: Arc::new(RwLock::new(HashMap::new())),
             exec_signals: Arc::new(RwLock::new(HashMap::new())),
+            transfer_container_names: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -124,6 +127,7 @@ impl AgentRegistry {
             code_server_enabled: req.code_server_enabled,
             services: req.services,
             power_policy: req.power_policy,
+            wake_page_enabled: req.wake_page_enabled,
             metrics: None,
         };
 
@@ -256,6 +260,9 @@ impl AgentRegistry {
         }
         if let Some(power_policy) = req.power_policy {
             app.power_policy = power_policy;
+        }
+        if let Some(wake_page_enabled) = req.wake_page_enabled {
+            app.wake_page_enabled = wake_page_enabled;
         }
 
         let app = app.clone();
@@ -390,13 +397,19 @@ impl AgentRegistry {
             }
         };
 
-        // Push simplified config
+        // Push config with endpoint info for agent route publishing
         if let Some(app) = app {
             let _ = tx
                 .send(RegistryMessage::Config {
                     config_version: 1,
                     services: app.services.clone(),
                     power_policy: app.power_policy.clone(),
+                    base_domain: self.env.base_domain.clone(),
+                    slug: app.slug.clone(),
+                    frontend: Some(app.frontend.clone()),
+                    apis: app.apis.clone(),
+                    code_server_enabled: app.code_server_enabled,
+                    wake_page_enabled: app.wake_page_enabled,
                 })
                 .await;
         }
@@ -537,6 +550,16 @@ impl AgentRegistry {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.migration_signals.write().await.insert(transfer_id.to_string(), tx);
         rx
+    }
+
+    /// Store the container_name for a given transfer_id (called when StartExport is sent).
+    pub async fn set_transfer_container_name(&self, transfer_id: &str, container_name: &str) {
+        self.transfer_container_names.write().await.insert(transfer_id.to_string(), container_name.to_string());
+    }
+
+    /// Retrieve and remove the container_name for a given transfer_id.
+    pub async fn take_transfer_container_name(&self, transfer_id: &str) -> Option<String> {
+        self.transfer_container_names.write().await.remove(transfer_id)
     }
 
     pub async fn on_host_import_complete(&self, _host_id: &str, transfer_id: &str, container_name: &str) {
@@ -687,10 +710,10 @@ WantedBy=multi-user.target
             .await
             .with_context(|| format!("Failed to attach workspace volume for {container}"))?;
 
-        // Configure code-server: no auth (forward-auth handles it), bind localhost
+        // Configure code-server: no auth (forward-auth handles it), bind LAN
         emit("Configuration de code-server...");
         LxdClient::exec(container, &["mkdir", "-p", "/root/.config/code-server"]).await?;
-        let cs_config = "bind-addr: 127.0.0.1:13337\nauth: none\ncert: false\n";
+        let cs_config = "bind-addr: 0.0.0.0:13337\nauth: none\ncert: false\n";
         let tmp_cs_config = PathBuf::from(format!("/tmp/cs-config-{service_name}.yaml"));
         tokio::fs::write(&tmp_cs_config, cs_config).await?;
         LxdClient::push_file(container, &tmp_cs_config, "root/.config/code-server/config.yaml").await?;
@@ -719,7 +742,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/code-server --bind-addr 127.0.0.1:13337 /root/workspace
+ExecStart=/usr/local/bin/code-server --bind-addr 0.0.0.0:13337 /root/workspace
 Restart=always
 RestartSec=5
 Environment=HOME=/root
@@ -782,6 +805,12 @@ WantedBy=multi-user.target
                 config_version: 1,
                 services: app.services.clone(),
                 power_policy: app.power_policy.clone(),
+                base_domain: self.env.base_domain.clone(),
+                slug: app.slug.clone(),
+                frontend: Some(app.frontend.clone()),
+                apis: app.apis.clone(),
+                code_server_enabled: app.code_server_enabled,
+                wake_page_enabled: app.wake_page_enabled,
             })
             .await;
     }

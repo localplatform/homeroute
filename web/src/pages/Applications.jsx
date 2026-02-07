@@ -91,6 +91,7 @@ function Applications() {
     frontend: { target_port: '', auth_required: false, allowed_groups: [], local_only: false },
     apis: [],
     code_server_enabled: true,
+    wake_page_enabled: true,
   });
 
   // Edit form
@@ -309,6 +310,7 @@ function Applications() {
           local_only: a.local_only || false,
         })),
         code_server_enabled: createForm.code_server_enabled,
+        wake_page_enabled: createForm.wake_page_enabled,
       };
 
       const res = await createApplication(payload);
@@ -319,6 +321,7 @@ function Applications() {
           frontend: { target_port: '', auth_required: false, allowed_groups: [], local_only: false },
           apis: [],
           code_server_enabled: true,
+          wake_page_enabled: true,
         });
         if (res.data.token) {
           setTokenModal({ name: createForm.name, token: res.data.token });
@@ -358,6 +361,7 @@ function Applications() {
           local_only: a.local_only || false,
         })),
         code_server_enabled: editForm.code_server_enabled,
+        wake_page_enabled: editForm.wake_page_enabled,
         services: {
           app: parseServices(editForm.services?.app),
           db: parseServices(editForm.services?.db),
@@ -421,6 +425,7 @@ function Applications() {
       frontend: { ...app.frontend, target_port: String(app.frontend.target_port) },
       apis: (app.apis || []).map(a => ({ ...a, target_port: String(a.target_port) })),
       code_server_enabled: app.code_server_enabled !== false,
+      wake_page_enabled: app.wake_page_enabled !== false,
       services: {
         app: (app.services?.app || []).join(', '),
         db: (app.services?.db || []).join(', '),
@@ -944,6 +949,30 @@ function Applications() {
                 )}
               </label>
 
+              {/* Wake page toggle */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="text-sm font-medium text-gray-200">
+                    Page d&apos;attente au demarrage
+                  </label>
+                  <p className="text-xs text-gray-400 mt-1">
+                    Afficher une page de chargement lors du reveil du service.
+                    Si desactive, le client attend de maniere transparente.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCreateForm(prev => ({ ...prev, wake_page_enabled: !prev.wake_page_enabled }))}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors flex-shrink-0 ${
+                    createForm.wake_page_enabled ? 'bg-blue-600' : 'bg-gray-600'
+                  }`}
+                >
+                  <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                    createForm.wake_page_enabled ? 'translate-x-6' : 'translate-x-1'
+                  }`} />
+                </button>
+              </div>
+
               {/* APIs */}
               <div className="border border-gray-700 p-4">
                 <div className="flex items-center justify-between mb-3">
@@ -1152,6 +1181,30 @@ function Applications() {
                   <span className="text-xs text-gray-500 font-mono ml-2">{editingApp.slug}.code.{baseDomain}</span>
                 )}
               </label>
+
+              {/* Wake page toggle */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="text-sm font-medium text-gray-200">
+                    Page d&apos;attente au demarrage
+                  </label>
+                  <p className="text-xs text-gray-400 mt-1">
+                    Afficher une page de chargement lors du reveil du service.
+                    Si desactive, le client attend de maniere transparente.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEditForm(prev => ({ ...prev, wake_page_enabled: !prev.wake_page_enabled }))}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors flex-shrink-0 ${
+                    editForm.wake_page_enabled ? 'bg-blue-600' : 'bg-gray-600'
+                  }`}
+                >
+                  <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                    editForm.wake_page_enabled ? 'translate-x-6' : 'translate-x-1'
+                  }`} />
+                </button>
+              </div>
 
               {/* APIs */}
               <div className="border border-gray-700 p-4">

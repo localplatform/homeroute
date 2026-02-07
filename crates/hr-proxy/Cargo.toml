@@ -4,9 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+hr-common = { path = "../hr-common" }
 hr-auth = { path = "../hr-auth" }
 hr-registry = { path = "../hr-registry" }
 tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures-util = { workspace = true }
 axum = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }

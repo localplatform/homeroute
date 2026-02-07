@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::types::{ApiEndpoint, FrontendEndpoint};
+
 // ── Shared Types ────────────────────────────────────────────────
 
 /// State of a managed service (code-server, app, or db).
@@ -118,6 +120,22 @@ pub enum AgentMessage {
         service_type: ServiceType,
         new_state: ServiceState,
     },
+    /// Agent publishes its routes for reverse proxy registration.
+    #[serde(rename = "publish_routes")]
+    PublishRoutes {
+        routes: Vec<AgentRoute>,
+    },
+}
+
+/// A route published by an agent for reverse proxy registration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRoute {
+    pub domain: String,
+    pub target_port: u16,
+    pub service_type: ServiceType,
+    pub auth_required: bool,
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
 }
 
 // ── Messages from Registry → Agent ──────────────────────────────
@@ -142,6 +160,24 @@ pub enum RegistryMessage {
         /// Power-saving policy.
         #[serde(default)]
         power_policy: PowerPolicy,
+        /// Base domain for route construction (e.g., "mynetwk.biz").
+        #[serde(default)]
+        base_domain: String,
+        /// Application slug for route construction.
+        #[serde(default)]
+        slug: String,
+        /// Frontend endpoint configuration.
+        #[serde(default)]
+        frontend: Option<FrontendEndpoint>,
+        /// API endpoints.
+        #[serde(default)]
+        apis: Vec<ApiEndpoint>,
+        /// Whether code-server is enabled.
+        #[serde(default)]
+        code_server_enabled: bool,
+        /// Whether wake page is enabled for this app.
+        #[serde(default = "default_true")]
+        wake_page_enabled: bool,
     },
     /// Agent should self-update.
     #[serde(rename = "update_available")]
@@ -167,6 +203,10 @@ pub enum RegistryMessage {
     ActivityPing { service_type: ServiceType },
 }
 
+fn default_true() -> bool {
+    true
+}
+
 // ── Host Agent Protocol ──────────────────────────────────────────────────
 
 /// Messages from host-agent → registry (via WebSocket)
@@ -186,6 +226,8 @@ pub enum HostAgentMessage {
     ContainerList(Vec<ContainerInfo>),
     ExportReady {
         transfer_id: String,
+        #[serde(default)]
+        container_name: String,
         size_bytes: u64,
     },
     TransferChunk {

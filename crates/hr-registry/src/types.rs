@@ -44,6 +44,9 @@ pub struct Application {
     /// Power-saving policy.
     #[serde(default)]
     pub power_policy: PowerPolicy,
+    /// Whether to show a wake page when service is starting (vs transparent wait).
+    #[serde(default = "default_true")]
+    pub wake_page_enabled: bool,
     /// Current metrics from agent (volatile, not persisted to disk).
     #[serde(skip_deserializing)]
     pub metrics: Option<AgentMetrics>,
@@ -171,6 +174,8 @@ pub struct CreateApplicationRequest {
     pub services: ServiceConfig,
     #[serde(default)]
     pub power_policy: PowerPolicy,
+    #[serde(default = "default_true")]
+    pub wake_page_enabled: bool,
 }
 
 /// Request body for updating an application.
@@ -190,6 +195,8 @@ pub struct UpdateApplicationRequest {
     pub services: Option<ServiceConfig>,
     #[serde(default)]
     pub power_policy: Option<PowerPolicy>,
+    #[serde(default)]
+    pub wake_page_enabled: Option<bool>,
 }
 
 // ── Agent Update Types ──────────────────────────────────────────
@@ -281,6 +288,7 @@ mod tests {
             code_server_enabled,
             services: ServiceConfig::default(),
             power_policy: PowerPolicy::default(),
+            wake_page_enabled: true,
             metrics: None,
         }
     }
