@@ -35,6 +35,8 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     let mut dv_schema_rx = state.events.dataverse_schema.subscribe();
     let mut dv_data_rx = state.events.dataverse_data.subscribe();
     let mut host_metrics_rx = state.events.host_metrics.subscribe();
+    let mut host_power_rx = state.events.host_power.subscribe();
+    let mut cloud_relay_rx = state.events.cloud_relay.subscribe();
 
     // Send current active migrations so reconnecting clients get up-to-date state
     {
@@ -107,6 +109,29 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!("WebSocket host_metrics lagged by {}", n);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            // Host power state events (WOL, shutdown, reboot, suspend transitions)
+            result = host_power_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({
+                            "type": "hosts:power",
+                            "data": {
+                                "hostId": event.host_id,
+                                "state": event.state,
+                                "message": event.message,
+                            }
+                        });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("WebSocket host_power lagged by {}", n);
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -318,6 +343,25 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!("WebSocket dataverse_data lagged by {}", n);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            // Cloud relay status events
+            result = cloud_relay_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({
+                            "type": "cloud_relay:status",
+                            "data": event,
+                        });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("WebSocket cloud_relay lagged by {}", n);
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }

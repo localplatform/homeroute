@@ -12,8 +12,9 @@ hr-dns = { path = "../hr-dns" }
 hr-dhcp = { path = "../hr-dhcp" }
 hr-ipv6 = { path = "../hr-ipv6" }
 hr-adblock = { path = "../hr-adblock" }
-hr-firewall = { path = "../hr-firewall" }
+
 hr-registry = { path = "../hr-registry" }
+hr-tunnel = { path = "../hr-tunnel" }
 hr-lxd = { path = "../hr-lxd" }
 tokio = { workspace = true }
 axum = { workspace = true }

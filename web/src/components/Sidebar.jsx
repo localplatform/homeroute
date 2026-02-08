@@ -1,8 +1,8 @@
 import { NavLink } from 'react-router-dom';
 import {
-  LayoutDashboard, Server, Network, Shield, ShieldCheck, Globe, Settings,
+  LayoutDashboard, Server, Shield, Globe, Settings,
   ArrowLeftRight, RefreshCw, Zap, Users, LogOut,
-  User, HardDrive, Lock, Boxes, Database
+  User, HardDrive, Lock, Boxes, Database, Cloud
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
@@ -16,14 +16,13 @@ const navGroups = [
     label: 'Réseau',
     items: [
       { to: '/dns', icon: Server, label: 'DNS / DHCP' },
-      { to: '/network', icon: Network, label: 'Réseau' },
-      { to: '/firewall', icon: ShieldCheck, label: 'Firewall IPv6' },
       { to: '/adblock', icon: Shield, label: 'AdBlock' },
       { to: '/ddns', icon: Globe, label: 'Dynamic DNS' },
       { to: '/reverseproxy', icon: ArrowLeftRight, label: 'Reverse Proxy' },
       { to: '/applications', icon: Boxes, label: 'Applications' },
       { to: '/dataverse', icon: Database, label: 'Dataverse' },
       { to: '/certificates', icon: Lock, label: 'Certificats' },
+      { to: '/cloud-relay', icon: Cloud, label: 'Cloud Relay' },
     ],
   },
   {

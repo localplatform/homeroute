@@ -25,6 +25,10 @@ pub struct EventBus {
     pub dataverse_data: broadcast::Sender<DataverseDataEvent>,
     /// Host metrics events (host-agent → websocket)
     pub host_metrics: broadcast::Sender<HostMetricsEvent>,
+    /// Host power state events (registry → proxy/websocket for WOD progress)
+    pub host_power: broadcast::Sender<HostPowerEvent>,
+    /// Cloud relay status events (tunnel client → websocket)
+    pub cloud_relay: broadcast::Sender<CloudRelayEvent>,
 }
 
 impl EventBus {
@@ -41,6 +45,8 @@ impl EventBus {
             dataverse_schema: broadcast::channel(64).0,
             dataverse_data: broadcast::channel(64).0,
             host_metrics: broadcast::channel(64).0,
+            host_power: broadcast::channel(64).0,
+            cloud_relay: broadcast::channel(64).0,
         }
     }
 }
@@ -203,4 +209,93 @@ pub struct HostMetricsEvent {
     pub cpu_percent: f32,
     pub memory_used_bytes: u64,
     pub memory_total_bytes: u64,
+}
+
+/// Power state of a remote host (state machine for WOL/shutdown/reboot/suspend).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostPowerState {
+    Online,
+    Offline,
+    WakingUp,
+    ShuttingDown,
+    Rebooting,
+    Suspending,
+    Suspended,
+}
+
+impl std::fmt::Display for HostPowerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Online => write!(f, "online"),
+            Self::Offline => write!(f, "offline"),
+            Self::WakingUp => write!(f, "waking_up"),
+            Self::ShuttingDown => write!(f, "shutting_down"),
+            Self::Rebooting => write!(f, "rebooting"),
+            Self::Suspending => write!(f, "suspending"),
+            Self::Suspended => write!(f, "suspended"),
+        }
+    }
+}
+
+/// Host power state change event (registry → proxy SSE / websocket).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostPowerEvent {
+    pub host_id: String,
+    pub state: HostPowerState,
+    pub message: String,
+}
+
+/// Result of a wake host request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeResult {
+    /// WOL magic packet was sent.
+    WolSent,
+    /// Host is already waking up (WOL dedup).
+    AlreadyWaking,
+    /// Host is already online.
+    AlreadyOnline,
+}
+
+/// Power action for conflict checking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowerAction {
+    Shutdown,
+    Reboot,
+    Suspend,
+}
+
+/// Cloud relay connection status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudRelayStatus {
+    Connected,
+    Disconnected,
+    Reconnecting,
+    Bootstrapping,
+    Error,
+}
+
+impl std::fmt::Display for CloudRelayStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Connected => write!(f, "connected"),
+            Self::Disconnected => write!(f, "disconnected"),
+            Self::Reconnecting => write!(f, "reconnecting"),
+            Self::Bootstrapping => write!(f, "bootstrapping"),
+            Self::Error => write!(f, "error"),
+        }
+    }
+}
+
+/// Cloud relay event (tunnel client → websocket for frontend display).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloudRelayEvent {
+    pub status: CloudRelayStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_streams: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }

@@ -177,9 +177,13 @@ impl TlsManager {
 
     /// Build the rustls ServerConfig with our SNI resolver
     pub fn build_server_config(&self) -> Result<Arc<ServerConfig>> {
-        let config = ServerConfig::builder()
+        let mut config = ServerConfig::builder()
             .with_no_client_auth()
             .with_cert_resolver(self.resolver.clone());
+
+        // Advertise only HTTP/1.1 via ALPN — we don't support h2 or h3.
+        // This helps browsers negotiate the correct protocol on LAN.
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
 
         Ok(Arc::new(config))
     }

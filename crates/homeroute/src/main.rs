@@ -354,42 +354,52 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // ── IPv6 Prefix Delegation + RA + Firewall ────────────────────────
+    // Cloud Relay tunnel client (Critical — only if enabled)
+    if env.cloud_relay_enabled {
+        if let Some(ref relay_host) = env.cloud_relay_host {
+            let relay_host = relay_host.clone();
+            let relay_port = env.cloud_relay_quic_port;
+            let data_dir = env.data_dir.clone();
+            let proxy_state_c = proxy_state.clone();
+            let tls_config_c = tls_config.clone();
+            let events_c = events.clone();
+            let reg = service_registry.clone();
+            spawn_supervised(
+                "cloud-relay-tunnel",
+                ServicePriority::Critical,
+                reg,
+                move || {
+                    let relay_host = relay_host.clone();
+                    let data_dir = data_dir.clone();
+                    let proxy_state = proxy_state_c.clone();
+                    let tls_config = tls_config_c.clone();
+                    let events = events_c.clone();
+                    async move {
+                        run_tunnel_client(
+                            &relay_host,
+                            relay_port,
+                            &data_dir,
+                            proxy_state,
+                            tls_config,
+                            events,
+                        )
+                        .await
+                    }
+                },
+            );
+            info!(port = relay_port, "Cloud relay tunnel client started");
+        } else {
+            warn!("CLOUD_RELAY_ENABLED=true but CLOUD_RELAY_HOST not set");
+        }
+    }
 
-    // Watch channel: PD client → RA sender + Firewall
+    // ── IPv6 Prefix Delegation + RA ─────────────────────────────────
+
+    // Watch channel: PD client → RA sender
     let (prefix_tx, prefix_rx) =
         tokio::sync::watch::channel::<Option<hr_ipv6::PrefixInfo>>(None);
 
-    // Load firewall config
-    let firewall_config = hr_firewall::FirewallConfig::load();
-
-    // 1) IPv6 Firewall (must be ready BEFORE prefix is announced)
-    let firewall_engine = if firewall_config.enabled {
-        let engine = Arc::new(hr_firewall::FirewallEngine::new(firewall_config));
-        let engine_c = engine.clone();
-        let rx = prefix_rx.clone();
-        let reg = service_registry.clone();
-        spawn_supervised("ipv6-firewall", ServicePriority::Important, reg, move || {
-            let engine = engine_c.clone();
-            let rx = rx.clone();
-            async move { hr_firewall::engine::run_firewall(engine, rx).await }
-        });
-        Some(engine)
-    } else {
-        let mut reg = service_registry.write().await;
-        reg.insert("ipv6-firewall".into(), ServiceStatus {
-            name: "ipv6-firewall".into(),
-            state: ServiceState::Disabled,
-            priority: ServicePriorityLevel::Important,
-            restart_count: 0,
-            last_state_change: now_millis(),
-            error: None,
-        });
-        drop(reg);
-        None
-    };
-
-    // 2) DHCPv6-PD client (obtains /56 from upstream, publishes /64 on channel)
+    // 1) DHCPv6-PD client (obtains /56 from upstream, publishes /64 on channel)
     if dns_dhcp_config.ipv6.enabled && dns_dhcp_config.ipv6.pd_enabled {
         let ipv6_config = dns_dhcp_config.ipv6.clone();
         let tx = prefix_tx.clone();
@@ -412,7 +422,7 @@ async fn main() -> anyhow::Result<()> {
         drop(reg);
     }
 
-    // 3) IPv6 RA sender (announces ULA + GUA prefixes)
+    // 2) IPv6 RA sender (announces ULA + GUA prefixes)
     if dns_dhcp_config.ipv6.enabled && dns_dhcp_config.ipv6.ra_enabled {
         let ipv6_config = dns_dhcp_config.ipv6.clone();
         let rx = prefix_rx.clone();
@@ -435,7 +445,7 @@ async fn main() -> anyhow::Result<()> {
         drop(reg);
     }
 
-    // 4) DHCPv6 stateful server (assigns addresses from GUA prefix)
+    // 3) DHCPv6 stateful server (assigns addresses from GUA prefix)
     if dns_dhcp_config.ipv6.enabled && dns_dhcp_config.ipv6.dhcpv6_enabled {
         let ipv6_config = dns_dhcp_config.ipv6.clone();
         let rx = prefix_rx.clone();
@@ -540,10 +550,11 @@ async fn main() -> anyhow::Result<()> {
         proxy_config_path: env.proxy_config_path.clone(),
         reverseproxy_config_path: env.reverseproxy_config_path.clone(),
         service_registry: service_registry.clone(),
-        firewall: firewall_engine,
+
         registry: Some(registry.clone()),
         migrations: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         dataverse_schemas: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        cloud_relay_status: Arc::new(tokio::sync::RwLock::new(None)),
     };
 
     let api_router = hr_api::build_router(api_state);
@@ -756,6 +767,193 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+// ── Cloud Relay tunnel client ─────────────────────────────────────────
+
+async fn run_tunnel_client(
+    relay_host: &str,
+    relay_port: u16,
+    data_dir: &std::path::Path,
+    proxy_state: Arc<ProxyState>,
+    tls_config: Arc<rustls::ServerConfig>,
+    events: Arc<EventBus>,
+) -> anyhow::Result<()> {
+    use hr_common::events::{CloudRelayEvent, CloudRelayStatus};
+    use hr_tunnel::protocol::StreamHeader;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use tokio_rustls::TlsAcceptor;
+
+    let relay_dir = data_dir.join("cloud-relay");
+
+    // Load mTLS client certificates
+    let ca_pem = tokio::fs::read(relay_dir.join("ca.pem")).await?;
+    let client_pem = tokio::fs::read(relay_dir.join("client.pem")).await?;
+    let client_key_pem = tokio::fs::read(relay_dir.join("client-key.pem")).await?;
+
+    let client_config =
+        hr_tunnel::quic::build_client_config(&client_pem, &client_key_pem, &ca_pem)?;
+
+    // Create QUIC endpoint (bind ephemeral port)
+    let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)?;
+    endpoint.set_default_client_config(client_config);
+
+    let server_addr: SocketAddr = format!("{}:{}", relay_host, relay_port).parse()?;
+    let server_name = relay_host.to_string();
+
+    info!(host = %relay_host, port = relay_port, "Connecting QUIC tunnel to cloud relay...");
+
+    let _ = events.cloud_relay.send(CloudRelayEvent {
+        status: CloudRelayStatus::Reconnecting,
+        latency_ms: None,
+        active_streams: None,
+        message: Some(format!("Connecting to {}:{}", relay_host, relay_port)),
+    });
+
+    // Connect to VPS
+    let connection = endpoint.connect(server_addr, &server_name)?.await?;
+
+    info!("QUIC tunnel connected to {}", connection.remote_address());
+
+    let _ = events.cloud_relay.send(CloudRelayEvent {
+        status: CloudRelayStatus::Connected,
+        latency_ms: None,
+        active_streams: None,
+        message: Some("Tunnel connected".to_string()),
+    });
+
+    let tls_acceptor = TlsAcceptor::from(tls_config);
+
+    // Accept incoming bidirectional streams (each = one TCP connection from the internet)
+    loop {
+        let (mut quic_send, mut quic_recv) = match connection.accept_bi().await {
+            Ok(streams) => streams,
+            Err(e) => {
+                warn!("QUIC tunnel closed: {}", e);
+                let _ = events.cloud_relay.send(CloudRelayEvent {
+                    status: CloudRelayStatus::Disconnected,
+                    latency_ms: None,
+                    active_streams: None,
+                    message: Some(format!("Tunnel closed: {}", e)),
+                });
+                return Err(e.into());
+            }
+        };
+
+        let proxy_state = proxy_state.clone();
+        let acceptor = tls_acceptor.clone();
+
+        tokio::spawn(async move {
+            // Read the StreamHeader to get client IP
+            let mut header_buf = vec![0u8; 26]; // max: 1 + 1 + 16 + 8 = 26
+            let n = match quic_recv.read(&mut header_buf).await {
+                Ok(Some(n)) => n,
+                Ok(None) => return,
+                Err(e) => {
+                    tracing::debug!("Failed to read stream header: {}", e);
+                    return;
+                }
+            };
+
+            let mut cursor = &header_buf[..n];
+            let header = match StreamHeader::decode(&mut cursor) {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::debug!("Invalid stream header: {}", e);
+                    return;
+                }
+            };
+
+            let client_ip = header.client_ip;
+
+            // Bridge QUIC streams to a single AsyncRead+AsyncWrite via duplex
+            let (quic_side, tls_side) = tokio::io::duplex(256 * 1024);
+            let (quic_reader, mut quic_writer) = tokio::io::split(quic_side);
+
+            // Task: QUIC recv → quic_writer → tls_side (readable by TLS acceptor)
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let mut buf = vec![0u8; 65536];
+                loop {
+                    match quic_recv.read(&mut buf).await {
+                        Ok(Some(n)) => {
+                            if quic_writer.write_all(&buf[..n]).await.is_err() {
+                                break;
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+            });
+
+            // Task: quic_reader (data written by TLS) → QUIC send
+            tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut reader = quic_reader;
+                let mut buf = vec![0u8; 65536];
+                loop {
+                    match reader.read(&mut buf).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if quic_send.write_all(&buf[..n]).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            // TLS termination on the duplex stream (Cloudflare → on-prem handshake)
+            let tls_stream = match acceptor.accept(tls_side).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::debug!(
+                        "TLS handshake failed from relay (client {}): {}",
+                        client_ip,
+                        e
+                    );
+                    return;
+                }
+            };
+
+            let io = TokioIo::new(tls_stream);
+            let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                let state = proxy_state.clone();
+                async move {
+                    let (parts, body) = req.into_parts();
+                    let req =
+                        axum::extract::Request::from_parts(parts, axum::body::Body::new(body));
+                    let resp = hr_proxy::proxy_handler(state, client_ip, req).await;
+                    Ok::<_, std::convert::Infallible>(axum::response::IntoResponse::into_response(
+                        resp,
+                    ))
+                }
+            });
+
+            if let Err(e) = http1::Builder::new()
+                .preserve_header_case(true)
+                .title_case_headers(true)
+                .serve_connection(io, service)
+                .with_upgrades()
+                .await
+            {
+                let msg = e.to_string();
+                if !msg.contains("connection closed")
+                    && !msg.contains("not connected")
+                    && !msg.contains("connection reset")
+                {
+                    tracing::debug!(
+                        "HTTP/1 relay connection error (client {}): {}",
+                        client_ip,
+                        e
+                    );
+                }
+            }
+        });
+    }
 }
 
 // ── HTTPS server ───────────────────────────────────────────────────────

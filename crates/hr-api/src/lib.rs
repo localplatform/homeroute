@@ -42,8 +42,7 @@ fn api_routes() -> Router<ApiState> {
         .nest("/dns-dhcp", routes::dns_dhcp::router())
         .nest("/dns", routes::dns::router())
         .nest("/adblock", routes::adblock::router())
-        .nest("/network", routes::network::router())
-        .nest("/nat", routes::nat::router())
+
         .nest("/ddns", routes::ddns::router())
         .nest("/reverseproxy", routes::reverseproxy::router())
         .nest("/rust-proxy", routes::rust_proxy::router())
@@ -52,9 +51,10 @@ fn api_routes() -> Router<ApiState> {
         .nest("/updates", routes::updates::router())
         .nest("/hosts", routes::hosts::router())
         .nest("/services", routes::services::router())
-        .nest("/firewall", routes::firewall::router())
+
         .nest("/applications", routes::applications::router())
         .nest("/dataverse", routes::dataverse::router())
+        .nest("/cloud-relay", routes::cloud_relay::router())
         .merge(routes::ws::router())
         .merge(routes::health::router())
 }

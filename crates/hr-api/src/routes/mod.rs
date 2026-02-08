@@ -4,8 +4,7 @@ pub mod users;
 pub mod dns_dhcp;
 pub mod dns;
 pub mod adblock;
-pub mod network;
-pub mod nat;
+
 pub mod ddns;
 pub mod reverseproxy;
 pub mod rust_proxy;
@@ -15,6 +14,7 @@ pub mod updates;
 pub mod hosts;
 pub mod services;
 pub mod ws;
-pub mod firewall;
+
 pub mod applications;
 pub mod dataverse;
+pub mod cloud_relay;

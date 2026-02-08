@@ -1,16 +1,14 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { LayoutDashboard, Network, Shield, Globe, Wifi, ArrowRight } from 'lucide-react';
+import { LayoutDashboard, Shield, Globe, Wifi, ArrowRight } from 'lucide-react';
 import Card from '../components/Card';
-import StatusBadge from '../components/StatusBadge';
 import ServiceStatusPanel from '../components/ServiceStatusPanel';
 import PageHeader from '../components/PageHeader';
 import Section from '../components/Section';
-import { getInterfaces, getDhcpLeases, getAdblockStats, getDdnsStatus, getServicesStatus } from '../api/client';
+import { getDhcpLeases, getAdblockStats, getDdnsStatus, getServicesStatus } from '../api/client';
 
 function Dashboard() {
   const [data, setData] = useState({
-    interfaces: null,
     leases: null,
     adblock: null,
     ddns: null,
@@ -21,8 +19,7 @@ function Dashboard() {
   useEffect(() => {
     async function fetchData() {
       try {
-        const [ifRes, leaseRes, adblockRes, ddnsRes, svcRes] = await Promise.all([
-          getInterfaces(),
+        const [leaseRes, adblockRes, ddnsRes, svcRes] = await Promise.all([
           getDhcpLeases(),
           getAdblockStats(),
           getDdnsStatus(),
@@ -30,7 +27,6 @@ function Dashboard() {
         ]);
 
         setData({
-          interfaces: ifRes.data.success ? ifRes.data.interfaces : [],
           leases: leaseRes.data.success ? leaseRes.data.leases : [],
           adblock: adblockRes.data.success ? adblockRes.data.stats : null,
           ddns: ddnsRes.data.success ? ddnsRes.data.status : null,
@@ -56,41 +52,12 @@ function Dashboard() {
     );
   }
 
-  const physicalInterfaces = data.interfaces?.filter(i =>
-    ['eno1', 'enp5s0', 'enp7s0f0', 'enp7s0f1'].includes(i.name)
-  ) || [];
-
   return (
     <div>
       <PageHeader title="Dashboard" icon={LayoutDashboard} />
 
       <Section title="Vue d'ensemble">
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-px">
-            {/* Interfaces Card */}
-            <Card
-              title="Interfaces Réseau"
-              icon={Network}
-              actions={
-                <Link to="/network" className="text-blue-400 hover:text-blue-300">
-                  <ArrowRight className="w-4 h-4" />
-                </Link>
-              }
-            >
-              <div className="space-y-2">
-                {physicalInterfaces.map(iface => (
-                  <div key={iface.name} className="flex items-center justify-between">
-                    <span className="text-sm font-mono">{iface.name}</span>
-                    <StatusBadge status={iface.state === 'UP' ? 'up' : 'down'}>
-                      {iface.state}
-                    </StatusBadge>
-                  </div>
-                ))}
-              </div>
-              <p className="text-xs text-gray-500 mt-3">
-                {data.interfaces?.length || 0} interfaces totales
-              </p>
-            </Card>
-
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-px">
             {/* DHCP Leases Card */}
             <Card
               title="Baux DHCP"

@@ -672,7 +672,9 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
                                 // Duplicate auth, ignore
                             }
                             Ok(AgentMessage::Metrics(m)) => {
-                                // Forward metrics to registry for storage and broadcast
+                                // Metrics are proof of liveness — update heartbeat
+                                // (restores Connected status after host suspend/resume)
+                                registry.handle_heartbeat(&app_id).await;
                                 registry.handle_metrics(&app_id, m).await;
                             }
                             Ok(AgentMessage::ServiceStateChanged { service_type, new_state }) => {

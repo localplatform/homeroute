@@ -154,15 +154,16 @@ pub async fn resolve(query: &DnsQuery, state: &SharedDnsState) -> ResolveResult 
                 };
             }
 
-            // If it's a local domain but no matching record type, return empty (not NXDOMAIN)
-            if matches!(qtype, RecordType::A | RecordType::AAAA) {
-                return ResolveResult {
-                    records: vec![],
-                    rcode: RCODE_NOERROR,
-                    cached: false,
-                    blocked: false,
-                };
-            }
+            // Local domain is authoritative for ALL record types — return NODATA
+            // instead of forwarding upstream. This prevents HTTPS/SVCB (type 65)
+            // queries from leaking to Cloudflare, which would advertise h3 ALPN
+            // and cause ERR_QUIC_PROTOCOL_ERROR on LAN (our proxy doesn't speak QUIC).
+            return ResolveResult {
+                records: vec![],
+                rcode: RCODE_NOERROR,
+                cached: false,
+                blocked: false,
+            };
         }
     }
 

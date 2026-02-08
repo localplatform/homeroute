@@ -17,11 +17,14 @@ hr-dhcp = { path = "../hr-dhcp" }
 hr-ipv6 = { path = "../hr-ipv6" }
 hr-adblock = { path = "../hr-adblock" }
 hr-api = { path = "../hr-api" }
-hr-firewall = { path = "../hr-firewall" }
+
 hr-registry = { path = "../hr-registry" }
 hr-lxd = { path = "../hr-lxd" }
+hr-tunnel = { path = "../hr-tunnel" }
 
 uuid = { workspace = true }
+quinn = { workspace = true }
+bytes = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

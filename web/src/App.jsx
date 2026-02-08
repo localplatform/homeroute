@@ -3,7 +3,6 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import Layout from './components/Layout';
 import Dashboard from './pages/Dashboard';
 import Dns from './pages/Dns';
-import Network from './pages/Network';
 import Adblock from './pages/Adblock';
 import Ddns from './pages/Ddns';
 import ReverseProxy from './pages/ReverseProxy';
@@ -12,9 +11,9 @@ import Energy from './pages/Energy';
 import Users from './pages/Users';
 import Hosts from './pages/Hosts';
 import Certificates from './pages/Certificates';
-import Firewall from './pages/Firewall';
 import Applications from './pages/Applications';
 import Dataverse from './pages/Dataverse';
+import CloudRelay from './pages/CloudRelay';
 import Login from './pages/Login';
 import Profile from './pages/Profile';
 
@@ -93,7 +92,6 @@ function AppRoutes() {
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/dns" element={<Dns />} />
-              <Route path="/network" element={<Network />} />
               <Route path="/adblock" element={<Adblock />} />
               <Route path="/ddns" element={<Ddns />} />
               <Route path="/reverseproxy" element={<ReverseProxy />} />
@@ -101,10 +99,10 @@ function AppRoutes() {
               <Route path="/updates" element={<Updates />} />
               <Route path="/energy" element={<Energy />} />
               <Route path="/hosts" element={<Hosts />} />
-              <Route path="/firewall" element={<Firewall />} />
               <Route path="/applications" element={<Applications />} />
               <Route path="/dataverse" element={<Dataverse />} />
               <Route path="/certificates" element={<Certificates />} />
+              <Route path="/cloud-relay" element={<CloudRelay />} />
             </Routes>
           </Layout>
         </ProtectedRoute>

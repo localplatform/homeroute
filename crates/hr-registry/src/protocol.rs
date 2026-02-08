@@ -236,6 +236,14 @@ fn default_true() -> bool {
     true
 }
 
+/// Auto-off mode for idle host power management.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoOffMode {
+    Sleep,
+    Shutdown,
+}
+
 // ── Host Agent Protocol ──────────────────────────────────────────────────
 
 /// Messages from host-agent → registry (via WebSocket)
@@ -285,6 +293,10 @@ pub enum HostAgentMessage {
         stderr: String,
     },
     NetworkInterfaces(Vec<NetworkInterfaceInfo>),
+    /// Agent is about to auto-off (idle timeout reached).
+    AutoOffNotify {
+        mode: AutoOffMode,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -368,6 +380,10 @@ pub enum HostRegistryMessage {
     PowerOff,
     Reboot,
     SuspendHost,
+    SetAutoOff {
+        mode: AutoOffMode,
+        minutes: u32,
+    },
 }
 
 #[cfg(test)]

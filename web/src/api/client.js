@@ -35,27 +35,6 @@ export const getServicesStatus = () => api.get('/services/status');
 export const getDnsConfig = () => api.get('/dns-dhcp/config');
 export const getDhcpLeases = () => api.get('/dns-dhcp/leases');
 
-// Network
-export const getInterfaces = () => api.get('/network/interfaces');
-export const getRoutes = () => api.get('/network/routes');
-export const getLanClients = () => api.get('/network/clients');
-
-// NAT/Firewall
-export const getFilterRules = () => api.get('/nat/filter');
-export const getMasqueradeRules = () => api.get('/nat/masquerade');
-export const getPortForwards = () => api.get('/nat/forwards');
-export const getFirewallStatus = () => api.get('/nat/status');
-export const getRoutingRules = () => api.get('/nat/routing-rules');
-export const getChainStats = () => api.get('/nat/stats');
-
-// IPv6 Firewall
-export const getIpv6FirewallStatus = () => api.get('/firewall/status');
-export const getIpv6FirewallRules = () => api.get('/firewall/rules');
-export const addIpv6FirewallRule = (rule) => api.post('/firewall/rules', rule);
-export const deleteIpv6FirewallRule = (id) => api.delete(`/firewall/rules/${id}`);
-export const toggleIpv6FirewallRule = (id) => api.patch(`/firewall/rules/${id}`);
-export const getIpv6FirewallRuleset = () => api.get('/firewall/current-ruleset');
-
 // AdBlock
 export const getAdblockStats = () => api.get('/adblock/stats');
 export const getWhitelist = () => api.get('/adblock/whitelist');
@@ -176,7 +155,15 @@ export const shutdownHost = (id) => api.post(`/hosts/${id}/shutdown`);
 export const rebootHost = (id) => api.post(`/hosts/${id}/reboot`);
 export const sleepHost = (id) => api.post(`/hosts/${id}/sleep`);
 export const setWolMac = (id, mac) => api.post(`/hosts/${id}/wol-mac`, { mac });
+export const setAutoOff = (id, mode, minutes) => api.post(`/hosts/${id}/auto-off`, { mode, minutes });
 export const updateHostAgents = () => api.post('/hosts/agents/update');
+
+// Cloud Relay
+export const getCloudRelayStatus = () => api.get('/cloud-relay/status');
+export const enableCloudRelay = () => api.post('/cloud-relay/enable');
+export const disableCloudRelay = () => api.post('/cloud-relay/disable');
+export const bootstrapCloudRelay = (data) => api.post('/cloud-relay/bootstrap', data, { timeout: 300000 });
+export const updateCloudRelayConfig = (config) => api.put('/cloud-relay/config', config);
 
 // Dataverse
 export const getDataverseOverview = () => api.get('/dataverse/overview');

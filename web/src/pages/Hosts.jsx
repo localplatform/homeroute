@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import {
   HardDrive, Plus, Trash2, RefreshCw, X, Check,
-  Play, Square, RotateCw, Moon
+  Play, Square, RotateCw, Moon, CheckCircle, XCircle
 } from 'lucide-react';
 import Button from '../components/Button';
 import StatusBadge from '../components/StatusBadge';
@@ -15,7 +15,8 @@ import {
   shutdownHost,
   rebootHost,
   sleepHost,
-  setWolMac
+  setWolMac,
+  setAutoOff
 } from '../api/client';
 import useWebSocket from '../hooks/useWebSocket';
 
@@ -33,6 +34,7 @@ export default function Hosts() {
   });
   const [addingHost, setAddingHost] = useState(false);
   const [addError, setAddError] = useState('');
+  const [message, setMessage] = useState(null);
 
   useWebSocket({
     'hosts:status': (data) => {
@@ -53,7 +55,23 @@ export default function Hosts() {
         )
       );
     },
+    'hosts:power': (data) => {
+      setHosts(prev =>
+        prev.map(h =>
+          h.id === data.hostId
+            ? { ...h, power_state: data.state }
+            : h
+        )
+      );
+    },
   });
+
+  useEffect(() => {
+    if (message) {
+      const timer = setTimeout(() => setMessage(null), 4000);
+      return () => clearTimeout(timer);
+    }
+  }, [message]);
 
   useEffect(() => {
     loadHosts();
@@ -104,8 +122,9 @@ export default function Hosts() {
     try {
       await deleteHost(id);
       setHosts(hosts.filter(h => h.id !== id));
+      setMessage({ type: 'success', text: 'Hote supprime' });
     } catch (error) {
-      alert('Failed to delete host: ' + error.message);
+      setMessage({ type: 'error', text: 'Echec suppression : ' + error.message });
     }
   };
 
@@ -115,12 +134,12 @@ export default function Hosts() {
     try {
       const res = await wakeHost(id);
       if (res.data.success) {
-        alert('Paquet WOL envoye !');
+        setMessage({ type: 'success', text: 'Paquet WOL envoye !' });
       } else {
-        alert('Echec : ' + res.data.error);
+        setMessage({ type: 'error', text: 'Echec : ' + res.data.error });
       }
     } catch (error) {
-      alert('Echec WOL : ' + error.message);
+      setMessage({ type: 'error', text: 'Echec WOL : ' + error.message });
     }
   };
 
@@ -128,9 +147,9 @@ export default function Hosts() {
     if (!confirm('Eteindre cet hote ?')) return;
     try {
       const res = await shutdownHost(id);
-      if (res.data.success) alert('Commande envoyee !');
+      if (res.data.success) setMessage({ type: 'success', text: 'Commande d\'extinction envoyee !' });
     } catch (error) {
-      alert('Echec : ' + error.message);
+      setMessage({ type: 'error', text: 'Echec : ' + error.message });
     }
   };
 
@@ -138,9 +157,9 @@ export default function Hosts() {
     if (!confirm('Redemarrer cet hote ?')) return;
     try {
       const res = await rebootHost(id);
-      if (res.data.success) alert('Commande envoyee !');
+      if (res.data.success) setMessage({ type: 'success', text: 'Commande de redemarrage envoyee !' });
     } catch (error) {
-      alert('Echec : ' + error.message);
+      setMessage({ type: 'error', text: 'Echec : ' + error.message });
     }
   };
 
@@ -148,9 +167,9 @@ export default function Hosts() {
     if (!confirm('Mettre en veille cet hote ?')) return;
     try {
       const res = await sleepHost(id);
-      if (res.data.success) alert('Commande envoyee !');
+      if (res.data.success) setMessage({ type: 'success', text: 'Commande de mise en veille envoyee !' });
     } catch (error) {
-      alert('Echec : ' + error.message);
+      setMessage({ type: 'error', text: 'Echec : ' + error.message });
     }
   };
 
@@ -163,6 +182,15 @@ export default function Hosts() {
     }
   };
 
+  const handleSetAutoOff = async (id, mode, minutes) => {
+    try {
+      await setAutoOff(id, mode, minutes);
+      setHosts(prev => prev.map(h => h.id === id ? { ...h, auto_off_mode: mode, auto_off_minutes: minutes } : h));
+    } catch (error) {
+      console.error('Failed to set auto-off:', error);
+    }
+  };
+
   // ── Form helpers ────────────────────────────
 
   const resetForm = () => {
@@ -170,11 +198,37 @@ export default function Hosts() {
     setAddError('');
   };
 
+  const getEffectiveStatus = (host) => {
+    // Power state takes precedence over simple online/offline
+    if (host.power_state && host.power_state !== 'online' && host.power_state !== 'offline') {
+      return host.power_state;
+    }
+    return host.status || 'offline';
+  };
+
   const getStatusColor = (status) => {
     switch (status) {
-      case 'online': return 'success';
-      case 'offline': return 'danger';
-      default: return 'secondary';
+      case 'online': return 'up';
+      case 'offline': return 'down';
+      case 'suspended': return 'unknown';
+      case 'suspending':
+      case 'shutting_down':
+      case 'rebooting':
+      case 'waking_up': return 'active';
+      default: return 'unknown';
+    }
+  };
+
+  const getStatusLabel = (status) => {
+    switch (status) {
+      case 'online': return 'En ligne';
+      case 'offline': return 'Hors ligne';
+      case 'suspended': return 'En veille';
+      case 'suspending': return 'Mise en veille...';
+      case 'shutting_down': return 'Extinction...';
+      case 'rebooting': return 'Redémarrage...';
+      case 'waking_up': return 'Réveil...';
+      default: return status || 'Inconnu';
     }
   };
 
@@ -195,6 +249,15 @@ export default function Hosts() {
         </Button>
       </PageHeader>
 
+      {message && (
+        <div className={`p-4 flex items-center gap-2 ${
+          message.type === 'success' ? 'bg-green-900/50 text-green-400' : 'bg-red-900/50 text-red-400'
+        }`}>
+          {message.type === 'success' ? <CheckCircle className="w-5 h-5" /> : <XCircle className="w-5 h-5" />}
+          {message.text}
+        </div>
+      )}
+
       <Section title="Liste des hotes">
         {loading ? (
           <div className="text-center py-12 text-gray-400">Chargement...</div>
@@ -213,6 +276,7 @@ export default function Hosts() {
                   <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">CPU</th>
                   <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">RAM</th>
                   <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">MAC (WOL)</th>
+                  <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Auto-arrêt</th>
                   <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Vu</th>
                   <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Actions</th>
                 </tr>
@@ -229,9 +293,14 @@ export default function Hosts() {
                     </td>
                     {/* Status */}
                     <td className="px-3 py-2 text-sm">
-                      <StatusBadge status={getStatusColor(host.status)}>
-                        {host.status || 'unknown'}
-                      </StatusBadge>
+                      {(() => {
+                        const st = getEffectiveStatus(host);
+                        return (
+                          <StatusBadge status={getStatusColor(st)}>
+                            {getStatusLabel(st)}
+                          </StatusBadge>
+                        );
+                      })()}
                     </td>
                     {/* Address */}
                     <td className="px-3 py-2 text-sm font-mono text-gray-300">
@@ -277,6 +346,37 @@ export default function Hosts() {
                         <span className="text-gray-500 text-xs font-mono">{host.mac || '--'}</span>
                       )}
                     </td>
+                    {/* Auto-off (mode + delay) */}
+                    <td className="px-3 py-2 text-sm">
+                      <div className="flex items-center gap-1">
+                        <select
+                          className="bg-gray-700 text-xs text-gray-300 border border-gray-600 px-1 py-0.5 rounded-sm"
+                          value={host.auto_off_mode || 'off'}
+                          onChange={(e) => {
+                            const mode = e.target.value;
+                            const mins = mode === 'off' ? 0 : (host.auto_off_minutes || 5);
+                            handleSetAutoOff(host.id, mode, mins);
+                          }}
+                        >
+                          <option value="off">Off</option>
+                          <option value="sleep">Veille</option>
+                          <option value="shutdown">Extinction</option>
+                        </select>
+                        {host.auto_off_mode && host.auto_off_mode !== 'off' && (
+                          <select
+                            className="bg-gray-700 text-xs text-gray-300 border border-gray-600 px-1 py-0.5 rounded-sm"
+                            value={host.auto_off_minutes || 5}
+                            onChange={(e) => handleSetAutoOff(host.id, host.auto_off_mode, parseInt(e.target.value))}
+                          >
+                            <option value={2}>2m</option>
+                            <option value={5}>5m</option>
+                            <option value={10}>10m</option>
+                            <option value={15}>15m</option>
+                            <option value={30}>30m</option>
+                          </select>
+                        )}
+                      </div>
+                    </td>
                     {/* Last seen */}
                     <td className="px-3 py-2 text-xs text-gray-500">
                       {host.lastSeen ? new Date(host.lastSeen).toLocaleTimeString() : '--'}
@@ -284,38 +384,47 @@ export default function Hosts() {
                     {/* Actions */}
                     <td className="px-3 py-2">
                       <div className="flex gap-1">
-                        <button
-                          onClick={() => handleWake(host.id)}
-                          disabled={host.status === 'online'}
-                          className="p-1.5 text-green-400 hover:bg-green-600/20 disabled:opacity-30 disabled:cursor-not-allowed"
-                          title="Wake"
-                        >
-                          <Play className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          onClick={() => handleReboot(host.id)}
-                          disabled={host.status !== 'online'}
-                          className="p-1.5 text-yellow-400 hover:bg-yellow-600/20 disabled:opacity-30 disabled:cursor-not-allowed"
-                          title="Reboot"
-                        >
-                          <RotateCw className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          onClick={() => handleSleep(host.id)}
-                          disabled={host.status !== 'online'}
-                          className="p-1.5 text-blue-400 hover:bg-blue-600/20 disabled:opacity-30 disabled:cursor-not-allowed"
-                          title="Sleep"
-                        >
-                          <Moon className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          onClick={() => handleShutdown(host.id)}
-                          disabled={host.status !== 'online'}
-                          className="p-1.5 text-red-400 hover:bg-red-600/20 disabled:opacity-30 disabled:cursor-not-allowed"
-                          title="Shutdown"
-                        >
-                          <Square className="w-3.5 h-3.5" />
-                        </button>
+                        {(() => {
+                          const st = getEffectiveStatus(host);
+                          const isOnline = st === 'online';
+                          const canWake = st === 'offline' || st === 'suspended';
+                          return (
+                            <>
+                              <button
+                                onClick={() => handleWake(host.id)}
+                                disabled={!canWake}
+                                className="p-1.5 text-green-400 hover:bg-green-600/20 disabled:opacity-30 disabled:cursor-not-allowed"
+                                title="Wake"
+                              >
+                                <Play className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={() => handleReboot(host.id)}
+                                disabled={!isOnline}
+                                className="p-1.5 text-yellow-400 hover:bg-yellow-600/20 disabled:opacity-30 disabled:cursor-not-allowed"
+                                title="Reboot"
+                              >
+                                <RotateCw className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={() => handleSleep(host.id)}
+                                disabled={!isOnline}
+                                className="p-1.5 text-blue-400 hover:bg-blue-600/20 disabled:opacity-30 disabled:cursor-not-allowed"
+                                title="Sleep"
+                              >
+                                <Moon className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={() => handleShutdown(host.id)}
+                                disabled={!isOnline}
+                                className="p-1.5 text-red-400 hover:bg-red-600/20 disabled:opacity-30 disabled:cursor-not-allowed"
+                                title="Shutdown"
+                              >
+                                <Square className="w-3.5 h-3.5" />
+                              </button>
+                            </>
+                          );
+                        })()}
                         <button
                           onClick={() => handleDeleteHost(host.id)}
                           className="p-1.5 text-red-400 hover:bg-red-600/20"

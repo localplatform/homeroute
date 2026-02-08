@@ -35,6 +35,7 @@ pub fn router() -> Router<ApiState> {
         .route("/{id}/reboot", post(reboot_host))
         .route("/{id}/sleep", post(sleep_host))
         .route("/{id}/wol-mac", post(set_wol_mac))
+        .route("/{id}/auto-off", post(set_auto_off))
         .route("/{id}/metrics", get(get_host_metrics))
         .route("/bulk/wake", post(bulk_wake))
         .route("/bulk/shutdown", post(bulk_shutdown))
@@ -139,16 +140,19 @@ async fn list_hosts(State(state): State<ApiState>) -> Json<Value> {
     let data = load_hosts().await;
     let mut hosts = data.get("hosts").cloned().unwrap_or(json!([]));
 
-    // Override status based on live registry connections
+    // Override status based on live registry connections + power state
     if let Some(registry) = &state.registry {
         let conns = registry.host_connections.read().await;
         if let Some(arr) = hosts.as_array_mut() {
             for host in arr.iter_mut() {
-                if let Some(id) = host.get("id").and_then(|i| i.as_str()) {
-                    let connected = conns.contains_key(id);
+                if let Some(id) = host.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()) {
+                    let connected = conns.contains_key(id.as_str());
                     if !connected && host.get("status").and_then(|s| s.as_str()) == Some("online") {
                         host["status"] = json!("offline");
                     }
+                    // Include current power state from registry
+                    let power_state = registry.get_host_power_state(&id).await;
+                    host["power_state"] = json!(power_state);
                 }
             }
         }
@@ -358,28 +362,46 @@ async fn get_host_info(Path(id): Path<String>) -> Json<Value> {
 
 // ── Power actions ────────────────────────────────────────────────────────
 
-async fn wake(Path(id): Path<String>) -> Json<Value> {
+async fn wake(Path(id): Path<String>, State(state): State<ApiState>) -> Json<Value> {
+    // Use registry state machine if available
+    if let Some(registry) = &state.registry {
+        match registry.request_wake_host(&id).await {
+            Ok(result) => {
+                let action = match result {
+                    hr_common::events::WakeResult::WolSent => "wol_sent",
+                    hr_common::events::WakeResult::AlreadyWaking => "already_waking",
+                    hr_common::events::WakeResult::AlreadyOnline => "already_online",
+                };
+                return Json(json!({"success": true, "action": action}));
+            }
+            Err(e) => return Json(json!({"success": false, "error": e})),
+        }
+    }
+
+    // Fallback: direct WOL if no registry
     let data = load_hosts().await;
     let host = match find_host(&data, &id) {
         Some(h) => h,
         None => return Json(json!({"success": false, "error": "Hote non trouve"})),
     };
-
     let mac = match host.get("wol_mac").and_then(|m| m.as_str())
         .or_else(|| host.get("mac").and_then(|m| m.as_str())) {
         Some(m) => m,
         None => return Json(json!({"success": false, "error": "Adresse MAC non configuree"})),
     };
-
-    match send_wol(mac).await {
-        Ok(()) => Json(json!({"success": true, "action": "wake", "mac": mac})),
+    match hr_registry::AgentRegistry::send_wol_packet(mac).await {
+        Ok(()) => Json(json!({"success": true, "action": "wol_sent", "mac": mac})),
         Err(e) => Json(json!({"success": false, "error": e})),
     }
 }
 
 async fn shutdown_host(Path(id): Path<String>, State(state): State<ApiState>) -> Json<Value> {
-    // Try agent first
+    // Check power state conflicts
     if let Some(registry) = &state.registry {
+        if let Err(e) = registry.request_power_action(&id, hr_common::events::PowerAction::Shutdown).await {
+            return Json(json!({"success": false, "error": e}));
+        }
+        // Try agent first
         if registry.send_host_command(
             &id,
             hr_registry::protocol::HostRegistryMessage::PowerOff,
@@ -397,7 +419,11 @@ async fn shutdown_host(Path(id): Path<String>, State(state): State<ApiState>) ->
 }
 
 async fn reboot_host(Path(id): Path<String>, State(state): State<ApiState>) -> Json<Value> {
+    // Check power state conflicts
     if let Some(registry) = &state.registry {
+        if let Err(e) = registry.request_power_action(&id, hr_common::events::PowerAction::Reboot).await {
+            return Json(json!({"success": false, "error": e}));
+        }
         if registry.send_host_command(
             &id,
             hr_registry::protocol::HostRegistryMessage::Reboot,
@@ -419,19 +445,36 @@ struct BulkRequest {
     host_ids: Vec<String>,
 }
 
-async fn bulk_wake(Json(body): Json<BulkRequest>) -> Json<Value> {
-    let data = load_hosts().await;
+async fn bulk_wake(State(state): State<ApiState>, Json(body): Json<BulkRequest>) -> Json<Value> {
     let mut results = Vec::new();
     for id in &body.host_ids {
-        if let Some(host) = find_host(&data, id) {
-            if let Some(mac) = host.get("mac").and_then(|m| m.as_str()) {
-                let success = send_wol(mac).await.is_ok();
-                results.push(json!({"id": id, "success": success}));
-            } else {
-                results.push(json!({"id": id, "success": false, "error": "No MAC"}));
+        if let Some(registry) = &state.registry {
+            match registry.request_wake_host(id).await {
+                Ok(result) => {
+                    let action = match result {
+                        hr_common::events::WakeResult::WolSent => "wol_sent",
+                        hr_common::events::WakeResult::AlreadyWaking => "already_waking",
+                        hr_common::events::WakeResult::AlreadyOnline => "already_online",
+                    };
+                    results.push(json!({"id": id, "success": true, "action": action}));
+                }
+                Err(e) => results.push(json!({"id": id, "success": false, "error": e})),
             }
         } else {
-            results.push(json!({"id": id, "success": false, "error": "Not found"}));
+            // Fallback: direct WOL
+            let data = load_hosts().await;
+            if let Some(host) = find_host(&data, id) {
+                let mac = host.get("wol_mac").and_then(|m| m.as_str())
+                    .or_else(|| host.get("mac").and_then(|m| m.as_str()));
+                if let Some(mac) = mac {
+                    let success = hr_registry::AgentRegistry::send_wol_packet(mac).await.is_ok();
+                    results.push(json!({"id": id, "success": success}));
+                } else {
+                    results.push(json!({"id": id, "success": false, "error": "No MAC"}));
+                }
+            } else {
+                results.push(json!({"id": id, "success": false, "error": "Not found"}));
+            }
         }
     }
     Json(json!({"success": true, "results": results}))
@@ -452,7 +495,11 @@ async fn bulk_shutdown(Json(body): Json<BulkRequest>) -> Json<Value> {
 }
 
 async fn sleep_host(Path(id): Path<String>, State(state): State<ApiState>) -> Json<Value> {
+    // Check power state conflicts
     if let Some(registry) = &state.registry {
+        if let Err(e) = registry.request_power_action(&id, hr_common::events::PowerAction::Suspend).await {
+            return Json(json!({"success": false, "error": e}));
+        }
         if registry.send_host_command(
             &id,
             hr_registry::protocol::HostRegistryMessage::SuspendHost,
@@ -473,7 +520,15 @@ struct SetWolMacRequest {
     mac: String,
 }
 
-async fn set_wol_mac(Path(id): Path<String>, Json(body): Json<SetWolMacRequest>) -> Json<Value> {
+#[derive(Deserialize)]
+struct SetAutoOffRequest {
+    /// "sleep", "shutdown", or "off"
+    mode: String,
+    #[serde(default)]
+    minutes: u32,
+}
+
+async fn set_wol_mac(Path(id): Path<String>, State(state): State<ApiState>, Json(body): Json<SetWolMacRequest>) -> Json<Value> {
     let mut data = load_hosts().await;
     if let Some(host) = find_host_mut(&mut data, &id) {
         host["wol_mac"] = json!(body.mac);
@@ -483,6 +538,59 @@ async fn set_wol_mac(Path(id): Path<String>, Json(body): Json<SetWolMacRequest>)
     }
     if let Err(e) = save_hosts(&data).await {
         return Json(json!({"success": false, "error": e}));
+    }
+    // Invalidate cached MAC in power state machine
+    if let Some(registry) = &state.registry {
+        registry.invalidate_host_mac_cache(&id).await;
+    }
+    Json(json!({"success": true}))
+}
+
+async fn set_auto_off(
+    Path(id): Path<String>,
+    State(state): State<ApiState>,
+    Json(body): Json<SetAutoOffRequest>,
+) -> Json<Value> {
+    let mut data = load_hosts().await;
+    if let Some(host) = find_host_mut(&mut data, &id) {
+        host["auto_off_mode"] = json!(body.mode);
+        host["auto_off_minutes"] = json!(body.minutes);
+        // Clean up old field if present
+        if let Some(obj) = host.as_object_mut() {
+            obj.remove("sleep_timeout_minutes");
+        }
+        host["updatedAt"] = json!(chrono::Utc::now().to_rfc3339());
+    } else {
+        return Json(json!({"success": false, "error": "Hote non trouve"}));
+    }
+    if let Err(e) = save_hosts(&data).await {
+        return Json(json!({"success": false, "error": e}));
+    }
+
+    // Push to connected agent
+    if body.mode != "off" && body.minutes > 0 {
+        if let Some(registry) = &state.registry {
+            let mode = match body.mode.as_str() {
+                "shutdown" => hr_registry::protocol::AutoOffMode::Shutdown,
+                _ => hr_registry::protocol::AutoOffMode::Sleep,
+            };
+            let _ = registry.send_host_command(
+                &id,
+                hr_registry::protocol::HostRegistryMessage::SetAutoOff {
+                    mode,
+                    minutes: body.minutes,
+                },
+            ).await;
+        }
+    } else if let Some(registry) = &state.registry {
+        // Send minutes=0 to disable auto-off on agent
+        let _ = registry.send_host_command(
+            &id,
+            hr_registry::protocol::HostRegistryMessage::SetAutoOff {
+                mode: hr_registry::protocol::AutoOffMode::Sleep,
+                minutes: 0,
+            },
+        ).await;
     }
     Json(json!({"success": true}))
 }
@@ -740,6 +848,31 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
     // Mark host online
     update_host_status(&host_id, "online", &state.events.host_status).await;
 
+    // Push auto-off config to agent on connect
+    {
+        let data = load_hosts().await;
+        if let Some(host) = find_host(&data, &host_id) {
+            let mode_str = host.get("auto_off_mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("off");
+            let minutes = host.get("auto_off_minutes")
+                .and_then(|v| v.as_u64())
+                // Backward compat: fallback to old field
+                .or_else(|| host.get("sleep_timeout_minutes").and_then(|v| v.as_u64()))
+                .unwrap_or(0) as u32;
+            if mode_str != "off" && minutes > 0 {
+                let mode = match mode_str {
+                    "shutdown" => hr_registry::protocol::AutoOffMode::Shutdown,
+                    _ => hr_registry::protocol::AutoOffMode::Sleep,
+                };
+                let _ = registry.send_host_command(
+                    &host_id,
+                    hr_registry::protocol::HostRegistryMessage::SetAutoOff { mode, minutes },
+                ).await;
+            }
+        }
+    }
+
     // Track active transfers for remote→local migration (transfer_id → file + container_name)
     let mut active_transfers: std::collections::HashMap<String, (tokio::fs::File, String)> = std::collections::HashMap::new();
 
@@ -884,6 +1017,19 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
                                     } else {
                                         tracing::warn!(transfer_id = %transfer_id, "TransferComplete for unknown transfer");
                                     }
+                                }
+                                HostAgentMessage::AutoOffNotify { mode } => {
+                                    let action = match mode {
+                                        hr_registry::protocol::AutoOffMode::Sleep => {
+                                            tracing::info!("Host agent auto-sleep: {} ({})", host_name, host_id);
+                                            hr_common::events::PowerAction::Suspend
+                                        }
+                                        hr_registry::protocol::AutoOffMode::Shutdown => {
+                                            tracing::info!("Host agent auto-shutdown: {} ({})", host_name, host_id);
+                                            hr_common::events::PowerAction::Shutdown
+                                        }
+                                    };
+                                    let _ = registry.request_power_action(&host_id, action).await;
                                 }
                                 HostAgentMessage::Auth { .. } => {}
                             }
@@ -1087,34 +1233,6 @@ fn find_host_mut<'a>(data: &'a mut Value, id: &str) -> Option<&'a mut Value> {
         .as_array_mut()?
         .iter_mut()
         .find(|h| h.get("id").and_then(|i| i.as_str()) == Some(id))
-}
-
-async fn send_wol(mac: &str) -> Result<(), String> {
-    let mac_bytes: Vec<u8> = mac
-        .split(':')
-        .filter_map(|b| u8::from_str_radix(b, 16).ok())
-        .collect();
-
-    if mac_bytes.len() != 6 {
-        return Err("Adresse MAC invalide".to_string());
-    }
-
-    let mut packet = vec![0xFFu8; 6];
-    for _ in 0..16 {
-        packet.extend_from_slice(&mac_bytes);
-    }
-
-    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0")
-        .await
-        .map_err(|e| e.to_string())?;
-    socket.set_broadcast(true).map_err(|e| e.to_string())?;
-    socket
-        .send_to(&packet, "255.255.255.255:9")
-        .await
-        .map_err(|e| e.to_string())?;
-    let _ = socket.send_to(&packet, "10.0.0.255:9").await;
-
-    Ok(())
 }
 
 async fn ssh_power_action(host: &Value, command: &str) -> Json<Value> {

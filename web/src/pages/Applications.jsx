@@ -15,6 +15,7 @@ import {
   WifiOff,
   Clock,
   Container,
+  HardDrive,
   RefreshCw,
   Copy,
   AlertTriangle,
@@ -219,6 +220,11 @@ function Applications() {
               return { ...prev, [appId]: updated };
             });
           }
+        } else if (msg.type === 'hosts:status') {
+          const { hostId, status } = msg.data;
+          setHosts(prev => prev.map(h =>
+            h.id === hostId ? { ...h, status } : h
+          ));
         } else if (msg.type === 'migration:progress') {
           const m = msg.data;
           setMigrations(prev => ({
@@ -608,181 +614,219 @@ function Applications() {
                 </tr>
               </thead>
               <tbody>
-                {applications.map(app => {
-                  const isDeploying = app.status === 'deploying';
-                  const metrics = appMetrics[app.id];
-                  const isMigrating = !!migrations[app.id];
-                  return (
-                    <tr key={app.id} className="border-b border-gray-800 hover:bg-gray-800/30">
-                      {/* Application info */}
-                      <td className="py-3 px-3">
-                        <div className="flex items-center gap-2">
-                          {isDeploying ? (
-                            <Loader2 className="w-4 h-4 text-blue-400 animate-spin flex-shrink-0" />
-                          ) : (
-                            <Container className="w-4 h-4 text-blue-400 flex-shrink-0" />
-                          )}
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-2">
-                              <span className="font-medium truncate">{app.name}</span>
-                              {app.host_id && app.host_id !== 'local' && (
-                                <span className="text-[10px] px-1.5 py-0.5 bg-indigo-900/40 text-indigo-300 rounded">
-                                  {hosts.find(h => h.id === app.host_id)?.name || app.host_id}
+                {(() => {
+                  // Group applications by host
+                  const groups = [];
+                  const localApps = applications.filter(a => !a.host_id || a.host_id === 'local');
+                  if (localApps.length > 0) {
+                    groups.push({ hostId: 'local', hostName: 'HomeRoute', hostStatus: 'online', apps: localApps });
+                  }
+                  const remoteHostIds = [...new Set(applications.filter(a => a.host_id && a.host_id !== 'local').map(a => a.host_id))];
+                  for (const hid of remoteHostIds) {
+                    const host = hosts.find(h => h.id === hid);
+                    groups.push({
+                      hostId: hid,
+                      hostName: host?.name || hid,
+                      hostStatus: host?.status || 'offline',
+                      apps: applications.filter(a => a.host_id === hid),
+                    });
+                  }
+                  groups.sort((a, b) => a.hostId === 'local' ? -1 : b.hostId === 'local' ? 1 : a.hostName.localeCompare(b.hostName));
+
+                  return groups.map(group => {
+                    const isHostOffline = group.hostId !== 'local' && group.hostStatus !== 'online';
+                    return [
+                      /* Host group header */
+                      <tr key={`host-${group.hostId}`} className="bg-gray-800/60">
+                        <td colSpan={6} className="py-2 px-3">
+                          <div className="flex items-center gap-2 text-sm">
+                            <HardDrive className="w-4 h-4 text-gray-400" />
+                            <span className="font-medium text-gray-300">{group.hostName}</span>
+                            <span className={`w-2 h-2 rounded-full ${isHostOffline ? 'bg-red-500' : 'bg-green-500'}`} />
+                            {isHostOffline && (
+                              <span className="text-xs text-red-400">Hors ligne</span>
+                            )}
+                            <span className="text-xs text-gray-600 ml-auto">{group.apps.length} app{group.apps.length > 1 ? 's' : ''}</span>
+                          </div>
+                        </td>
+                      </tr>,
+                      /* Applications in this group */
+                      ...group.apps.map(app => {
+                        const isDeploying = app.status === 'deploying';
+                        const metrics = appMetrics[app.id];
+                        const isMigrating = !!migrations[app.id];
+                        const disabled = isMigrating || isHostOffline;
+                        return (
+                          <tr key={app.id} className={`border-b border-gray-800 hover:bg-gray-800/30 ${isHostOffline ? 'opacity-60' : ''}`}>
+                            {/* Application info */}
+                            <td className="py-3 px-3">
+                              <div className="flex items-center gap-2">
+                                {isDeploying ? (
+                                  <Loader2 className="w-4 h-4 text-blue-400 animate-spin flex-shrink-0" />
+                                ) : (
+                                  <Container className="w-4 h-4 text-blue-400 flex-shrink-0" />
+                                )}
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-medium truncate">{app.name}</span>
+                                    {!app.enabled && (
+                                      <span className="text-xs text-gray-500 bg-gray-800 px-1.5 py-0.5">off</span>
+                                    )}
+                                  </div>
+                                  <div className="flex items-center gap-2 text-xs text-gray-500">
+                                    <a
+                                      href={`https://${app.slug}.${baseDomain}`}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="font-mono hover:text-blue-400"
+                                    >
+                                      {app.slug}.{baseDomain}
+                                    </a>
+                                    {app.frontend.auth_required && <Key className="w-3 h-3 text-purple-400" />}
+                                    {app.frontend.local_only && <Shield className="w-3 h-3 text-yellow-400" />}
+                                  </div>
+                                </div>
+                              </div>
+                            </td>
+
+                            {/* Status */}
+                            <td className="py-3 px-3">
+                              {isMigrating ? (
+                                <MigrationProgress migration={migrations[app.id]} />
+                              ) : isHostOffline ? (
+                                <span className="flex items-center gap-1 text-xs px-2 py-0.5 text-gray-500 bg-gray-800/50">
+                                  <WifiOff className="w-3 h-3" />
+                                  Indisponible
+                                </span>
+                              ) : isDeploying ? (
+                                <div>
+                                  <span className="text-xs px-2 py-0.5 text-blue-400 bg-blue-900/30">Deploiement</span>
+                                  <p className="text-xs text-gray-500 mt-1 truncate max-w-32">{app._deployMessage}</p>
+                                </div>
+                              ) : (
+                                <StatusBadge status={app.status} />
+                              )}
+                            </td>
+
+                            {/* Services */}
+                            <td className="py-3 px-3">
+                              {disabled || !metrics ? (
+                                <span className="text-xs text-gray-600">-</span>
+                              ) : (
+                                <div className="flex items-center gap-2 text-xs">
+                                  {app.code_server_enabled !== false && (
+                                    <button
+                                      onClick={() => metrics.codeServerStatus === 'running'
+                                        ? handleServiceStop(app.id, 'code-server')
+                                        : handleServiceStart(app.id, 'code-server')
+                                      }
+                                      className={`flex items-center gap-1 px-1.5 py-0.5 transition-colors ${
+                                        metrics.codeServerStatus === 'running'
+                                          ? 'text-green-400 bg-green-900/30 hover:bg-green-900/50'
+                                          : metrics.codeServerStatus === 'starting'
+                                          ? 'text-blue-400 bg-blue-900/30'
+                                          : 'text-gray-400 bg-gray-700/30 hover:bg-gray-700/50'
+                                      }`}
+                                      title={`code-server: ${metrics.codeServerStatus}`}
+                                    >
+                                      <Code2 className="w-3 h-3" />
+                                      {metrics.codeServerStatus === 'running' ? <Square className="w-2.5 h-2.5" /> : <Play className="w-2.5 h-2.5" />}
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </td>
+
+                            {/* CPU */}
+                            <td className="py-3 px-3 text-right">
+                              {disabled ? (
+                                <span className="text-xs text-gray-600">-</span>
+                              ) : (
+                                <span className={`font-mono text-sm ${
+                                  metrics?.cpuPercent > 80 ? 'text-red-400' :
+                                  metrics?.cpuPercent > 50 ? 'text-yellow-400' :
+                                  metrics?.cpuPercent > 0 ? 'text-green-400' : 'text-gray-600'
+                                }`}>
+                                  {metrics?.cpuPercent !== undefined ? `${metrics.cpuPercent.toFixed(1)}%` : '-'}
                                 </span>
                               )}
-                              {!app.enabled && (
-                                <span className="text-xs text-gray-500 bg-gray-800 px-1.5 py-0.5">off</span>
+                            </td>
+
+                            {/* RAM */}
+                            <td className="py-3 px-3 text-right">
+                              {disabled ? (
+                                <span className="text-xs text-gray-600">-</span>
+                              ) : (
+                                <span className="font-mono text-sm text-gray-400">
+                                  {metrics?.memoryBytes ? formatBytes(metrics.memoryBytes) : '-'}
+                                </span>
                               )}
-                            </div>
-                            <div className="flex items-center gap-2 text-xs text-gray-500">
-                              <a
-                                href={`https://${app.slug}.${baseDomain}`}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="font-mono hover:text-blue-400"
-                              >
-                                {app.slug}.{baseDomain}
-                              </a>
-                              {app.frontend.auth_required && <Key className="w-3 h-3 text-purple-400" />}
-                              {app.frontend.local_only && <Shield className="w-3 h-3 text-yellow-400" />}
-                            </div>
-                          </div>
-                        </div>
-                      </td>
+                            </td>
 
-                      {/* Status */}
-                      <td className="py-3 px-3">
-                        {isMigrating ? (
-                          <MigrationProgress migration={migrations[app.id]} />
-                        ) : isDeploying ? (
-                          <div>
-                            <span className="text-xs px-2 py-0.5 text-blue-400 bg-blue-900/30">Deploiement</span>
-                            <p className="text-xs text-gray-500 mt-1 truncate max-w-32">{app._deployMessage}</p>
-                          </div>
-                        ) : (
-                          <StatusBadge status={app.status} />
-                        )}
-                      </td>
-
-                      {/* Services */}
-                      <td className="py-3 px-3">
-                        {isMigrating ? (
-                          <span className="text-xs text-gray-600">-</span>
-                        ) : !metrics ? (
-                          <span className="text-xs text-gray-600">-</span>
-                        ) : (
-                          <div className="flex items-center gap-2 text-xs">
-                            {/* code-server */}
-                            {app.code_server_enabled !== false && (
-                              <button
-                                onClick={() => metrics.codeServerStatus === 'running'
-                                  ? handleServiceStop(app.id, 'code-server')
-                                  : handleServiceStart(app.id, 'code-server')
-                                }
-                                className={`flex items-center gap-1 px-1.5 py-0.5 transition-colors ${
-                                  metrics.codeServerStatus === 'running'
-                                    ? 'text-green-400 bg-green-900/30 hover:bg-green-900/50'
-                                    : metrics.codeServerStatus === 'starting'
-                                    ? 'text-blue-400 bg-blue-900/30'
-                                    : 'text-gray-400 bg-gray-700/30 hover:bg-gray-700/50'
-                                }`}
-                                title={`code-server: ${metrics.codeServerStatus}`}
-                              >
-                                <Code2 className="w-3 h-3" />
-                                {metrics.codeServerStatus === 'running' ? <Square className="w-2.5 h-2.5" /> : <Play className="w-2.5 h-2.5" />}
-                              </button>
-                            )}
-                          </div>
-                        )}
-                      </td>
-
-                      {/* CPU */}
-                      <td className="py-3 px-3 text-right">
-                        {isMigrating ? (
-                          <span className="text-xs text-gray-600">-</span>
-                        ) : (
-                          <span className={`font-mono text-sm ${
-                            metrics?.cpuPercent > 80 ? 'text-red-400' :
-                            metrics?.cpuPercent > 50 ? 'text-yellow-400' :
-                            metrics?.cpuPercent > 0 ? 'text-green-400' : 'text-gray-600'
-                          }`}>
-                            {metrics?.cpuPercent !== undefined ? `${metrics.cpuPercent.toFixed(1)}%` : '-'}
-                          </span>
-                        )}
-                      </td>
-
-                      {/* RAM */}
-                      <td className="py-3 px-3 text-right">
-                        {isMigrating ? (
-                          <span className="text-xs text-gray-600">-</span>
-                        ) : (
-                          <span className="font-mono text-sm text-gray-400">
-                            {metrics?.memoryBytes ? formatBytes(metrics.memoryBytes) : '-'}
-                          </span>
-                        )}
-                      </td>
-
-                      {/* Actions */}
-                      <td className="py-3 px-3">
-                        <div className={`flex items-center justify-end gap-1 ${isMigrating ? 'opacity-50 pointer-events-none' : ''}`}>
-                          {app.code_server_enabled !== false && baseDomain && (
-                            <a
-                              href={`https://${app.slug}.code.${baseDomain}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="p-1.5 text-cyan-400 hover:text-cyan-300 hover:bg-cyan-900/30 transition-colors"
-                              title="IDE"
-                            >
-                              <Code2 className="w-4 h-4" />
-                            </a>
-                          )}
-                          <button
-                            onClick={() => setTerminalApp(app)}
-                            disabled={isMigrating}
-                            className="p-1.5 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-900/30 transition-colors"
-                            title="Terminal"
-                          >
-                            <Terminal className="w-4 h-4" />
-                          </button>
-                          <button
-                            onClick={() => openMigrateModal(app)}
-                            disabled={isMigrating}
-                            className="p-1.5 text-gray-400 hover:text-blue-400 hover:bg-gray-700 rounded transition-colors"
-                            title="Migrer vers un autre hote"
-                          >
-                            <ArrowRightLeft className="w-4 h-4" />
-                          </button>
-                          <button
-                            onClick={() => handleToggle(app.id, !app.enabled)}
-                            disabled={isMigrating}
-                            className={`p-1.5 transition-colors ${
-                              app.enabled ? 'text-green-400 hover:bg-green-900/30' : 'text-gray-500 hover:bg-gray-700/30'
-                            }`}
-                            title={app.enabled ? 'Desactiver' : 'Activer'}
-                          >
-                            <Power className="w-4 h-4" />
-                          </button>
-                          <button
-                            onClick={() => openEditModal(app)}
-                            disabled={isMigrating}
-                            className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 transition-colors"
-                            title="Modifier"
-                          >
-                            <Pencil className="w-4 h-4" />
-                          </button>
-                          <button
-                            onClick={() => handleDelete(app.id, app.name)}
-                            disabled={isMigrating}
-                            className="p-1.5 text-red-400 hover:text-red-300 hover:bg-red-900/30 transition-colors"
-                            title="Supprimer"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
+                            {/* Actions */}
+                            <td className="py-3 px-3">
+                              <div className={`flex items-center justify-end gap-1 ${disabled ? 'opacity-50 pointer-events-none' : ''}`}>
+                                {app.code_server_enabled !== false && baseDomain && (
+                                  <a
+                                    href={`https://${app.slug}.code.${baseDomain}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="p-1.5 text-cyan-400 hover:text-cyan-300 hover:bg-cyan-900/30 transition-colors"
+                                    title="IDE"
+                                  >
+                                    <Code2 className="w-4 h-4" />
+                                  </a>
+                                )}
+                                <button
+                                  onClick={() => setTerminalApp(app)}
+                                  disabled={disabled}
+                                  className="p-1.5 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-900/30 transition-colors"
+                                  title="Terminal"
+                                >
+                                  <Terminal className="w-4 h-4" />
+                                </button>
+                                <button
+                                  onClick={() => openMigrateModal(app)}
+                                  disabled={disabled}
+                                  className="p-1.5 text-gray-400 hover:text-blue-400 hover:bg-gray-700 rounded transition-colors"
+                                  title="Migrer vers un autre hote"
+                                >
+                                  <ArrowRightLeft className="w-4 h-4" />
+                                </button>
+                                <button
+                                  onClick={() => handleToggle(app.id, !app.enabled)}
+                                  disabled={disabled}
+                                  className={`p-1.5 transition-colors ${
+                                    app.enabled ? 'text-green-400 hover:bg-green-900/30' : 'text-gray-500 hover:bg-gray-700/30'
+                                  }`}
+                                  title={app.enabled ? 'Desactiver' : 'Activer'}
+                                >
+                                  <Power className="w-4 h-4" />
+                                </button>
+                                <button
+                                  onClick={() => openEditModal(app)}
+                                  disabled={disabled}
+                                  className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 transition-colors"
+                                  title="Modifier"
+                                >
+                                  <Pencil className="w-4 h-4" />
+                                </button>
+                                <button
+                                  onClick={() => handleDelete(app.id, app.name)}
+                                  disabled={disabled}
+                                  className="p-1.5 text-red-400 hover:text-red-300 hover:bg-red-900/30 transition-colors"
+                                  title="Supprimer"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    ];
+                  });
+                })()}
               </tbody>
             </table>
           </div>

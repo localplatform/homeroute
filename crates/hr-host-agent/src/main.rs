@@ -1,5 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
-use hr_registry::protocol::{HostAgentMessage, HostMetrics, HostRegistryMessage};
+use hr_registry::protocol::{AutoOffMode, HostAgentMessage, HostMetrics, HostRegistryMessage};
 use std::collections::HashMap;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
@@ -111,6 +111,14 @@ async fn run_connection(config: &Config) -> Result<(), String> {
 
     let lan_interface = config.lan_interface.clone();
 
+    // Auto-off: idle monitoring (sleep or shutdown)
+    let mut auto_off_mode: Option<AutoOffMode> = None;
+    let mut auto_off_minutes: u32 = 0;
+    let mut idle_since: Option<tokio::time::Instant> = None;
+    const CPU_IDLE_THRESHOLD: f32 = 5.0;
+
+    let (cpu_tx, mut cpu_rx) = tokio::sync::watch::channel(0.0f32);
+
     // Heartbeat task
     let tx_hb = tx.clone();
     let heartbeat_handle = tokio::spawn(async move {
@@ -140,13 +148,14 @@ async fn run_connection(config: &Config) -> Result<(), String> {
         }
     });
 
-    // Metrics task
+    // Metrics task (every 5 seconds)
     let tx_metrics = tx.clone();
     let metrics_handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             interval.tick().await;
             let metrics = collect_metrics();
+            let cpu = metrics.cpu_percent;
             if tx_metrics
                 .send(HostAgentMessage::Metrics(metrics))
                 .await
@@ -154,6 +163,7 @@ async fn run_connection(config: &Config) -> Result<(), String> {
             {
                 break;
             }
+            let _ = cpu_tx.send(cpu);
         }
     });
 
@@ -345,6 +355,12 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                                         .await;
                                 });
                             }
+                            Ok(HostRegistryMessage::SetAutoOff { mode, minutes }) => {
+                                info!(?mode, minutes, "Auto-off configured");
+                                auto_off_mode = Some(mode);
+                                auto_off_minutes = minutes;
+                                idle_since = None;
+                            }
                             Ok(HostRegistryMessage::AuthResult { .. }) => {
                                 // Already handled during auth phase
                             }
@@ -365,6 +381,50 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                         break;
                     }
                     _ => {}
+                }
+            }
+            // Auto-off idle monitoring (sleep or shutdown)
+            Ok(()) = cpu_rx.changed() => {
+                let mode = match auto_off_mode {
+                    Some(m) if auto_off_minutes > 0 => m,
+                    _ => {
+                        idle_since = None;
+                        continue;
+                    }
+                };
+                let cpu = *cpu_rx.borrow();
+                if cpu < CPU_IDLE_THRESHOLD {
+                    if idle_since.is_none() {
+                        info!(cpu_percent = cpu, timeout_minutes = auto_off_minutes, ?mode,
+                              "Host entering idle state, starting auto-off countdown");
+                        idle_since = Some(tokio::time::Instant::now());
+                    }
+                    if let Some(since) = idle_since {
+                        let idle_mins = since.elapsed().as_secs() / 60;
+                        if idle_mins >= auto_off_minutes as u64 {
+                            info!(idle_minutes = idle_mins, ?mode,
+                                  "Idle timeout reached, executing auto-off");
+                            let _ = tx.send(HostAgentMessage::AutoOffNotify { mode }).await;
+                            let cmd_args: &[&str] = match mode {
+                                AutoOffMode::Sleep => &["systemctl", "suspend"],
+                                AutoOffMode::Shutdown => &["poweroff"],
+                            };
+                            let args: Vec<String> = cmd_args.iter().map(|s| s.to_string()).collect();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                let _ = tokio::process::Command::new("sudo")
+                                    .args(&args)
+                                    .output()
+                                    .await;
+                            });
+                            idle_since = None;
+                        }
+                    }
+                } else {
+                    if idle_since.is_some() {
+                        info!(cpu_percent = cpu, "Host no longer idle, resetting auto-off countdown");
+                    }
+                    idle_since = None;
                 }
             }
         }

@@ -96,19 +96,39 @@ async fn force_update(State(state): State<ApiState>) -> Json<Value> {
         None => return Json(json!({"success": false, "error": "Nom d'enregistrement non configure"})),
     };
 
-    let ipv6 = match get_ipv6_address(&env.cf_interface).await {
-        Some(ip) => ip,
-        None => return Json(json!({"success": false, "error": "Impossible de determiner l'adresse IPv6"})),
-    };
+    // Cloud relay mode: update A record with VPS IPv4
+    if env.cloud_relay_enabled {
+        let vps_ipv4 = match &env.cloud_relay_host {
+            Some(host) => host.clone(),
+            None => return Json(json!({"success": false, "error": "Cloud relay enabled but CLOUD_RELAY_HOST not configured"})),
+        };
 
-    match cloudflare::upsert_aaaa_record(token, zone_id, record_name, &ipv6, env.cf_proxied).await {
-        Ok(_record_id) => {
-            log_ddns(&format!("Updated {} to {}", record_name, ipv6)).await;
-            Json(json!({"success": true, "ipv6": ipv6}))
+        match cloudflare::upsert_a_record(token, zone_id, record_name, &vps_ipv4, env.cf_proxied).await {
+            Ok(_record_id) => {
+                log_ddns(&format!("Updated {} to A {} (relay mode)", record_name, vps_ipv4)).await;
+                Json(json!({"success": true, "ipv4": vps_ipv4, "mode": "relay"}))
+            }
+            Err(e) => {
+                log_ddns(&format!("Update failed (relay): {}", e)).await;
+                Json(json!({"success": false, "error": e}))
+            }
         }
-        Err(e) => {
-            log_ddns(&format!("Update failed: {}", e)).await;
-            Json(json!({"success": false, "error": e}))
+    } else {
+        // Direct mode: update AAAA record with on-prem IPv6
+        let ipv6 = match get_ipv6_address(&env.cf_interface).await {
+            Some(ip) => ip,
+            None => return Json(json!({"success": false, "error": "Impossible de determiner l'adresse IPv6"})),
+        };
+
+        match cloudflare::upsert_aaaa_record(token, zone_id, record_name, &ipv6, env.cf_proxied).await {
+            Ok(_record_id) => {
+                log_ddns(&format!("Updated {} to AAAA {}", record_name, ipv6)).await;
+                Json(json!({"success": true, "ipv6": ipv6, "mode": "direct"}))
+            }
+            Err(e) => {
+                log_ddns(&format!("Update failed: {}", e)).await;
+                Json(json!({"success": false, "error": e}))
+            }
         }
     }
 }

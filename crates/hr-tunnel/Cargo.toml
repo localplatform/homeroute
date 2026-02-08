@@ -1,12 +1,18 @@
 [package]
-name = "hr-firewall"
+name = "hr-tunnel"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
+quinn = "0.11"
+rustls = { workspace = true }
 tokio = { workspace = true }
+rcgen = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+bytes = "1"
 tracing = { workspace = true }
 anyhow = { workspace = true }
-hr-ipv6 = { path = "../hr-ipv6" }
+ring = { workspace = true }
+rustls-pemfile = { workspace = true }
+time = "0.3"

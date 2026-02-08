@@ -2,11 +2,11 @@ use hr_adblock::AdblockEngine;
 use hr_auth::AuthService;
 use hr_acme::AcmeManager;
 use hr_common::config::EnvConfig;
-use hr_common::events::{EventBus, MigrationPhase};
+use hr_common::events::{CloudRelayStatus, EventBus, MigrationPhase};
 use hr_common::service_registry::SharedServiceRegistry;
 use hr_dns::SharedDnsState;
 use hr_dhcp::SharedDhcpState;
-use hr_firewall::FirewallEngine;
+
 use hr_proxy::{ProxyState, TlsManager};
 use hr_registry::AgentRegistry;
 use std::collections::HashMap;
@@ -66,6 +66,14 @@ pub struct CachedRelationInfo {
     pub relation_type: String,
 }
 
+/// Live cloud relay connection info (updated by tunnel client).
+pub struct CloudRelayInfo {
+    pub status: CloudRelayStatus,
+    pub vps_ipv4: Option<String>,
+    pub latency_ms: Option<u64>,
+    pub active_streams: Option<u32>,
+}
+
 /// Shared application state for all API routes.
 #[derive(Clone)]
 pub struct ApiState {
@@ -79,7 +87,7 @@ pub struct ApiState {
     pub events: Arc<EventBus>,
     pub env: Arc<EnvConfig>,
     pub service_registry: SharedServiceRegistry,
-    pub firewall: Option<Arc<FirewallEngine>>,
+
     pub registry: Option<Arc<AgentRegistry>>,
 
     /// Active migrations keyed by transfer_id.
@@ -87,6 +95,9 @@ pub struct ApiState {
 
     /// Cached Dataverse schemas keyed by app_id.
     pub dataverse_schemas: Arc<RwLock<HashMap<String, CachedDataverseSchema>>>,
+
+    /// Live cloud relay connection status.
+    pub cloud_relay_status: Arc<RwLock<Option<CloudRelayInfo>>>,
 
     /// Path to dns-dhcp-config.json
     pub dns_dhcp_config_path: PathBuf,

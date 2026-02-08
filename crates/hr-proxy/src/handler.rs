@@ -15,7 +15,7 @@ use std::sync::{Arc, RwLock};
 use tokio::net::TcpStream;
 use tracing::{debug, error, info, warn};
 
-use hr_common::events::EventBus;
+use hr_common::events::{EventBus, HostPowerState};
 use hr_registry::protocol::{ServiceAction, ServiceType};
 use hr_registry::AgentRegistry;
 
@@ -235,7 +235,17 @@ pub async fn proxy_handler(
         user_agent,
     });
 
-    result
+    // Clear Alt-Svc to prevent QUIC/h3 errors in LAN — Cloudflare advertises
+    // h3 support but our proxy only speaks h1/h2, so cached Alt-Svc entries
+    // cause ERR_QUIC_PROTOCOL_ERROR when clients switch from WAN to LAN.
+    match result {
+        Ok(mut resp) => {
+            resp.headers_mut()
+                .insert("alt-svc", HeaderValue::from_static("clear"));
+            Ok(resp)
+        }
+        err => err,
+    }
 }
 
 /// Inner proxy handler logic
@@ -711,10 +721,9 @@ fn is_connection_refused(err: &str) -> bool {
         || err.contains("Failed to connect to backend") // WebSocket connect error
 }
 
-/// SSE endpoint for Wake-on-Demand: streams service start events to the client.
-/// NOTE: Does NOT send a Start command — handle_wod() already did that.
-/// Uses direct TCP polling to detect when the backend port is actually listening,
-/// combined with EventBus for intermediate status messages.
+/// SSE endpoint for Wake-on-Demand: streams host power + service start events.
+/// When the host transitions to Online (after WOL), sends ServiceCommand::Start
+/// for the relevant service type. Uses TCP polling to detect backend readiness.
 async fn handle_wod_sse(
     state: &Arc<ProxyState>,
     app_route: &AppRoute,
@@ -726,16 +735,21 @@ async fn handle_wod_sse(
     let target_ip = app_route.target_ip;
     let target_port = app_route.target_port;
     let events = state.get_events();
+    let registry = state.get_registry();
     let app_id = app_route.app_id.clone();
+    let host_id = app_route.host_id.clone();
+    let svc_type_enum = app_route.service_type;
     let svc_type = format!("{:?}", app_route.service_type).to_lowercase();
 
     tokio::spawn(async move {
-        let timeout = tokio::time::sleep(std::time::Duration::from_secs(60));
+        let timeout = tokio::time::sleep(std::time::Duration::from_secs(180));
         tokio::pin!(timeout);
 
         let mut event_sub = events.as_ref().map(|e| e.service_command.subscribe());
-        let mut poll_interval = tokio::time::interval(std::time::Duration::from_millis(1000));
+        let mut power_sub = events.as_ref().map(|e| e.host_power.subscribe());
+        let mut poll_interval = tokio::time::interval(std::time::Duration::from_millis(1500));
         poll_interval.tick().await; // consume first immediate tick
+        let mut service_start_sent = false;
 
         loop {
             tokio::select! {
@@ -751,7 +765,37 @@ async fn handle_wod_sse(
                         break;
                     }
                 }
-                // EventBus status updates for UI feedback
+                // Host power state changes (WOL → Online → etc.)
+                result = async {
+                    if let Some(ref mut sub) = power_sub {
+                        sub.recv().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    if let Ok(event) = result {
+                        if event.host_id == host_id {
+                            let msg = format!(
+                                "data: {{\"type\":\"power\",\"state\":\"{}\",\"message\":\"{}\"}}\n\n",
+                                event.state, event.message
+                            );
+                            let _ = tx.send(msg).await;
+
+                            // When host comes online after WOL, send ServiceCommand::Start
+                            if event.state == HostPowerState::Online && !service_start_sent {
+                                service_start_sent = true;
+                                if let Some(ref reg) = registry {
+                                    let reg = reg.clone();
+                                    let aid = app_id.clone();
+                                    tokio::spawn(async move {
+                                        let _ = reg.send_service_command(&aid, svc_type_enum, ServiceAction::Start).await;
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                // Service command events for UI feedback
                 result = async {
                     if let Some(ref mut sub) = event_sub {
                         sub.recv().await
@@ -785,10 +829,10 @@ async fn handle_wod_sse(
         .unwrap())
 }
 
-/// Handle Wake-on-Demand for an app route, dispatching to WoL for offline
-/// remote hosts or ServiceCommand::Start for local/online hosts.
-/// When `wake_page_enabled` is true, returns an HTML page with SSE.
-/// When false, holds the connection and returns a Retry-After response.
+/// Handle Wake-on-Demand for an app route using the host power state machine.
+/// Applies to all service types (App, CodeServer, Db).
+/// Dispatches to WoL for offline/suspended remote hosts, rejects during
+/// shutdown/suspend transitions, and sends ServiceCommand::Start for online hosts.
 async fn handle_wod(
     state: &Arc<ProxyState>,
     app_route: &AppRoute,
@@ -797,34 +841,60 @@ async fn handle_wod(
     if app_route.host_id != "local" {
         if let Some(registry) = state.get_registry() {
             let host_id = app_route.host_id.clone();
-            let is_connected = registry.is_host_connected(&host_id).await;
+            let power_state = registry.get_host_power_state(&host_id).await;
 
-            if !is_connected {
-                // Host is offline — send WoL magic packet
-                if let Some(mac) = lookup_host_mac(&host_id).await {
-                    tokio::spawn(async move {
-                        if let Err(e) = send_wol_packet(&mac).await {
-                            warn!("WoL failed for host {}: {}", host_id, e);
+            match power_state {
+                HostPowerState::Offline | HostPowerState::Suspended => {
+                    // Try to send WOL (handles dedup internally)
+                    let wake_msg = match registry.request_wake_host(&host_id).await {
+                        Ok(_) => "Reveil de l'hote en cours...",
+                        Err(e) => {
+                            warn!("WOL request failed for {}: {}", host_id, e);
+                            "Reveil de l'hote en cours..."
                         }
-                    });
+                    };
+                    if app_route.wake_page_enabled {
+                        return wake_on_demand_page(host, wake_msg);
+                    } else {
+                        return handle_wod_transparent(state, app_route).await;
+                    }
+                }
+                HostPowerState::WakingUp => {
+                    // Already waking — show wake page without sending another WOL
                     if app_route.wake_page_enabled {
                         return wake_on_demand_page(host, "Reveil de l'hote en cours...");
                     } else {
                         return handle_wod_transparent(state, app_route).await;
                     }
                 }
-                // No MAC address found — fall through to default WOD behavior
-            } else {
-                // Host is online but service is down — start the service
-                let app_id = app_route.app_id.clone();
-                let svc = app_route.service_type;
-                tokio::spawn(async move {
-                    let _ = registry.send_service_command(&app_id, svc, ServiceAction::Start).await;
-                });
-                if app_route.wake_page_enabled {
-                    return wake_on_demand_page(host, "Demarrage du service...");
-                } else {
-                    return handle_wod_transparent(state, app_route).await;
+                HostPowerState::Rebooting => {
+                    if app_route.wake_page_enabled {
+                        return wake_on_demand_page(host, "Redemarrage de l'hote en cours...");
+                    } else {
+                        return handle_wod_transparent(state, app_route).await;
+                    }
+                }
+                HostPowerState::ShuttingDown | HostPowerState::Suspending => {
+                    // Active power action — return 503 immediately
+                    return Response::builder()
+                        .status(StatusCode::SERVICE_UNAVAILABLE)
+                        .header("Retry-After", "10")
+                        .header("Content-Type", "text/plain")
+                        .body(Body::from("Host power action in progress"))
+                        .unwrap();
+                }
+                HostPowerState::Online => {
+                    // Host is online but service is down — start the service
+                    let app_id = app_route.app_id.clone();
+                    let svc = app_route.service_type;
+                    tokio::spawn(async move {
+                        let _ = registry.send_service_command(&app_id, svc, ServiceAction::Start).await;
+                    });
+                    if app_route.wake_page_enabled {
+                        return wake_on_demand_page(host, "Demarrage du service...");
+                    } else {
+                        return handle_wod_transparent(state, app_route).await;
+                    }
                 }
             }
         }
@@ -847,7 +917,7 @@ async fn handle_wod(
 
 /// Transparent Wake-on-Demand: holds the connection, polls until the backend port
 /// is actually listening, then returns a Retry-After:0 response so the browser
-/// retries immediately.
+/// retries immediately. Timeout extended to 180s for WOL boot sequences.
 async fn handle_wod_transparent(
     _state: &Arc<ProxyState>,
     app_route: &AppRoute,
@@ -856,9 +926,9 @@ async fn handle_wod_transparent(
     let target_port = app_route.target_port;
     let addr = format!("{}:{}", target_ip, target_port);
 
-    let timeout = tokio::time::sleep(std::time::Duration::from_secs(60));
+    let timeout = tokio::time::sleep(std::time::Duration::from_secs(180));
     tokio::pin!(timeout);
-    let mut poll_interval = tokio::time::interval(std::time::Duration::from_millis(1000));
+    let mut poll_interval = tokio::time::interval(std::time::Duration::from_millis(1500));
     poll_interval.tick().await; // consume first immediate tick
 
     loop {
@@ -886,47 +956,8 @@ async fn handle_wod_transparent(
         .unwrap()
 }
 
-/// Look up the MAC address for a host from /data/hosts.json.
-async fn lookup_host_mac(host_id: &str) -> Option<String> {
-    let content = tokio::fs::read_to_string("/data/hosts.json").await.ok()?;
-    let data: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let hosts = data.get("hosts")?.as_array()?;
-    let host = hosts.iter().find(|h| {
-        h.get("id").and_then(|i| i.as_str()) == Some(host_id)
-    })?;
-    host.get("mac").and_then(|m| m.as_str()).map(|s| s.to_string())
-}
-
-/// Send a Wake-on-LAN magic packet to the given MAC address.
-async fn send_wol_packet(mac: &str) -> Result<(), String> {
-    let mac_bytes: Vec<u8> = mac
-        .split(':')
-        .filter_map(|b| u8::from_str_radix(b, 16).ok())
-        .collect();
-
-    if mac_bytes.len() != 6 {
-        return Err("Invalid MAC address".to_string());
-    }
-
-    let mut packet = vec![0xFFu8; 6];
-    for _ in 0..16 {
-        packet.extend_from_slice(&mac_bytes);
-    }
-
-    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0")
-        .await
-        .map_err(|e| e.to_string())?;
-    socket.set_broadcast(true).map_err(|e| e.to_string())?;
-    socket
-        .send_to(&packet, "255.255.255.255:9")
-        .await
-        .map_err(|e| e.to_string())?;
-    let _ = socket.send_to(&packet, "10.0.0.255:9").await;
-
-    Ok(())
-}
-
 /// Serve a Wake-on-Demand page that uses SSE to know when the service is ready.
+/// Handles both power state events (host boot progress) and service state events.
 fn wake_on_demand_page(host: &str, message: &str) -> Response {
     let html = format!(
         r#"<!DOCTYPE html>
@@ -953,7 +984,7 @@ p#status{{color:#94a3b8;font-size:.9rem;line-height:1.5}}
 <body>
 <div class="card">
 <div class="spinner"></div>
-<h1>{message}</h1>
+<h1 id="title">{message}</h1>
 <p id="status">Connexion au service...</p>
 <div class="host">{host}</div>
 </div>
@@ -961,7 +992,16 @@ p#status{{color:#94a3b8;font-size:.9rem;line-height:1.5}}
 var es = new EventSource('/__hr/wod');
 es.onmessage = function(e) {{
   var msg = JSON.parse(e.data);
-  if (msg.type === 'waking') {{
+  if (msg.type === 'power') {{
+    if (msg.state === 'online') {{
+      document.getElementById('title').textContent = 'Hote en ligne';
+      document.getElementById('status').textContent = 'Demarrage des services...';
+    }} else if (msg.state === 'waking_up') {{
+      document.getElementById('status').textContent = msg.message || 'En attente du demarrage...';
+    }} else if (msg.state === 'offline') {{
+      document.getElementById('status').textContent = msg.message || 'Hote hors ligne';
+    }}
+  }} else if (msg.type === 'waking') {{
     document.getElementById('status').textContent = 'Demarrage ' + msg.service + '...';
   }} else if (msg.type === 'ready') {{
     es.close();

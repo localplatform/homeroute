@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
 
 use hr_common::config::EnvConfig;
-use hr_common::events::{AgentMetricsEvent, AgentStatusEvent, AgentUpdateEvent, AgentUpdateStatus, EventBus};
+use hr_common::events::{AgentMetricsEvent, AgentStatusEvent, AgentUpdateEvent, AgentUpdateStatus, EventBus, HostPowerEvent, HostPowerState, PowerAction, WakeResult};
 use hr_lxd::LxdClient;
 
 use crate::protocol::{AgentMetrics, ContainerInfo, HostMetrics, HostRegistryMessage, NetworkInterfaceInfo, PowerPolicy, RegistryMessage, ServiceAction, ServiceState, ServiceType};
@@ -46,6 +46,14 @@ pub enum MigrationResult {
     ExportFailed { error: String },
 }
 
+/// Tracks power state of a remote host for WOL deduplication and conflict detection.
+pub struct HostPowerInfo {
+    pub state: HostPowerState,
+    pub since: DateTime<Utc>,
+    pub last_wol_sent: Option<DateTime<Utc>>,
+    pub mac_address: Option<String>,
+}
+
 pub struct AgentRegistry {
     state: Arc<RwLock<RegistryState>>,
     state_path: PathBuf,
@@ -57,6 +65,8 @@ pub struct AgentRegistry {
     exec_signals: Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<(bool, String, String)>>>>,
     /// Maps transfer_id → container_name for in-flight migrations (set when StartExport is sent)
     pub transfer_container_names: Arc<RwLock<HashMap<String, String>>>,
+    /// Host power state machine for WOL dedup, conflict detection, and progress tracking.
+    host_power_states: Arc<RwLock<HashMap<String, HostPowerInfo>>>,
 }
 
 impl AgentRegistry {
@@ -91,6 +101,7 @@ impl AgentRegistry {
             migration_signals: Arc::new(RwLock::new(HashMap::new())),
             exec_signals: Arc::new(RwLock::new(HashMap::new())),
             transfer_container_names: Arc::new(RwLock::new(HashMap::new())),
+            host_power_states: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -461,6 +472,8 @@ impl AgentRegistry {
     }
 
     /// Update heartbeat timestamp for an agent.
+    /// If the agent was marked stale but is still sending heartbeats
+    /// (e.g. after a host suspend/resume), restore its Connected status.
     pub async fn handle_heartbeat(&self, app_id: &str) {
         let now = Utc::now();
         {
@@ -469,18 +482,67 @@ impl AgentRegistry {
                 conn.last_heartbeat = now;
             }
         }
-        {
+        let reconnected_slug = {
             let mut state = self.state.write().await;
             if let Some(app) = state.applications.iter_mut().find(|a| a.id == app_id) {
                 app.last_heartbeat = Some(now);
+                if app.status == AgentStatus::Disconnected {
+                    app.status = AgentStatus::Connected;
+                    Some(app.slug.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
             }
+        };
+        if let Some(slug) = reconnected_slug {
+            let _ = self.events.agent_status.send(AgentStatusEvent {
+                app_id: app_id.to_string(),
+                slug,
+                status: "connected".to_string(),
+                message: None,
+            });
+            let _ = self.persist().await;
+            info!(app_id, "Agent reconnected after stale heartbeat");
         }
     }
 
+    /// Mark an agent as stale (heartbeat timeout) without removing its connection.
+    /// This allows the agent to auto-recover if the WebSocket is still alive
+    /// (e.g. after a host suspend/resume cycle).
+    async fn mark_agent_stale(&self, app_id: &str) {
+        let slug = {
+            let mut state = self.state.write().await;
+            if let Some(app) = state.applications.iter_mut().find(|a| a.id == app_id) {
+                if app.status == AgentStatus::Disconnected {
+                    return; // Already marked stale
+                }
+                app.status = AgentStatus::Disconnected;
+                Some(app.slug.clone())
+            } else {
+                None
+            }
+        };
+
+        if let Some(slug) = slug {
+            let _ = self.events.agent_status.send(AgentStatusEvent {
+                app_id: app_id.to_string(),
+                slug,
+                status: "disconnected".to_string(),
+                message: None,
+            });
+        }
+
+        let _ = self.persist().await;
+        warn!(app_id, "Agent marked stale (heartbeat timeout)");
+    }
+
     /// Background task: check heartbeats and mark stale agents as disconnected.
+    /// Also checks host power state timeouts.
     pub async fn run_heartbeat_monitor(self: &Arc<Self>) {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
 
             let now = Utc::now();
             let stale_threshold = chrono::Duration::seconds(90);
@@ -496,9 +558,11 @@ impl AgentRegistry {
             }
 
             for id in stale_ids {
-                warn!(app_id = id, "Agent heartbeat stale, marking disconnected");
-                self.on_agent_disconnected(&id).await;
+                self.mark_agent_stale(&id).await;
             }
+
+            // Check host power state timeouts (WakingUp, Rebooting, etc.)
+            self.check_power_state_timeouts().await;
         }
     }
 
@@ -522,10 +586,31 @@ impl AgentRegistry {
             interfaces: Vec::new(),
         };
         self.host_connections.write().await.insert(host_id.clone(), conn);
+
+        // Update power state machine → Online
+        self.transition_power_state(&host_id, HostPowerState::Online, "Hote connecte").await;
+
         info!("Host agent connected: {} ({})", host_name, host_id);
     }
 
     pub async fn on_host_disconnected(&self, host_id: &str) {
+        // Transition based on current power state
+        let new_state = {
+            let states = self.host_power_states.read().await;
+            match states.get(host_id).map(|s| s.state) {
+                Some(HostPowerState::ShuttingDown) => HostPowerState::Offline,
+                Some(HostPowerState::Rebooting) => HostPowerState::Rebooting, // stay, expect reconnection
+                Some(HostPowerState::Suspending) => HostPowerState::Suspended,
+                _ => HostPowerState::Offline,
+            }
+        };
+        let msg = match new_state {
+            HostPowerState::Rebooting => "Hote en redemarrage, en attente de reconnexion",
+            HostPowerState::Suspended => "Hote en veille",
+            _ => "Hote deconnecte",
+        };
+        self.transition_power_state(host_id, new_state, msg).await;
+
         if let Some(conn) = self.host_connections.write().await.remove(host_id) {
             info!("Host agent disconnected: {} ({})", conn.host_name, host_id);
         }
@@ -533,6 +618,251 @@ impl AgentRegistry {
 
     pub async fn is_host_connected(&self, host_id: &str) -> bool {
         self.host_connections.read().await.contains_key(host_id)
+    }
+
+    // ── Host power state machine ────────────────────────────────
+
+    /// Get the current power state of a host.
+    pub async fn get_host_power_state(&self, host_id: &str) -> HostPowerState {
+        self.host_power_states
+            .read()
+            .await
+            .get(host_id)
+            .map(|s| s.state)
+            .unwrap_or(HostPowerState::Offline)
+    }
+
+    /// Internal: transition power state and emit event.
+    async fn transition_power_state(&self, host_id: &str, new_state: HostPowerState, message: &str) {
+        let mut states = self.host_power_states.write().await;
+        let entry = states.entry(host_id.to_string()).or_insert_with(|| HostPowerInfo {
+            state: HostPowerState::Offline,
+            since: Utc::now(),
+            last_wol_sent: None,
+            mac_address: None,
+        });
+
+        let old_state = entry.state;
+        if old_state == new_state {
+            return;
+        }
+
+        entry.state = new_state;
+        entry.since = Utc::now();
+
+        // Clear WOL tracking when going online or offline
+        if matches!(new_state, HostPowerState::Online | HostPowerState::Offline) {
+            entry.last_wol_sent = None;
+        }
+
+        info!(
+            host_id,
+            from = %old_state,
+            to = %new_state,
+            "Host power state transition"
+        );
+
+        let _ = self.events.host_power.send(HostPowerEvent {
+            host_id: host_id.to_string(),
+            state: new_state,
+            message: message.to_string(),
+        });
+    }
+
+    /// Request a host wake-up via WOL. Handles deduplication and conflict detection.
+    pub async fn request_wake_host(&self, host_id: &str) -> Result<WakeResult, String> {
+        let (current_state, last_wol, cached_mac) = {
+            let states = self.host_power_states.read().await;
+            match states.get(host_id) {
+                Some(info) => (info.state, info.last_wol_sent, info.mac_address.clone()),
+                None => (HostPowerState::Offline, None, None),
+            }
+        };
+
+        match current_state {
+            HostPowerState::Online => return Ok(WakeResult::AlreadyOnline),
+            HostPowerState::ShuttingDown => return Err("L'hote est en cours d'arret".to_string()),
+            HostPowerState::Rebooting => return Err("L'hote est en cours de redemarrage".to_string()),
+            HostPowerState::Suspending => return Err("L'hote est en cours de mise en veille".to_string()),
+            HostPowerState::WakingUp => {
+                // Dedup: if WOL sent less than 30s ago, skip
+                if let Some(sent_at) = last_wol {
+                    if (Utc::now() - sent_at).num_seconds() < 30 {
+                        return Ok(WakeResult::AlreadyWaking);
+                    }
+                }
+                // Retry WOL after 30s
+            }
+            HostPowerState::Offline | HostPowerState::Suspended => {
+                // Proceed to send WOL
+            }
+        }
+
+        // Look up MAC address (use cache if available)
+        let mac = match cached_mac {
+            Some(m) => m,
+            None => {
+                let m = Self::lookup_host_mac(host_id).await
+                    .ok_or_else(|| "Adresse MAC non trouvee".to_string())?;
+                // Cache it
+                let mut states = self.host_power_states.write().await;
+                if let Some(info) = states.get_mut(host_id) {
+                    info.mac_address = Some(m.clone());
+                }
+                m
+            }
+        };
+
+        // Send WOL packet
+        Self::send_wol_packet(&mac).await?;
+
+        // Update state
+        {
+            let mut states = self.host_power_states.write().await;
+            let entry = states.entry(host_id.to_string()).or_insert_with(|| HostPowerInfo {
+                state: HostPowerState::Offline,
+                since: Utc::now(),
+                last_wol_sent: None,
+                mac_address: Some(mac),
+            });
+            entry.last_wol_sent = Some(Utc::now());
+
+            if entry.state != HostPowerState::WakingUp {
+                entry.state = HostPowerState::WakingUp;
+                entry.since = Utc::now();
+            }
+        }
+
+        // Emit event
+        let _ = self.events.host_power.send(HostPowerEvent {
+            host_id: host_id.to_string(),
+            state: HostPowerState::WakingUp,
+            message: "Magic packet WOL envoye".to_string(),
+        });
+
+        info!(host_id, "WOL packet sent");
+        Ok(WakeResult::WolSent)
+    }
+
+    /// Request a power action (shutdown/reboot/suspend). Validates state conflicts.
+    pub async fn request_power_action(&self, host_id: &str, action: PowerAction) -> Result<(), String> {
+        let current_state = self.get_host_power_state(host_id).await;
+
+        // Check for conflicts
+        match (current_state, action) {
+            (HostPowerState::WakingUp, _) => {
+                return Err("L'hote est en cours de reveil".to_string());
+            }
+            (HostPowerState::ShuttingDown, PowerAction::Shutdown) => {
+                return Err("L'hote est deja en cours d'arret".to_string());
+            }
+            (HostPowerState::Rebooting, PowerAction::Reboot) => {
+                return Err("L'hote est deja en cours de redemarrage".to_string());
+            }
+            (HostPowerState::Suspending, PowerAction::Suspend) => {
+                return Err("L'hote est deja en cours de mise en veille".to_string());
+            }
+            (HostPowerState::Offline | HostPowerState::Suspended, _) => {
+                return Err("L'hote est hors ligne".to_string());
+            }
+            _ => {}
+        }
+
+        let (new_state, message) = match action {
+            PowerAction::Shutdown => (HostPowerState::ShuttingDown, "Arret en cours"),
+            PowerAction::Reboot => (HostPowerState::Rebooting, "Redemarrage en cours"),
+            PowerAction::Suspend => (HostPowerState::Suspending, "Mise en veille en cours"),
+        };
+
+        self.transition_power_state(host_id, new_state, message).await;
+        Ok(())
+    }
+
+    /// Invalidate the cached MAC address for a host (called when user changes WOL MAC).
+    pub async fn invalidate_host_mac_cache(&self, host_id: &str) {
+        let mut states = self.host_power_states.write().await;
+        if let Some(info) = states.get_mut(host_id) {
+            info.mac_address = None;
+        }
+    }
+
+    /// Check power state timeouts (called from heartbeat monitor loop).
+    async fn check_power_state_timeouts(&self) {
+        let now = Utc::now();
+        let mut transitions = Vec::new();
+
+        {
+            let states = self.host_power_states.read().await;
+            for (host_id, info) in states.iter() {
+                let elapsed = (now - info.since).num_seconds();
+                let timeout = match info.state {
+                    HostPowerState::WakingUp => 180,
+                    HostPowerState::Rebooting => 120,
+                    HostPowerState::ShuttingDown => 60,
+                    HostPowerState::Suspending => 30,
+                    _ => continue,
+                };
+                if elapsed > timeout {
+                    transitions.push((host_id.clone(), info.state));
+                }
+            }
+        }
+
+        for (host_id, timed_out_state) in transitions {
+            let msg = match timed_out_state {
+                HostPowerState::WakingUp => "Timeout: l'hote n'a pas repondu au WOL",
+                HostPowerState::Rebooting => "Timeout: l'hote n'a pas redemarré",
+                HostPowerState::ShuttingDown => "Timeout: arret presume termine",
+                HostPowerState::Suspending => "Timeout: mise en veille presumee terminee",
+                _ => continue,
+            };
+            warn!(host_id = %host_id, state = %timed_out_state, "Power state timeout");
+            self.transition_power_state(&host_id, HostPowerState::Offline, msg).await;
+        }
+    }
+
+    /// Send a Wake-on-LAN magic packet to the given MAC address.
+    pub async fn send_wol_packet(mac: &str) -> Result<(), String> {
+        let mac_bytes: Vec<u8> = mac
+            .split(':')
+            .filter_map(|b| u8::from_str_radix(b, 16).ok())
+            .collect();
+
+        if mac_bytes.len() != 6 {
+            return Err("Adresse MAC invalide".to_string());
+        }
+
+        let mut packet = vec![0xFFu8; 6];
+        for _ in 0..16 {
+            packet.extend_from_slice(&mac_bytes);
+        }
+
+        let socket = tokio::net::UdpSocket::bind("0.0.0.0:0")
+            .await
+            .map_err(|e| e.to_string())?;
+        socket.set_broadcast(true).map_err(|e| e.to_string())?;
+        socket
+            .send_to(&packet, "255.255.255.255:9")
+            .await
+            .map_err(|e| e.to_string())?;
+        let _ = socket.send_to(&packet, "10.0.0.255:9").await;
+
+        Ok(())
+    }
+
+    /// Look up the MAC address for a host from /data/hosts.json.
+    pub async fn lookup_host_mac(host_id: &str) -> Option<String> {
+        let content = tokio::fs::read_to_string("/data/hosts.json").await.ok()?;
+        let data: serde_json::Value = serde_json::from_str(&content).ok()?;
+        let hosts = data.get("hosts")?.as_array()?;
+        let host = hosts.iter().find(|h| {
+            h.get("id").and_then(|i| i.as_str()) == Some(host_id)
+        })?;
+        // Prefer wol_mac, fall back to mac
+        host.get("wol_mac")
+            .and_then(|m| m.as_str())
+            .or_else(|| host.get("mac").and_then(|m| m.as_str()))
+            .map(|s| s.to_string())
     }
 
     pub async fn update_host_heartbeat(&self, host_id: &str) {

@@ -33,6 +33,12 @@ pub struct EnvConfig {
     pub log_dir: PathBuf,
     /// Chemin du frontend buildé
     pub web_dist_path: PathBuf,
+    /// Cloud Relay
+    pub cloud_relay_enabled: bool,
+    pub cloud_relay_host: Option<String>,
+    pub cloud_relay_quic_port: u16,
+    pub cloud_relay_ssh_user: Option<String>,
+    pub cloud_relay_ssh_port: u16,
 }
 
 impl Default for EnvConfig {
@@ -62,6 +68,11 @@ impl Default for EnvConfig {
             data_dir: PathBuf::from("/opt/homeroute/data"),
             log_dir: PathBuf::from("/var/log/homeroute"),
             web_dist_path: PathBuf::from("/opt/homeroute/web/dist"),
+            cloud_relay_enabled: false,
+            cloud_relay_host: None,
+            cloud_relay_quic_port: 4443,
+            cloud_relay_ssh_user: None,
+            cloud_relay_ssh_port: 22,
         }
     }
 }
@@ -117,6 +128,25 @@ impl EnvConfig {
         }
         if let Ok(v) = std::env::var("ACME_STAGING") {
             config.acme_staging = v == "1" || v.to_lowercase() == "true";
+        }
+        if let Ok(v) = std::env::var("CLOUD_RELAY_ENABLED") {
+            config.cloud_relay_enabled = v == "1" || v.to_lowercase() == "true";
+        }
+        if let Ok(v) = std::env::var("CLOUD_RELAY_HOST") {
+            config.cloud_relay_host = Some(v);
+        }
+        if let Ok(v) = std::env::var("CLOUD_RELAY_QUIC_PORT") {
+            if let Ok(port) = v.parse() {
+                config.cloud_relay_quic_port = port;
+            }
+        }
+        if let Ok(v) = std::env::var("CLOUD_RELAY_SSH_USER") {
+            config.cloud_relay_ssh_user = Some(v);
+        }
+        if let Ok(v) = std::env::var("CLOUD_RELAY_SSH_PORT") {
+            if let Ok(port) = v.parse() {
+                config.cloud_relay_ssh_port = port;
+            }
         }
 
         config
