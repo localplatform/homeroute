@@ -598,6 +598,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -636,10 +637,13 @@ name = "hr-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "futures-util",
+ "hr-dataverse",
  "hr-registry",
  "reqwest",
  "ring",
+ "rusqlite",
  "serde",
  "serde_json",
  "tokio",
@@ -647,6 +651,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -658,6 +663,7 @@ dependencies = [
  "axum-extra",
  "base64",
  "chrono",
+ "hex",
  "hr-acme",
  "hr-adblock",
  "hr-auth",
@@ -718,6 +724,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hr-dataverse"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "hr-dhcp"
 version = "0.1.0"
 dependencies = [
@@ -765,9 +784,11 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "futures-util",
+ "hex",
  "hr-registry",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tokio-tungstenite 0.26.2",
  "toml",
@@ -1840,6 +1861,17 @@ name = "sha1"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures",

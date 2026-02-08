@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
 
-use crate::protocol::{AgentMetrics, PowerPolicy, ServiceConfig};
+use crate::protocol::{AgentMetrics, PowerPolicy, ServiceConfig, ServiceType};
 
 /// Port that code-server listens on inside each container.
 pub const CODE_SERVER_PORT: u16 = 13337;
@@ -72,6 +72,7 @@ impl Application {
             target_port: self.frontend.target_port,
             auth_required: self.frontend.auth_required,
             allowed_groups: self.frontend.allowed_groups.clone(),
+            service_type: ServiceType::App,
         }];
         for api in &self.apis {
             routes.push(RouteInfo {
@@ -79,6 +80,7 @@ impl Application {
                 target_port: api.target_port,
                 auth_required: api.auth_required,
                 allowed_groups: api.allowed_groups.clone(),
+                service_type: ServiceType::App,
             });
         }
         if self.code_server_enabled {
@@ -87,19 +89,21 @@ impl Application {
                 target_port: CODE_SERVER_PORT,
                 auth_required: true,
                 allowed_groups: vec![],
+                service_type: ServiceType::CodeServer,
             });
         }
         routes
     }
 }
 
-/// Temporary helper for route iteration.
+/// Route metadata for proxy registration at startup and agent-driven publishing.
 #[derive(Debug, Clone)]
 pub struct RouteInfo {
     pub domain: String,
     pub target_port: u16,
     pub auth_required: bool,
     pub allowed_groups: Vec<String>,
+    pub service_type: ServiceType,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

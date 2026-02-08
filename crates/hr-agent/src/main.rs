@@ -1,5 +1,7 @@
 mod config;
 mod connection;
+mod dataverse;
+mod mcp;
 mod metrics;
 mod powersave;
 mod services;
@@ -23,6 +25,16 @@ const INITIAL_BACKOFF_SECS: u64 = 5;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Check for MCP subcommand
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 && args[1] == "mcp" {
+        tracing_subscriber::fmt()
+            .with_env_filter("warn")
+            .with_writer(std::io::stderr)
+            .init();
+        return mcp::run_mcp_server().await;
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -86,7 +98,6 @@ async fn main() -> Result<()> {
 
                 // Get idle times
                 let code_server_idle_secs = powersave_mgr.idle_secs(hr_registry::protocol::ServiceType::CodeServer);
-                let app_idle_secs = powersave_mgr.idle_secs(hr_registry::protocol::ServiceType::App);
 
                 let metrics = AgentMetrics {
                     code_server_status,
@@ -95,7 +106,6 @@ async fn main() -> Result<()> {
                     memory_bytes,
                     cpu_percent,
                     code_server_idle_secs,
-                    app_idle_secs,
                 };
 
                 if metrics_tx.send(AgentMessage::Metrics(metrics)).await.is_err() {
@@ -110,6 +120,42 @@ async fn main() -> Result<()> {
         let state_tx_for_idle = state_change_tx.clone();
         let idle_checker_handle = tokio::spawn(async move {
             powersave_for_idle.run_idle_checker(state_tx_for_idle).await;
+        });
+
+        // Spawn schema metadata sender task (every 60 seconds)
+        let schema_tx = outbound_tx.clone();
+        let schema_handle = tokio::spawn(async move {
+            // Try to open the dataverse DB
+            let dv = match crate::dataverse::LocalDataverse::open() {
+                Ok(dv) => dv,
+                Err(e) => {
+                    tracing::debug!("No Dataverse database available: {e}");
+                    return;
+                }
+            };
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                match dv.get_schema_metadata().await {
+                    Ok((tables, relations, version, db_size_bytes)) => {
+                        if schema_tx
+                            .send(AgentMessage::SchemaMetadata {
+                                tables,
+                                relations,
+                                version,
+                                db_size_bytes,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("Failed to get schema metadata: {e}");
+                    }
+                }
+            }
         });
 
         // Process messages while the connection is alive
@@ -173,6 +219,7 @@ async fn main() -> Result<()> {
         // Cancel background tasks
         metrics_handle.abort();
         idle_checker_handle.abort();
+        schema_handle.abort();
 
         // Drain any remaining messages
         while let Ok(msg) = registry_rx.try_recv() {
@@ -269,7 +316,6 @@ async fn handle_registry_message(
         RegistryMessage::PowerPolicyUpdate(policy) => {
             info!(
                 code_server_timeout = ?policy.code_server_idle_timeout_secs,
-                app_timeout = ?policy.app_idle_timeout_secs,
                 "Power policy update received"
             );
             powersave_manager.set_policy(&policy);

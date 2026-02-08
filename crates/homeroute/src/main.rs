@@ -510,7 +510,7 @@ async fn main() -> anyhow::Result<()> {
                             target_port: route.target_port,
                             auth_required: route.auth_required,
                             allowed_groups: route.allowed_groups,
-                            service_type: hr_registry::ServiceType::App,
+                            service_type: route.service_type,
                             wake_page_enabled: app.wake_page_enabled,
                         },
                     );
@@ -543,6 +543,7 @@ async fn main() -> anyhow::Result<()> {
         firewall: firewall_engine,
         registry: Some(registry.clone()),
         migrations: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        dataverse_schemas: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     let api_router = hr_api::build_router(api_state);
@@ -672,6 +673,36 @@ async fn main() -> anyhow::Result<()> {
             error!("SIGHUP handler error: {}", e);
         }
     });
+
+    // ── Startup cleanup + periodic maintenance ─────────────────────────
+
+    // Clean up stale migration transfer files from /tmp
+    tokio::spawn(async {
+        if let Ok(mut entries) = tokio::fs::read_dir("/tmp").await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.ends_with(".tar.gz") && name_str.len() > 40 {
+                    let stem = &name_str[..name_str.len() - 7];
+                    if uuid::Uuid::parse_str(stem).is_ok() {
+                        tracing::info!("Cleaning stale migration file: /tmp/{}", name_str);
+                        let _ = tokio::fs::remove_file(entry.path()).await;
+                    }
+                }
+            }
+        }
+    });
+
+    // Periodic cleanup of stale migration/exec signals
+    {
+        let reg = registry.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                reg.cleanup_stale_signals().await;
+            }
+        });
+    }
 
     // ── Ready ──────────────────────────────────────────────────────────
 

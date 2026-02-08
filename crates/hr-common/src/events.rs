@@ -19,6 +19,12 @@ pub struct EventBus {
     pub agent_update: broadcast::Sender<AgentUpdateEvent>,
     /// Migration progress events (API → websocket)
     pub migration_progress: broadcast::Sender<MigrationProgressEvent>,
+    /// Dataverse schema change events (registry → websocket)
+    pub dataverse_schema: broadcast::Sender<DataverseSchemaEvent>,
+    /// Dataverse data change events (registry → websocket)
+    pub dataverse_data: broadcast::Sender<DataverseDataEvent>,
+    /// Host metrics events (host-agent → websocket)
+    pub host_metrics: broadcast::Sender<HostMetricsEvent>,
 }
 
 impl EventBus {
@@ -32,6 +38,9 @@ impl EventBus {
             service_command: broadcast::channel(64).0,
             agent_update: broadcast::channel(64).0,
             migration_progress: broadcast::channel(64).0,
+            dataverse_schema: broadcast::channel(64).0,
+            dataverse_data: broadcast::channel(64).0,
+            host_metrics: broadcast::channel(64).0,
         }
     }
 }
@@ -95,7 +104,6 @@ pub struct AgentMetricsEvent {
     pub memory_bytes: u64,
     pub cpu_percent: f32,
     pub code_server_idle_secs: u64,
-    pub app_idle_secs: u64,
 }
 
 /// Service command completion event (registry → websocket).
@@ -157,4 +165,42 @@ pub enum MigrationPhase {
     Starting,
     Complete,
     Failed,
+}
+
+/// Dataverse schema change event (registry → websocket for frontend live view).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataverseSchemaEvent {
+    pub app_id: String,
+    pub slug: String,
+    pub tables: Vec<DataverseTableSummary>,
+    pub relations_count: usize,
+    pub version: u64,
+}
+
+/// Summary of a Dataverse table for schema events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataverseTableSummary {
+    pub name: String,
+    pub slug: String,
+    pub columns_count: usize,
+    pub rows_count: u64,
+}
+
+/// Dataverse data change event (registry → websocket for frontend live view).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataverseDataEvent {
+    pub app_id: String,
+    pub slug: String,
+    pub table_name: String,
+    pub operation: String,
+    pub row_count: u64,
+}
+
+/// Host metrics event (host-agent → websocket for frontend display).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostMetricsEvent {
+    pub host_id: String,
+    pub cpu_percent: f32,
+    pub memory_used_bytes: u64,
+    pub memory_total_bytes: u64,
 }

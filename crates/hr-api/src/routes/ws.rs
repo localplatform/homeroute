@@ -32,6 +32,9 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     let mut service_cmd_rx = state.events.service_command.subscribe();
     let mut agent_update_rx = state.events.agent_update.subscribe();
     let mut migration_rx = state.events.migration_progress.subscribe();
+    let mut dv_schema_rx = state.events.dataverse_schema.subscribe();
+    let mut dv_data_rx = state.events.dataverse_data.subscribe();
+    let mut host_metrics_rx = state.events.host_metrics.subscribe();
 
     // Send current active migrations so reconnecting clients get up-to-date state
     {
@@ -80,6 +83,30 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!("WebSocket host_status lagged by {}", n);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            // Host metrics events
+            result = host_metrics_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({
+                            "type": "hosts:metrics",
+                            "data": {
+                                "hostId": event.host_id,
+                                "cpuPercent": event.cpu_percent,
+                                "memoryUsedBytes": event.memory_used_bytes,
+                                "memoryTotalBytes": event.memory_total_bytes,
+                            }
+                        });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("WebSocket host_metrics lagged by {}", n);
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -157,7 +184,6 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                                 "memoryBytes": event.memory_bytes,
                                 "cpuPercent": event.cpu_percent,
                                 "codeServerIdleSecs": event.code_server_idle_secs,
-                                "appIdleSecs": event.app_idle_secs,
                             }
                         });
                         if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
@@ -242,6 +268,56 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!("WebSocket migration_progress lagged by {}", n);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            // Dataverse schema events
+            result = dv_schema_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({
+                            "type": "dataverse:schema",
+                            "data": {
+                                "appId": event.app_id,
+                                "slug": event.slug,
+                                "tables": event.tables,
+                                "relationsCount": event.relations_count,
+                                "version": event.version,
+                            }
+                        });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("WebSocket dataverse_schema lagged by {}", n);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            // Dataverse data events
+            result = dv_data_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({
+                            "type": "dataverse:data",
+                            "data": {
+                                "appId": event.app_id,
+                                "slug": event.slug,
+                                "tableName": event.table_name,
+                                "operation": event.operation,
+                                "rowCount": event.row_count,
+                            }
+                        });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("WebSocket dataverse_data lagged by {}", n);
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }

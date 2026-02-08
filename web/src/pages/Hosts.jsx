@@ -1,9 +1,8 @@
 import { useState, useEffect } from 'react';
 import {
-  HardDrive, Plus, Trash2, RefreshCw, Activity, X, Check,
-  Play, Square, RotateCw
+  HardDrive, Plus, Trash2, RefreshCw, X, Check,
+  Play, Square, RotateCw, Moon
 } from 'lucide-react';
-import Card from '../components/Card';
 import Button from '../components/Button';
 import StatusBadge from '../components/StatusBadge';
 import PageHeader from '../components/PageHeader';
@@ -11,12 +10,12 @@ import Section from '../components/Section';
 import {
   getHosts,
   addHost,
-  updateHost,
   deleteHost,
-  testHostConnection,
   wakeHost,
   shutdownHost,
-  rebootHost
+  rebootHost,
+  sleepHost,
+  setWolMac
 } from '../api/client';
 import useWebSocket from '../hooks/useWebSocket';
 
@@ -45,16 +44,15 @@ export default function Hosts() {
         )
       );
     },
-    // Legacy compat
-    'servers:status': (data) => {
+    'hosts:metrics': (data) => {
       setHosts(prev =>
         prev.map(h =>
-          h.id === data.serverId
-            ? { ...h, status: data.online ? 'online' : 'offline', latency: data.latency, lastSeen: data.lastSeen }
+          h.id === data.hostId
+            ? { ...h, metrics: data }
             : h
         )
       );
-    }
+    },
   });
 
   useEffect(() => {
@@ -111,19 +109,6 @@ export default function Hosts() {
     }
   };
 
-  const handleTestConnection = async (id) => {
-    try {
-      const res = await testHostConnection(id);
-      if (res.data.success) {
-        alert('Connexion reussie !');
-      } else {
-        alert('Echec : ' + res.data.error);
-      }
-    } catch (error) {
-      alert('Echec : ' + error.message);
-    }
-  };
-
   // ── Power actions ───────────────────────────
 
   const handleWake = async (id) => {
@@ -159,6 +144,25 @@ export default function Hosts() {
     }
   };
 
+  const handleSleep = async (id) => {
+    if (!confirm('Mettre en veille cet hote ?')) return;
+    try {
+      const res = await sleepHost(id);
+      if (res.data.success) alert('Commande envoyee !');
+    } catch (error) {
+      alert('Echec : ' + error.message);
+    }
+  };
+
+  const handleSetWolMac = async (id, mac) => {
+    try {
+      await setWolMac(id, mac);
+      setHosts(prev => prev.map(h => h.id === id ? { ...h, wol_mac: mac } : h));
+    } catch (error) {
+      console.error('Failed to set WOL MAC:', error);
+    }
+  };
+
   // ── Form helpers ────────────────────────────
 
   const resetForm = () => {
@@ -174,6 +178,14 @@ export default function Hosts() {
     }
   };
 
+  const formatBytes = (bytes) => {
+    if (!bytes) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+  };
+
   return (
     <div>
       <PageHeader title="Hotes" icon={HardDrive}>
@@ -187,120 +199,136 @@ export default function Hosts() {
         {loading ? (
           <div className="text-center py-12 text-gray-400">Chargement...</div>
         ) : hosts.length === 0 ? (
-          <Card title="Aucun hote" icon={HardDrive}>
-            <p className="text-gray-400">
-              Aucun hote configure. Cliquez sur "Ajouter" pour commencer.
-            </p>
-          </Card>
+          <div className="bg-gray-800 border border-gray-700 p-8 text-center text-gray-400">
+            Aucun hote configure. Cliquez sur "Ajouter" pour commencer.
+          </div>
         ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-px">
-            {hosts.map((host) => (
-              <Card key={host.id} title={host.name} icon={HardDrive}>
-                <div className="space-y-3">
-                  {/* Status row */}
-                  <div className="flex items-center justify-between">
-                    <StatusBadge status={getStatusColor(host.status)}>
-                      {host.status || 'unknown'}
-                    </StatusBadge>
-                    {host.latency > 0 && (
-                      <span className="text-sm text-gray-400">{host.latency}ms</span>
-                    )}
-                  </div>
-
-                  {/* Host details */}
-                  <div className="space-y-1 text-sm">
-                    <div className="flex justify-between">
-                      <span className="text-gray-400">Adresse :</span>
-                      <span className="text-white font-mono">{host.host}:{host.port}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-400">Utilisateur :</span>
-                      <span className="text-white">{host.username}</span>
-                    </div>
-                    {host.mac && (
-                      <div className="flex justify-between">
-                        <span className="text-gray-400">MAC :</span>
-                        <span className="text-white font-mono text-xs">{host.mac}</span>
+          <div className="border border-gray-700 overflow-x-auto">
+            <table className="w-full text-left">
+              <thead className="bg-gray-800/60 border-b border-gray-700">
+                <tr>
+                  <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Nom</th>
+                  <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Statut</th>
+                  <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Adresse</th>
+                  <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">CPU</th>
+                  <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">RAM</th>
+                  <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">MAC (WOL)</th>
+                  <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Vu</th>
+                  <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-700/50">
+                {hosts.map((host) => (
+                  <tr key={host.id} className="bg-gray-800 hover:bg-gray-700/50">
+                    {/* Name */}
+                    <td className="px-3 py-2 text-sm font-medium text-white">
+                      <div className="flex items-center gap-2">
+                        <HardDrive className="w-4 h-4 text-blue-400 flex-shrink-0" />
+                        {host.name}
                       </div>
-                    )}
-                    {host.interface && (
-                      <div className="flex justify-between">
-                        <span className="text-gray-400">Interface :</span>
-                        <span className="text-white font-mono text-xs">{host.interface}</span>
+                    </td>
+                    {/* Status */}
+                    <td className="px-3 py-2 text-sm">
+                      <StatusBadge status={getStatusColor(host.status)}>
+                        {host.status || 'unknown'}
+                      </StatusBadge>
+                    </td>
+                    {/* Address */}
+                    <td className="px-3 py-2 text-sm font-mono text-gray-300">
+                      {host.host}:{host.port}
+                    </td>
+                    {/* CPU */}
+                    <td className="px-3 py-2 text-sm">
+                      {host.metrics ? (
+                        <div className="flex items-center gap-1">
+                          <div className="w-12 bg-gray-700 h-1.5 rounded-sm overflow-hidden">
+                            <div className="h-1.5 bg-blue-500" style={{ width: `${Math.min(host.metrics.cpuPercent, 100)}%` }} />
+                          </div>
+                          <span className="text-gray-400 text-xs">{host.metrics.cpuPercent.toFixed(0)}%</span>
+                        </div>
+                      ) : <span className="text-gray-600 text-xs">--</span>}
+                    </td>
+                    {/* RAM */}
+                    <td className="px-3 py-2 text-sm">
+                      {host.metrics ? (
+                        <div className="flex items-center gap-1">
+                          <div className="w-12 bg-gray-700 h-1.5 rounded-sm overflow-hidden">
+                            <div className="h-1.5 bg-green-500" style={{ width: `${(host.metrics.memoryUsedBytes / host.metrics.memoryTotalBytes * 100).toFixed(0)}%` }} />
+                          </div>
+                          <span className="text-gray-400 text-xs">{formatBytes(host.metrics.memoryUsedBytes)}</span>
+                        </div>
+                      ) : <span className="text-gray-600 text-xs">--</span>}
+                    </td>
+                    {/* WOL MAC */}
+                    <td className="px-3 py-2 text-sm">
+                      {host.interfaces && host.interfaces.length > 0 ? (
+                        <select
+                          className="bg-gray-700 text-xs text-gray-300 border border-gray-600 px-1 py-0.5 rounded-sm"
+                          value={host.wol_mac || host.mac || ''}
+                          onChange={(e) => handleSetWolMac(host.id, e.target.value)}
+                        >
+                          {host.interfaces.filter(i => i.address && i.address !== '00:00:00:00:00:00').map((iface, idx) => (
+                            <option key={idx} value={iface.address}>
+                              {iface.ifname} ({iface.address})
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <span className="text-gray-500 text-xs font-mono">{host.mac || '--'}</span>
+                      )}
+                    </td>
+                    {/* Last seen */}
+                    <td className="px-3 py-2 text-xs text-gray-500">
+                      {host.lastSeen ? new Date(host.lastSeen).toLocaleTimeString() : '--'}
+                    </td>
+                    {/* Actions */}
+                    <td className="px-3 py-2">
+                      <div className="flex gap-1">
+                        <button
+                          onClick={() => handleWake(host.id)}
+                          disabled={host.status === 'online'}
+                          className="p-1.5 text-green-400 hover:bg-green-600/20 disabled:opacity-30 disabled:cursor-not-allowed"
+                          title="Wake"
+                        >
+                          <Play className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => handleReboot(host.id)}
+                          disabled={host.status !== 'online'}
+                          className="p-1.5 text-yellow-400 hover:bg-yellow-600/20 disabled:opacity-30 disabled:cursor-not-allowed"
+                          title="Reboot"
+                        >
+                          <RotateCw className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => handleSleep(host.id)}
+                          disabled={host.status !== 'online'}
+                          className="p-1.5 text-blue-400 hover:bg-blue-600/20 disabled:opacity-30 disabled:cursor-not-allowed"
+                          title="Sleep"
+                        >
+                          <Moon className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => handleShutdown(host.id)}
+                          disabled={host.status !== 'online'}
+                          className="p-1.5 text-red-400 hover:bg-red-600/20 disabled:opacity-30 disabled:cursor-not-allowed"
+                          title="Shutdown"
+                        >
+                          <Square className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => handleDeleteHost(host.id)}
+                          className="p-1.5 text-red-400 hover:bg-red-600/20"
+                          title="Supprimer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
                       </div>
-                    )}
-                  </div>
-
-                  {/* Groups */}
-                  {host.groups && host.groups.length > 0 && (
-                    <div className="flex flex-wrap gap-1">
-                      {host.groups.map((group, idx) => (
-                        <span key={idx} className="px-2 py-0.5 text-xs bg-blue-600/20 text-blue-400">
-                          {group}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-
-                  {host.lastSeen && (
-                    <div className="text-xs text-gray-500">
-                      Vu : {new Date(host.lastSeen).toLocaleString()}
-                    </div>
-                  )}
-
-                  {/* Power controls */}
-                  <div className="flex gap-2 pt-2 border-t border-gray-700">
-                    <Button
-                      variant="success"
-                      onClick={() => handleWake(host.id)}
-                      disabled={host.status === 'online'}
-                      className="flex-1 text-xs"
-                    >
-                      <Play className="w-3 h-3 mr-1" />
-                      Wake
-                    </Button>
-                    <Button
-                      variant="warning"
-                      onClick={() => handleReboot(host.id)}
-                      disabled={host.status !== 'online'}
-                      className="flex-1 text-xs"
-                    >
-                      <RotateCw className="w-3 h-3 mr-1" />
-                      Reboot
-                    </Button>
-                    <Button
-                      variant="danger"
-                      onClick={() => handleShutdown(host.id)}
-                      disabled={host.status !== 'online'}
-                      className="flex-1 text-xs"
-                    >
-                      <Square className="w-3 h-3 mr-1" />
-                      Shutdown
-                    </Button>
-                  </div>
-
-                  {/* Management actions */}
-                  <div className="flex gap-2">
-                    <Button
-                      variant="secondary"
-                      onClick={() => handleTestConnection(host.id)}
-                      className="flex-1 text-xs"
-                    >
-                      <Activity className="w-3 h-3 mr-1" />
-                      Test
-                    </Button>
-                    <Button
-                      variant="danger"
-                      onClick={() => handleDeleteHost(host.id)}
-                      className="text-xs"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </Button>
-                  </div>
-
-                </div>
-              </Card>
-            ))}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </Section>

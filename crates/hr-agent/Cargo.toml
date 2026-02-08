@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 hr-registry = { path = "../hr-registry" }
+hr-dataverse = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
@@ -20,3 +21,6 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 ring = { workspace = true }
+rusqlite = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }

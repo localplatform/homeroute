@@ -1,6 +1,8 @@
 //! REST API + WebSocket routes for application management.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -255,14 +257,7 @@ async fn start_migration(
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Target host is not connected"}))).into_response();
     }
 
-    // Check no migration already in progress for this app
-    {
-        let migrations = state.migrations.read().await;
-        if migrations.values().any(|m| m.app_id == id && m.error.is_none() && !matches!(m.phase, MigrationPhase::Complete | MigrationPhase::Failed)) {
-            return (StatusCode::CONFLICT, Json(serde_json::json!({"error": "Migration already in progress"}))).into_response();
-        }
-    }
-
+    // Check no migration already in progress for this app + insert atomically under one write lock
     let transfer_id = uuid::Uuid::new_v4().to_string();
     let migration_state = MigrationState {
         app_id: id.clone(),
@@ -277,7 +272,13 @@ async fn start_migration(
         error: None,
     };
 
-    state.migrations.write().await.insert(transfer_id.clone(), migration_state);
+    {
+        let mut migrations = state.migrations.write().await;
+        if migrations.values().any(|m| m.app_id == id && m.error.is_none() && !matches!(m.phase, MigrationPhase::Complete | MigrationPhase::Failed)) {
+            return (StatusCode::CONFLICT, Json(serde_json::json!({"error": "Migration already in progress"}))).into_response();
+        }
+        migrations.insert(transfer_id.clone(), migration_state);
+    }
 
     // Spawn migration orchestration
     let migrations = state.migrations.clone();
@@ -684,6 +685,43 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
                                 // Broadcast to WebSocket clients
                                 registry.handle_service_state_changed(&app_id, service_type, new_state);
                             }
+                            Ok(AgentMessage::SchemaMetadata { tables, relations, version, db_size_bytes }) => {
+                                info!(app_id, tables = tables.len(), version, "Agent reported schema metadata");
+                                registry.handle_schema_metadata(&app_id, tables.clone(), relations.clone(), version, db_size_bytes).await;
+
+                                // Update the Dataverse schema cache in ApiState
+                                let slug = registry.list_applications().await
+                                    .iter()
+                                    .find(|a| a.id == app_id)
+                                    .map(|a| a.slug.clone())
+                                    .unwrap_or_default();
+                                let cached = crate::state::CachedDataverseSchema {
+                                    app_id: app_id.clone(),
+                                    slug,
+                                    tables: tables.iter().map(|t| crate::state::CachedTableInfo {
+                                        name: t.name.clone(),
+                                        slug: t.slug.clone(),
+                                        columns: t.columns.iter().map(|c| crate::state::CachedColumnInfo {
+                                            name: c.name.clone(),
+                                            field_type: c.field_type.clone(),
+                                            required: c.required,
+                                            unique: c.unique,
+                                        }).collect(),
+                                        row_count: t.row_count,
+                                    }).collect(),
+                                    relations: relations.iter().map(|r| crate::state::CachedRelationInfo {
+                                        from_table: r.from_table.clone(),
+                                        from_column: r.from_column.clone(),
+                                        to_table: r.to_table.clone(),
+                                        to_column: r.to_column.clone(),
+                                        relation_type: r.relation_type.clone(),
+                                    }).collect(),
+                                    version,
+                                    db_size_bytes,
+                                    last_updated: chrono::Utc::now(),
+                                };
+                                state.dataverse_schemas.write().await.insert(app_id.clone(), cached);
+                            }
                             Ok(AgentMessage::PublishRoutes { routes }) => {
                                 info!(app_id, count = routes.len(), "Agent published routes");
                                 let apps = registry.list_applications().await;
@@ -772,6 +810,18 @@ async fn update_migration_phase(
     });
 }
 
+/// Run an LXC command with a timeout.
+async fn lxc_cmd(args: &[&str], timeout_secs: u64) -> Result<std::process::Output, String> {
+    match tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        tokio::process::Command::new("lxc").args(args).output(),
+    ).await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(e)) => Err(format!("lxc error: {e}")),
+        Err(_) => Err(format!("lxc {} timed out after {timeout_secs}s", args.first().unwrap_or(&"?"))),
+    }
+}
+
 async fn run_migration(
     registry: Arc<hr_registry::AgentRegistry>,
     migrations: Arc<tokio::sync::RwLock<std::collections::HashMap<String, MigrationState>>>,
@@ -783,304 +833,318 @@ async fn run_migration(
     target_host_id: String,
 ) {
     let container_name = format!("hr-{}", slug);
+    let source_stopped = AtomicBool::new(false);
 
+    let result = run_migration_inner(
+        &registry, &migrations, &events,
+        &app_id, &slug, &transfer_id,
+        &source_host_id, &target_host_id,
+        &container_name, &source_stopped,
+    ).await;
+
+    if let Err(error_msg) = result {
+        // Rollback: restart source container if it was stopped
+        if source_stopped.load(Ordering::SeqCst) {
+            warn!(app_id = %app_id, container = %container_name, "Migration failed after source stop, restarting source container");
+            if source_host_id == "local" {
+                if let Err(e) = lxc_cmd(&["start", &container_name], 60).await {
+                    error!(container = %container_name, "Failed to restart source container: {e}");
+                }
+            } else {
+                let _ = registry.send_host_command(
+                    &source_host_id,
+                    HostRegistryMessage::StartContainer { container_name: container_name.clone() },
+                ).await;
+            }
+        }
+        update_migration_phase(&migrations, &events, &app_id, &transfer_id, MigrationPhase::Failed, 0, 0, 0, Some(error_msg)).await;
+    }
+}
+
+async fn run_migration_inner(
+    registry: &Arc<hr_registry::AgentRegistry>,
+    migrations: &Arc<tokio::sync::RwLock<std::collections::HashMap<String, MigrationState>>>,
+    events: &Arc<hr_common::events::EventBus>,
+    app_id: &str,
+    _slug: &str,
+    transfer_id: &str,
+    source_host_id: &str,
+    target_host_id: &str,
+    container_name: &str,
+    source_stopped: &AtomicBool,
+) -> Result<(), String> {
     // Phase 1: Stop the agent
-    update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Stopping, 0, 0, 0, None).await;
+    update_migration_phase(migrations, events, app_id, transfer_id, MigrationPhase::Stopping, 0, 0, 0, None).await;
 
     // Send shutdown to the app's LXC agent
     let _ = registry.send_service_command(
-        &app_id,
+        app_id,
         ServiceType::App,
         ServiceAction::Stop,
     ).await;
 
     // Wait a bit for the agent to disconnect
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
 
     // Phase 2: Export
-    update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Exporting, 10, 0, 0, None).await;
+    update_migration_phase(migrations, events, app_id, transfer_id, MigrationPhase::Exporting, 10, 0, 0, None).await;
 
     if source_host_id == "local" {
-        // Local export: use lxc CLI directly
-        let stop_result = tokio::process::Command::new("lxc")
-            .args(["stop", &container_name, "--force"])
-            .output()
-            .await;
+        // Bug 13: Log before force-stopping
+        info!(container = %container_name, "Force-stopping container for migration export");
 
-        if let Err(e) = stop_result {
-            update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Failed, 0, 0, 0, Some(format!("Failed to stop container: {}", e))).await;
-            return;
+        // Local export: use lxc CLI directly with timeout
+        let stop_output = lxc_cmd(&["stop", container_name, "--force"], 60).await
+            .map_err(|e| format!("Failed to stop container: {e}"))?;
+
+        if !stop_output.status.success() {
+            let stderr = String::from_utf8_lossy(&stop_output.stderr);
+            return Err(format!("Failed to stop container: {}", stderr));
         }
 
-        let export_path = format!("/tmp/{}.tar.gz", transfer_id);
-        let export_result = tokio::process::Command::new("lxc")
-            .args(["export", &container_name, &export_path])
-            .output()
-            .await;
+        source_stopped.store(true, Ordering::SeqCst);
 
-        match export_result {
-            Ok(output) if output.status.success() => {
-                // Get file size
-                let metadata = match tokio::fs::metadata(&export_path).await {
-                    Ok(m) => m,
+        let export_path = format!("/tmp/{}.tar.gz", transfer_id);
+        let export_output = lxc_cmd(&["export", container_name, &export_path], 300).await
+            .map_err(|e| format!("Export error: {e}"))?;
+
+        if !export_output.status.success() {
+            let stderr = String::from_utf8_lossy(&export_output.stderr);
+            return Err(format!("Export failed: {}", stderr));
+        }
+
+        // Get file size
+        let metadata = tokio::fs::metadata(&export_path).await
+            .map_err(|e| format!("Failed to read export: {e}"))?;
+        let total_bytes = metadata.len();
+
+        update_migration_phase(migrations, events, app_id, transfer_id, MigrationPhase::Transferring, 20, 0, total_bytes, None).await;
+
+        // If target is remote, send chunks via host-agent
+        if target_host_id != "local" {
+            // Register migration signal BEFORE starting transfer
+            let import_rx = registry.register_migration_signal(transfer_id).await;
+
+            // Tell target to prepare for import
+            if let Err(e) = registry.send_host_command(
+                target_host_id,
+                HostRegistryMessage::StartImport {
+                    container_name: container_name.to_string(),
+                    transfer_id: transfer_id.to_string(),
+                },
+            ).await {
+                let _ = tokio::fs::remove_file(&export_path).await;
+                return Err(format!("Failed to notify target: {e}"));
+            }
+
+            // Stream the file in 64KB chunks
+            use tokio::io::AsyncReadExt;
+            use base64::Engine;
+            let mut file = tokio::fs::File::open(&export_path).await
+                .map_err(|e| format!("Failed to open export: {e}"))?;
+
+            let mut buf = vec![0u8; 65536];
+            let mut transferred: u64 = 0;
+            let mut chunk_count: u64 = 0;
+            loop {
+                let n = match file.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => n,
                     Err(e) => {
-                        update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Failed, 0, 0, 0, Some(format!("Failed to read export: {}", e))).await;
-                        return;
+                        let _ = tokio::fs::remove_file(&export_path).await;
+                        return Err(format!("Read error: {e}"));
                     }
                 };
-                let total_bytes = metadata.len();
 
-                update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Transferring, 20, 0, total_bytes, None).await;
-
-                // If target is remote, send chunks via host-agent
-                if target_host_id != "local" {
-                    // Register migration signal BEFORE starting transfer
-                    let import_rx = registry.register_migration_signal(&transfer_id).await;
-
-                    // Tell target to prepare for import
-                    if let Err(e) = registry.send_host_command(
-                        &target_host_id,
-                        HostRegistryMessage::StartImport {
-                            container_name: container_name.clone(),
-                            transfer_id: transfer_id.clone(),
-                        },
-                    ).await {
-                        update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Failed, 0, 0, 0, Some(format!("Failed to notify target: {}", e))).await;
-                        let _ = tokio::fs::remove_file(&export_path).await;
-                        return;
-                    }
-
-                    // Stream the file in 64KB chunks
-                    use tokio::io::AsyncReadExt;
-                    use base64::Engine;
-                    let mut file = match tokio::fs::File::open(&export_path).await {
-                        Ok(f) => f,
-                        Err(e) => {
-                            update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Failed, 0, 0, 0, Some(format!("Failed to open export: {}", e))).await;
-                            return;
-                        }
-                    };
-
-                    let mut buf = vec![0u8; 65536];
-                    let mut transferred: u64 = 0;
-                    let mut chunk_count: u64 = 0;
-                    loop {
-                        let n = match file.read(&mut buf).await {
-                            Ok(0) => break,
-                            Ok(n) => n,
-                            Err(e) => {
-                                update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Failed, 0, transferred, total_bytes, Some(format!("Read error: {}", e))).await;
-                                let _ = tokio::fs::remove_file(&export_path).await;
-                                return;
-                            }
-                        };
-
-                        let encoded = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
-                        if let Err(e) = registry.send_host_command(
-                            &target_host_id,
-                            HostRegistryMessage::ReceiveChunk {
-                                transfer_id: transfer_id.clone(),
-                                data: encoded,
-                            },
-                        ).await {
-                            update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Failed, 0, transferred, total_bytes, Some(format!("Send chunk failed: {}", e))).await;
-                            let _ = tokio::fs::remove_file(&export_path).await;
-                            return;
-                        }
-
-                        transferred += n as u64;
-                        chunk_count += 1;
-                        let pct = (20 + (transferred * 60 / total_bytes.max(1))) as u8;
-
-                        // Throttle: broadcast every 8 chunks (~512KB) or on last chunk
-                        if chunk_count % 8 == 0 || transferred >= total_bytes {
-                            update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Transferring, pct.min(80), transferred, total_bytes, None).await;
-                        } else {
-                            // Update in-memory state only (no broadcast)
-                            let mut m = migrations.write().await;
-                            if let Some(state) = m.get_mut(&transfer_id) {
-                                state.progress_pct = pct.min(80);
-                                state.bytes_transferred = transferred;
-                            }
-                        }
-                    }
-
-                    // Tell target transfer is complete
-                    let _ = registry.send_host_command(
-                        &target_host_id,
-                        HostRegistryMessage::TransferComplete {
-                            transfer_id: transfer_id.clone(),
-                        },
-                    ).await;
-
-                    // Clean up local export
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
+                if let Err(e) = registry.send_host_command(
+                    target_host_id,
+                    HostRegistryMessage::ReceiveChunk {
+                        transfer_id: transfer_id.to_string(),
+                        data: encoded,
+                    },
+                ).await {
                     let _ = tokio::fs::remove_file(&export_path).await;
+                    return Err(format!("Send chunk failed: {e}"));
+                }
 
-                    // Phase 4: Importing (target does this)
-                    update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Importing, 85, transferred, total_bytes, None).await;
+                transferred += n as u64;
+                chunk_count += 1;
+                let pct = (20 + (transferred * 60 / total_bytes.max(1))) as u8;
 
-                    // Wait for ImportComplete/ImportFailed from target host-agent
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(120),
-                        import_rx,
-                    ).await {
-                        Ok(Ok(hr_registry::MigrationResult::ImportComplete { .. })) => {
-                            info!(transfer_id, "Import confirmed by target host");
-                        }
-                        Ok(Ok(hr_registry::MigrationResult::ImportFailed { error })) => {
-                            update_migration_phase(&migrations, &events, &app_id, &transfer_id,
-                                MigrationPhase::Failed, 0, 0, 0,
-                                Some(format!("Migration failed on target: {}", error))).await;
-                            return;
-                        }
-                        Ok(Ok(hr_registry::MigrationResult::ExportFailed { error })) => {
-                            update_migration_phase(&migrations, &events, &app_id, &transfer_id,
-                                MigrationPhase::Failed, 0, 0, 0,
-                                Some(format!("Migration failed on target: {}", error))).await;
-                            return;
-                        }
-                        Ok(Err(_)) => {
-                            update_migration_phase(&migrations, &events, &app_id, &transfer_id,
-                                MigrationPhase::Failed, 0, 0, 0,
-                                Some("Migration signal lost".to_string())).await;
-                            return;
-                        }
-                        Err(_) => {
-                            update_migration_phase(&migrations, &events, &app_id, &transfer_id,
-                                MigrationPhase::Failed, 0, 0, 0,
-                                Some("Import timed out after 120s".to_string())).await;
-                            return;
-                        }
-                    }
-
+                // Throttle: broadcast every 8 chunks (~512KB) or on last chunk
+                if chunk_count % 8 == 0 || transferred >= total_bytes {
+                    update_migration_phase(migrations, events, app_id, transfer_id, MigrationPhase::Transferring, pct.min(80), transferred, total_bytes, None).await;
                 } else {
-                    // Target is local — import directly
-                    update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Importing, 80, total_bytes, total_bytes, None).await;
-
-                    // Pre-create workspace storage volume so import doesn't fail on missing volume reference
-                    let vol_name = format!("{container_name}-workspace");
-                    let _ = tokio::process::Command::new("lxc")
-                        .args(["storage", "volume", "create", "default", &vol_name])
-                        .output()
-                        .await;
-
-                    let import_result = tokio::process::Command::new("lxc")
-                        .args(["import", &export_path])
-                        .output()
-                        .await;
-
-                    let _ = tokio::fs::remove_file(&export_path).await;
-
-                    match import_result {
-                        Ok(output) if output.status.success() => {}
-                        Ok(output) => {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Failed, 0, 0, 0, Some(format!("Import failed: {}", stderr))).await;
-                            return;
-                        }
-                        Err(e) => {
-                            update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Failed, 0, 0, 0, Some(format!("Import error: {}", e))).await;
-                            return;
-                        }
+                    // Update in-memory state only (no broadcast)
+                    let mut m = migrations.write().await;
+                    if let Some(state) = m.get_mut(transfer_id) {
+                        state.progress_pct = pct.min(80);
+                        state.bytes_transferred = transferred;
                     }
                 }
             }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Failed, 0, 0, 0, Some(format!("Export failed: {}", stderr))).await;
-                return;
+
+            // Tell target transfer is complete
+            let _ = registry.send_host_command(
+                target_host_id,
+                HostRegistryMessage::TransferComplete {
+                    transfer_id: transfer_id.to_string(),
+                },
+            ).await;
+
+            // Clean up local export
+            let _ = tokio::fs::remove_file(&export_path).await;
+
+            // Phase 4: Importing (target does this)
+            update_migration_phase(migrations, events, app_id, transfer_id, MigrationPhase::Importing, 85, transferred, total_bytes, None).await;
+
+            // Wait for ImportComplete/ImportFailed from target host-agent
+            match tokio::time::timeout(
+                Duration::from_secs(120),
+                import_rx,
+            ).await {
+                Ok(Ok(hr_registry::MigrationResult::ImportComplete { .. })) => {
+                    info!(transfer_id, "Import confirmed by target host");
+                }
+                Ok(Ok(hr_registry::MigrationResult::ImportFailed { error })) => {
+                    return Err(format!("Migration failed on target: {error}"));
+                }
+                Ok(Ok(hr_registry::MigrationResult::ExportFailed { error })) => {
+                    return Err(format!("Migration failed on target: {error}"));
+                }
+                Ok(Err(_)) => {
+                    return Err("Migration signal lost".to_string());
+                }
+                Err(_) => {
+                    return Err("Import timed out after 120s".to_string());
+                }
             }
-            Err(e) => {
-                update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Failed, 0, 0, 0, Some(format!("Export error: {}", e))).await;
-                return;
+
+        } else {
+            // Target is local — import directly
+            update_migration_phase(migrations, events, app_id, transfer_id, MigrationPhase::Importing, 80, total_bytes, total_bytes, None).await;
+
+            // Clean up stale container on target (e.g., from a previous failed migration)
+            let _ = lxc_cmd(&["delete", container_name, "--force"], 30).await;
+
+            // Ensure workspace volume exists before import (container config references it as a device)
+            let vol_name_pre = format!("{container_name}-workspace");
+            let vol_check = lxc_cmd(&["storage", "volume", "show", "default", &vol_name_pre], 30).await;
+            if !vol_check.map(|o| o.status.success()).unwrap_or(false) {
+                info!("Creating workspace volume before import");
+                let _ = lxc_cmd(&["storage", "volume", "create", "default", &vol_name_pre], 30).await;
+            }
+
+            let import_output = lxc_cmd(&["import", &export_path], 300).await
+                .map_err(|e| { let _ = tokio::fs::remove_file(&export_path); format!("Import error: {e}") })?;
+
+            let _ = tokio::fs::remove_file(&export_path).await;
+
+            if !import_output.status.success() {
+                let stderr = String::from_utf8_lossy(&import_output.stderr);
+                return Err(format!("Import failed: {}", stderr));
+            }
+
+            // Bug 1: Post-import volume check — create workspace volume only if not already present
+            let vol_name = format!("{container_name}-workspace");
+            let vol_check = lxc_cmd(&["storage", "volume", "show", "default", &vol_name], 30).await;
+            if !vol_check.map(|o| o.status.success()).unwrap_or(false) {
+                info!("Workspace volume not in export, creating fresh");
+                let _ = lxc_cmd(&["storage", "volume", "create", "default", &vol_name], 30).await;
             }
         }
     } else {
         // Source is remote: tell source host-agent to export
         // Register signal to detect export failures
-        let export_rx = registry.register_migration_signal(&transfer_id).await;
+        let export_rx = registry.register_migration_signal(transfer_id).await;
         // Store transfer_id → container_name mapping so the WS handler can look it up
-        registry.set_transfer_container_name(&transfer_id, &container_name).await;
+        registry.set_transfer_container_name(transfer_id, container_name).await;
 
         if let Err(e) = registry.send_host_command(
-            &source_host_id,
+            source_host_id,
             HostRegistryMessage::StartExport {
-                container_name: container_name.clone(),
-                transfer_id: transfer_id.clone(),
+                container_name: container_name.to_string(),
+                transfer_id: transfer_id.to_string(),
             },
         ).await {
-            update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Failed, 0, 0, 0, Some(format!("Failed to start export: {}", e))).await;
-            return;
+            return Err(format!("Failed to start export: {e}"));
         }
+
+        // Mark source as stopped after StartExport since the remote host-agent will stop the container
+        source_stopped.store(true, Ordering::SeqCst);
 
         // Wait for the full remote→local pipeline:
         // 1. Remote host-agent exports & streams chunks via WebSocket
         // 2. Master's WS handler receives chunks, writes to /tmp/{transfer_id}.tar.gz
         // 3. On TransferComplete, master runs lxc import + lxc start
         // 4. Master signals ImportComplete on the migration channel
-        update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Exporting, 30, 0, 0, None).await;
+        update_migration_phase(migrations, events, app_id, transfer_id, MigrationPhase::Exporting, 30, 0, 0, None).await;
 
         match tokio::time::timeout(
-            std::time::Duration::from_secs(600),
+            Duration::from_secs(600),
             export_rx,
         ).await {
             Ok(Ok(hr_registry::MigrationResult::ExportFailed { error })) => {
-                update_migration_phase(&migrations, &events, &app_id, &transfer_id,
-                    MigrationPhase::Failed, 0, 0, 0,
-                    Some(format!("Export failed on source: {}", error))).await;
-                return;
+                return Err(format!("Export failed on source: {error}"));
             }
             Ok(Ok(hr_registry::MigrationResult::ImportFailed { error })) => {
-                update_migration_phase(&migrations, &events, &app_id, &transfer_id,
-                    MigrationPhase::Failed, 0, 0, 0,
-                    Some(format!("Import failed: {}", error))).await;
-                return;
+                return Err(format!("Import failed: {error}"));
             }
             Ok(Ok(hr_registry::MigrationResult::ImportComplete { .. })) => {
                 info!(transfer_id, "Remote migration confirmed");
             }
             Ok(Err(_)) => {
-                update_migration_phase(&migrations, &events, &app_id, &transfer_id,
-                    MigrationPhase::Failed, 0, 0, 0,
-                    Some("Migration signal lost".to_string())).await;
-                return;
+                return Err("Migration signal lost".to_string());
             }
             Err(_) => {
-                update_migration_phase(&migrations, &events, &app_id, &transfer_id,
-                    MigrationPhase::Failed, 0, 0, 0,
-                    Some("Remote migration timed out after 600s".to_string())).await;
-                return;
+                return Err("Remote migration timed out after 600s".to_string());
             }
         }
     }
 
     // Phase 5: Starting
-    update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Starting, 90, 0, 0, None).await;
+    update_migration_phase(migrations, events, app_id, transfer_id, MigrationPhase::Starting, 90, 0, 0, None).await;
 
-    // Update application's host_id in registry
+    // Bug 8: Update application's host_id in registry with retry
     let update_req = UpdateApplicationRequest {
-        host_id: Some(target_host_id.clone()),
+        host_id: Some(target_host_id.to_string()),
         ..Default::default()
     };
-    if let Err(e) = registry.update_application(&app_id, update_req).await {
-        warn!("Failed to update app host_id after migration: {}", e);
+    let mut host_updated = false;
+    for attempt in 0..3u32 {
+        match registry.update_application(app_id, update_req.clone()).await {
+            Ok(_) => { host_updated = true; break; }
+            Err(e) => {
+                warn!(attempt, "Failed to update host_id: {e}");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
+    if !host_updated {
+        return Err("Failed to update application host_id after 3 attempts".to_string());
     }
 
-    // Delete source container (cleanup)
+    // Bug 3: Delete source container with proper logging
     if source_host_id == "local" {
-        let _ = hr_lxd::LxdClient::delete_container(&container_name).await;
+        if let Err(e) = hr_lxd::LxdClient::delete_container(container_name).await {
+            error!(container = %container_name, "Failed to delete source container: {e}. Manual cleanup required.");
+        }
     } else {
-        let _ = registry.send_host_command(
-            &source_host_id,
+        if let Err(e) = registry.send_host_command(
+            source_host_id,
             HostRegistryMessage::DeleteContainer {
-                container_name: container_name.clone(),
+                container_name: container_name.to_string(),
             },
-        ).await;
+        ).await {
+            error!(container = %container_name, host = %source_host_id, "Failed to send delete to source host: {e}. Manual cleanup required.");
+        }
     }
 
     // Phase 6: Complete
-    update_migration_phase(&migrations, &events, &app_id, &transfer_id,MigrationPhase::Complete, 100, 0, 0, None).await;
+    update_migration_phase(migrations, events, app_id, transfer_id, MigrationPhase::Complete, 100, 0, 0, None).await;
     info!(app_id, transfer_id, "Migration complete: {} → {}", source_host_id, target_host_id);
+    Ok(())
 }
 
 // ── WebSocket terminal (lxc exec) ───────────────────────────

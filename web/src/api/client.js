@@ -174,5 +174,16 @@ export const testHostConnection = (id) => api.post(`/hosts/${id}/test`);
 export const wakeHost = (id) => api.post(`/hosts/${id}/wake`);
 export const shutdownHost = (id) => api.post(`/hosts/${id}/shutdown`);
 export const rebootHost = (id) => api.post(`/hosts/${id}/reboot`);
+export const sleepHost = (id) => api.post(`/hosts/${id}/sleep`);
+export const setWolMac = (id, mac) => api.post(`/hosts/${id}/wol-mac`, { mac });
+export const updateHostAgents = () => api.post('/hosts/agents/update');
+
+// Dataverse
+export const getDataverseOverview = () => api.get('/dataverse/overview');
+export const getDataverseSchema = (appId) => api.get(`/dataverse/apps/${appId}/schema`);
+export const getDataverseTables = (appId) => api.get(`/dataverse/apps/${appId}/tables`);
+export const getDataverseTable = (appId, tableName) => api.get(`/dataverse/apps/${appId}/tables/${tableName}`);
+export const getDataverseRelations = (appId) => api.get(`/dataverse/apps/${appId}/relations`);
+export const getDataverseStats = (appId) => api.get(`/dataverse/apps/${appId}/stats`);
 
 

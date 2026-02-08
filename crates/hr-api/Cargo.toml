@@ -29,4 +29,5 @@ reqwest = { workspace = true }
 tokio-stream = { workspace = true }
 ipnet = { workspace = true }
 ring = { workspace = true }
+hex = { workspace = true }
 base64 = { workspace = true }

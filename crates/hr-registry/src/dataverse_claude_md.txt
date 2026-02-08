@@ -1,0 +1,38 @@
+<!-- DATAVERSE:START -->
+# Dataverse Database
+
+Ce workspace utilise Dataverse comme base de donnees. Le serveur MCP `dataverse` fournit toutes les operations.
+
+## Regles
+- TOUJOURS utiliser les outils MCP Dataverse pour interagir avec la base de donnees
+- JAMAIS modifier `/root/workspace/.dataverse/app.db` directement (pas de sqlite3 CLI, pas de scripts SQL ad-hoc)
+- Quand l'application a besoin d'acceder a la DB au runtime, utiliser une librairie SQLite connectee a `/root/workspace/.dataverse/app.db`
+
+## Outils disponibles
+
+### Consultation
+- `list_tables` — Lister toutes les tables avec nombre de lignes
+- `describe_table` — Schema complet d'une table (colonnes, types, contraintes)
+- `get_schema` — Schema complet de la DB (tables, colonnes, relations)
+- `get_db_info` — Statistiques (taille, nombre de tables, total lignes)
+- `count_rows` — Compter les lignes avec filtres optionnels
+
+### Schema (DDL)
+- `create_table` — Creer une table (id, created_at, updated_at sont automatiques)
+- `add_column` / `remove_column` — Modifier la structure d'une table
+- `create_relation` — Creer une relation entre tables (FK)
+- `drop_table` — Supprimer une table (necessite confirm=true)
+
+### Donnees (CRUD)
+- `query_data` — Lire des lignes avec filtres et pagination
+- `insert_data` — Inserer des lignes
+- `update_data` — Modifier des lignes selon filtres
+- `delete_data` — Supprimer des lignes selon filtres
+
+## Procedure
+1. Avant toute operation, appeler `list_tables` pour voir l'etat actuel
+2. Utiliser `describe_table` pour comprendre le schema avant de le modifier
+3. Pour les changements de schema, utiliser les outils DDL
+4. Pour les operations de donnees, utiliser les outils CRUD
+5. Pour le code applicatif runtime, connecter une librairie SQLite a `/root/workspace/.dataverse/app.db`
+<!-- DATAVERSE:END -->

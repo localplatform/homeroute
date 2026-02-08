@@ -16,6 +16,7 @@ members = [
     "hr-registry",
     "hr-agent",
     "hr-host-agent",
+    "hr-dataverse",
 ]
 
 [workspace.package]
@@ -101,3 +102,6 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 # ACME (Let's Encrypt)
 instant-acme = "0.7"
 base64 = "0.22"
+
+# Dataverse
+hr-dataverse = { path = "hr-dataverse" }

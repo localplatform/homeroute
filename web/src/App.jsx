@@ -14,6 +14,7 @@ import Hosts from './pages/Hosts';
 import Certificates from './pages/Certificates';
 import Firewall from './pages/Firewall';
 import Applications from './pages/Applications';
+import Dataverse from './pages/Dataverse';
 import Login from './pages/Login';
 import Profile from './pages/Profile';
 
@@ -102,6 +103,7 @@ function AppRoutes() {
               <Route path="/hosts" element={<Hosts />} />
               <Route path="/firewall" element={<Firewall />} />
               <Route path="/applications" element={<Applications />} />
+              <Route path="/dataverse" element={<Dataverse />} />
               <Route path="/certificates" element={<Certificates />} />
             </Routes>
           </Layout>

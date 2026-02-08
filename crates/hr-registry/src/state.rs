@@ -14,7 +14,7 @@ use hr_common::config::EnvConfig;
 use hr_common::events::{AgentMetricsEvent, AgentStatusEvent, AgentUpdateEvent, AgentUpdateStatus, EventBus};
 use hr_lxd::LxdClient;
 
-use crate::protocol::{AgentMetrics, ContainerInfo, HostMetrics, HostRegistryMessage, PowerPolicy, RegistryMessage, ServiceAction, ServiceState, ServiceType};
+use crate::protocol::{AgentMetrics, ContainerInfo, HostMetrics, HostRegistryMessage, NetworkInterfaceInfo, PowerPolicy, RegistryMessage, ServiceAction, ServiceState, ServiceType};
 use crate::types::{
     AgentNotifyResult, AgentSkipResult, AgentStatus, AgentUpdateStatusInfo,
     Application, CreateApplicationRequest, RegistryState, UpdateApplicationRequest,
@@ -37,6 +37,7 @@ pub struct HostConnection {
     pub version: Option<String>,
     pub metrics: Option<HostMetrics>,
     pub containers: Vec<ContainerInfo>,
+    pub interfaces: Vec<NetworkInterfaceInfo>,
 }
 
 pub enum MigrationResult {
@@ -397,6 +398,16 @@ impl AgentRegistry {
             }
         };
 
+        // Notify frontend via WebSocket
+        if let Some(ref app) = app {
+            let _ = self.events.agent_status.send(AgentStatusEvent {
+                app_id: app_id.to_string(),
+                slug: app.slug.clone(),
+                status: "connected".to_string(),
+                message: None,
+            });
+        }
+
         // Push config with endpoint info for agent route publishing
         if let Some(app) = app {
             let _ = tx
@@ -425,11 +436,24 @@ impl AgentRegistry {
             conns.remove(app_id);
         }
 
-        {
+        let slug = {
             let mut state = self.state.write().await;
             if let Some(app) = state.applications.iter_mut().find(|a| a.id == app_id) {
                 app.status = AgentStatus::Disconnected;
+                Some(app.slug.clone())
+            } else {
+                None
             }
+        };
+
+        // Notify frontend via WebSocket
+        if let Some(slug) = slug {
+            let _ = self.events.agent_status.send(AgentStatusEvent {
+                app_id: app_id.to_string(),
+                slug,
+                status: "disconnected".to_string(),
+                message: None,
+            });
         }
 
         let _ = self.persist().await;
@@ -495,6 +519,7 @@ impl AgentRegistry {
             version: Some(version.clone()),
             metrics: None,
             containers: Vec::new(),
+            interfaces: Vec::new(),
         };
         self.host_connections.write().await.insert(host_id.clone(), conn);
         info!("Host agent connected: {} ({})", host_name, host_id);
@@ -525,6 +550,12 @@ impl AgentRegistry {
     pub async fn update_host_containers(&self, host_id: &str, containers: Vec<ContainerInfo>) {
         if let Some(conn) = self.host_connections.write().await.get_mut(host_id) {
             conn.containers = containers;
+        }
+    }
+
+    pub async fn update_host_interfaces(&self, host_id: &str, interfaces: Vec<NetworkInterfaceInfo>) {
+        if let Some(conn) = self.host_connections.write().await.get_mut(host_id) {
+            conn.interfaces = interfaces;
         }
     }
 
@@ -709,6 +740,46 @@ WantedBy=multi-user.target
         LxdClient::attach_storage_volume(container, &vol_name, "/root/workspace")
             .await
             .with_context(|| format!("Failed to attach workspace volume for {container}"))?;
+
+        // Deploy Dataverse MCP config for Claude Code (auto-approved tools)
+        emit("Configuration MCP Dataverse...");
+        let mcp_config = r#"{
+  "mcpServers": {
+    "dataverse": {
+      "command": "/usr/local/bin/hr-agent",
+      "args": ["mcp"],
+      "autoApprove": [
+        "list_tables",
+        "describe_table",
+        "create_table",
+        "add_column",
+        "remove_column",
+        "drop_table",
+        "create_relation",
+        "query_data",
+        "insert_data",
+        "update_data",
+        "delete_data",
+        "count_rows",
+        "get_schema",
+        "get_db_info"
+      ]
+    }
+  }
+}
+"#;
+        let tmp_mcp = PathBuf::from(format!("/tmp/mcp-{service_name}.json"));
+        tokio::fs::write(&tmp_mcp, mcp_config).await?;
+        LxdClient::push_file(container, &tmp_mcp, "root/workspace/.mcp.json").await?;
+        let _ = tokio::fs::remove_file(&tmp_mcp).await;
+
+        // Deploy CLAUDE.md with Dataverse instructions for Claude Code
+        emit("Deploiement CLAUDE.md Dataverse...");
+        let claude_md_content = include_str!("dataverse_claude_md.txt");
+        let tmp_claude = PathBuf::from(format!("/tmp/claude-md-{service_name}.md"));
+        tokio::fs::write(&tmp_claude, claude_md_content).await?;
+        LxdClient::push_file(container, &tmp_claude, "root/workspace/CLAUDE.md").await?;
+        let _ = tokio::fs::remove_file(&tmp_claude).await;
 
         // Configure code-server: no auth (forward-auth handles it), bind LAN
         emit("Configuration de code-server...");
@@ -895,7 +966,44 @@ WantedBy=multi-user.target
             memory_bytes: metrics.memory_bytes,
             cpu_percent: metrics.cpu_percent,
             code_server_idle_secs: metrics.code_server_idle_secs,
-            app_idle_secs: metrics.app_idle_secs,
+        });
+    }
+
+    /// Handle schema metadata received from an agent: cache and broadcast to WebSocket.
+    pub async fn handle_schema_metadata(
+        &self,
+        app_id: &str,
+        tables: Vec<crate::protocol::SchemaTableInfo>,
+        relations: Vec<crate::protocol::SchemaRelationInfo>,
+        version: u64,
+        _db_size_bytes: u64,
+    ) {
+        // Look up the app slug
+        let slug = {
+            let state = self.state.read().await;
+            state.applications.iter()
+                .find(|a| a.id == app_id)
+                .map(|a| a.slug.clone())
+                .unwrap_or_default()
+        };
+
+        // Broadcast to WebSocket
+        use hr_common::events::{DataverseSchemaEvent, DataverseTableSummary};
+        let table_summaries: Vec<DataverseTableSummary> = tables.iter().map(|t| {
+            DataverseTableSummary {
+                name: t.name.clone(),
+                slug: t.slug.clone(),
+                columns_count: t.columns.len(),
+                rows_count: t.row_count,
+            }
+        }).collect();
+
+        let _ = self.events.dataverse_schema.send(DataverseSchemaEvent {
+            app_id: app_id.to_string(),
+            slug,
+            tables: table_summaries,
+            relations_count: relations.len(),
+            version,
         });
     }
 
@@ -1157,6 +1265,38 @@ WantedBy=multi-user.target
         });
 
         Ok(output)
+    }
+
+    /// Periodic cleanup of stale migration signals and transfer mappings.
+    pub async fn cleanup_stale_signals(&self) {
+        {
+            let mut signals = self.migration_signals.write().await;
+            let before = signals.len();
+            signals.retain(|_tid, tx| !tx.is_closed());
+            let removed = before - signals.len();
+            if removed > 0 {
+                tracing::info!("Cleaned up {} stale migration signals", removed);
+            }
+        }
+        {
+            let mut signals = self.exec_signals.write().await;
+            let before = signals.len();
+            signals.retain(|_rid, tx| !tx.is_closed());
+            let removed = before - signals.len();
+            if removed > 0 {
+                tracing::info!("Cleaned up {} stale exec signals", removed);
+            }
+        }
+        {
+            let signal_keys: std::collections::HashSet<String> = self.migration_signals.read().await.keys().cloned().collect();
+            let mut names = self.transfer_container_names.write().await;
+            let before = names.len();
+            names.retain(|tid, _| signal_keys.contains(tid));
+            let removed = before - names.len();
+            if removed > 0 {
+                tracing::info!("Cleaned up {} stale transfer container name mappings", removed);
+            }
+        }
     }
 
     /// Persist state to disk (atomic write).

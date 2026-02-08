@@ -1,0 +1,643 @@
+//! MCP (Model Context Protocol) stdio server for Dataverse operations.
+
+use std::io::{self, BufRead, Write};
+
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use tracing::info;
+
+use hr_dataverse::engine::DataverseEngine;
+use hr_dataverse::query::*;
+use hr_dataverse::schema::*;
+
+use crate::dataverse::LocalDataverse;
+
+#[derive(Deserialize)]
+struct JsonRpcRequest {
+    #[allow(dead_code)]
+    jsonrpc: String,
+    id: Option<Value>,
+    method: String,
+    #[serde(default)]
+    params: Value,
+}
+
+#[derive(Serialize)]
+struct JsonRpcResponse {
+    jsonrpc: String,
+    id: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<JsonRpcError>,
+}
+
+#[derive(Serialize)]
+struct JsonRpcError {
+    code: i32,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<Value>,
+}
+
+/// Run the MCP stdio server.
+pub async fn run_mcp_server() -> Result<()> {
+    info!("Starting MCP stdio server");
+
+    let dataverse = LocalDataverse::open()?;
+    let engine = dataverse.engine().clone();
+
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let request: JsonRpcRequest = match serde_json::from_str(&line) {
+            Ok(r) => r,
+            Err(e) => {
+                let resp = JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: Value::Null,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32700,
+                        message: format!("Parse error: {}", e),
+                        data: None,
+                    }),
+                };
+                writeln!(&stdout, "{}", serde_json::to_string(&resp)?)?;
+                continue;
+            }
+        };
+
+        let id = request.id.clone().unwrap_or(Value::Null);
+        let engine_guard = engine.lock().await;
+
+        let result = match request.method.as_str() {
+            "initialize" => Ok(json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "tools": {}
+                },
+                "serverInfo": {
+                    "name": "hr-dataverse",
+                    "version": "0.1.0"
+                },
+                "instructions": include_str!("mcp_instructions.txt")
+            })),
+            "notifications/initialized" => {
+                // No response needed for notifications
+                drop(engine_guard);
+                continue;
+            }
+            "tools/list" => Ok(json!({
+                "tools": get_tool_definitions()
+            })),
+            "tools/call" => {
+                let tool_name = request
+                    .params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let arguments = request
+                    .params
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or(json!({}));
+                handle_tool_call(&engine_guard, tool_name, &arguments)
+            }
+            _ => Err(format!("Method not found: {}", request.method)),
+        };
+
+        drop(engine_guard);
+
+        let resp = match result {
+            Ok(value) => JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: Some(value),
+                error: None,
+            },
+            Err(e) => JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32603,
+                    message: e,
+                    data: None,
+                }),
+            },
+        };
+
+        writeln!(&stdout, "{}", serde_json::to_string(&resp)?)?;
+        stdout.lock().flush()?;
+    }
+
+    Ok(())
+}
+
+fn get_tool_definitions() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "list_tables",
+            "description": "List all tables in the Dataverse database with their column counts and row counts.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "describe_table",
+            "description": "Get the full schema of a table including all columns and their types.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "table_name": { "type": "string", "description": "Name of the table to describe" }
+                },
+                "required": ["table_name"]
+            }
+        }),
+        json!({
+            "name": "create_table",
+            "description": "Create a new table with the specified columns. Each table automatically gets id, created_at, and updated_at columns.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Table name (alphanumeric + underscore)" },
+                    "slug": { "type": "string", "description": "URL-friendly slug for the table" },
+                    "description": { "type": "string", "description": "Optional table description" },
+                    "columns": {
+                        "type": "array",
+                        "description": "Column definitions",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string" },
+                                "field_type": { "type": "string", "enum": ["text", "number", "decimal", "boolean", "date_time", "date", "time", "email", "url", "phone", "currency", "percent", "duration", "json", "uuid", "auto_increment", "choice", "multi_choice", "lookup", "formula"] },
+                                "required": { "type": "boolean", "default": false },
+                                "unique": { "type": "boolean", "default": false },
+                                "default_value": { "type": "string" },
+                                "description": { "type": "string" },
+                                "choices": { "type": "array", "items": { "type": "string" } }
+                            },
+                            "required": ["name", "field_type"]
+                        }
+                    }
+                },
+                "required": ["name", "slug", "columns"]
+            }
+        }),
+        json!({
+            "name": "add_column",
+            "description": "Add a new column to an existing table.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "table_name": { "type": "string" },
+                    "name": { "type": "string" },
+                    "field_type": { "type": "string" },
+                    "required": { "type": "boolean", "default": false },
+                    "unique": { "type": "boolean", "default": false },
+                    "default_value": { "type": "string" }
+                },
+                "required": ["table_name", "name", "field_type"]
+            }
+        }),
+        json!({
+            "name": "remove_column",
+            "description": "Remove a column from a table.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "table_name": { "type": "string" },
+                    "column_name": { "type": "string" }
+                },
+                "required": ["table_name", "column_name"]
+            }
+        }),
+        json!({
+            "name": "drop_table",
+            "description": "Drop (delete) a table and all its data. This action is irreversible.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "table_name": { "type": "string" },
+                    "confirm": { "type": "boolean", "description": "Must be true to confirm deletion" }
+                },
+                "required": ["table_name", "confirm"]
+            }
+        }),
+        json!({
+            "name": "query_data",
+            "description": "Query rows from a table with optional filters and pagination.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "table_name": { "type": "string" },
+                    "filters": { "type": "array", "items": { "type": "object", "properties": { "column": {"type":"string"}, "op": {"type":"string","enum":["eq","ne","gt","lt","gte","lte","like","in","is_null","is_not_null"]}, "value": {} } } },
+                    "limit": { "type": "integer", "default": 100 },
+                    "offset": { "type": "integer", "default": 0 },
+                    "order_by": { "type": "string" },
+                    "order_desc": { "type": "boolean", "default": false }
+                },
+                "required": ["table_name"]
+            }
+        }),
+        json!({
+            "name": "insert_data",
+            "description": "Insert one or more rows into a table.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "table_name": { "type": "string" },
+                    "rows": { "type": "array", "items": { "type": "object" }, "description": "Array of row objects (key=column, value=data)" }
+                },
+                "required": ["table_name", "rows"]
+            }
+        }),
+        json!({
+            "name": "update_data",
+            "description": "Update rows in a table matching the given filters.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "table_name": { "type": "string" },
+                    "updates": { "type": "object", "description": "Column-value pairs to update" },
+                    "filters": { "type": "array", "items": { "type": "object" } }
+                },
+                "required": ["table_name", "updates", "filters"]
+            }
+        }),
+        json!({
+            "name": "delete_data",
+            "description": "Delete rows from a table matching the given filters.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "table_name": { "type": "string" },
+                    "filters": { "type": "array", "items": { "type": "object" } }
+                },
+                "required": ["table_name", "filters"]
+            }
+        }),
+        json!({
+            "name": "get_schema",
+            "description": "Get the full database schema as JSON, including all tables, columns, and relations.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "get_db_info",
+            "description": "Get database statistics: file size, table count, total row count.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "create_relation",
+            "description": "Create a relation between two tables.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "from_table": {"type":"string"}, "from_column": {"type":"string"},
+                    "to_table": {"type":"string"}, "to_column": {"type":"string"},
+                    "relation_type": {"type":"string","enum":["one_to_many","many_to_many","self_referential"]},
+                    "on_delete": {"type":"string","enum":["cascade","set_null","restrict"],"default":"restrict"},
+                    "on_update": {"type":"string","enum":["cascade","set_null","restrict"],"default":"cascade"}
+                },
+                "required": ["from_table","from_column","to_table","to_column","relation_type"]
+            }
+        }),
+        json!({
+            "name": "count_rows",
+            "description": "Count rows in a table, optionally with filters.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "table_name": { "type": "string" },
+                    "filters": { "type": "array", "items": { "type": "object" } }
+                },
+                "required": ["table_name"]
+            }
+        }),
+    ]
+}
+
+fn handle_tool_call(engine: &DataverseEngine, tool: &str, args: &Value) -> Result<Value, String> {
+    let text_result = |text: String| -> Value {
+        json!({ "content": [{ "type": "text", "text": text }] })
+    };
+
+    match tool {
+        "list_tables" => {
+            let schema = engine.get_schema().map_err(|e| e.to_string())?;
+            let mut tables_info = Vec::new();
+            for t in &schema.tables {
+                let rows = engine.count_rows(&t.name).unwrap_or(0);
+                tables_info.push(json!({
+                    "name": t.name,
+                    "slug": t.slug,
+                    "columns": t.columns.len(),
+                    "rows": rows,
+                    "description": t.description,
+                }));
+            }
+            Ok(text_result(
+                serde_json::to_string_pretty(&tables_info).unwrap(),
+            ))
+        }
+
+        "describe_table" => {
+            let name = args
+                .get("table_name")
+                .and_then(|v| v.as_str())
+                .ok_or("table_name required")?;
+            let table = engine
+                .get_table(name)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("Table '{}' not found", name))?;
+            Ok(text_result(serde_json::to_string_pretty(&table).unwrap()))
+        }
+
+        "create_table" => {
+            let name = args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or("name required")?
+                .to_string();
+            let slug = args
+                .get("slug")
+                .and_then(|v| v.as_str())
+                .ok_or("slug required")?
+                .to_string();
+            let desc = args
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let cols_val = args.get("columns").ok_or("columns required")?;
+            let columns: Vec<ColumnDefinition> = serde_json::from_value(cols_val.clone())
+                .map_err(|e| format!("Invalid columns: {}", e))?;
+
+            let now = chrono::Utc::now();
+            let table = TableDefinition {
+                name: name.clone(),
+                slug,
+                columns,
+                description: desc,
+                created_at: now,
+                updated_at: now,
+            };
+            let version = engine.create_table(&table).map_err(|e| e.to_string())?;
+            Ok(text_result(format!(
+                "Table '{}' created (schema version {})",
+                name, version
+            )))
+        }
+
+        "add_column" => {
+            let table = args
+                .get("table_name")
+                .and_then(|v| v.as_str())
+                .ok_or("table_name required")?;
+            let name = args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or("name required")?
+                .to_string();
+            let ft_str = args
+                .get("field_type")
+                .and_then(|v| v.as_str())
+                .ok_or("field_type required")?;
+            let field_type: FieldType = serde_json::from_str(&format!("\"{}\"", ft_str))
+                .map_err(|_| format!("Invalid field_type: {}", ft_str))?;
+            let required = args
+                .get("required")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let unique = args
+                .get("unique")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let default_value = args
+                .get("default_value")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            let col = ColumnDefinition {
+                name: name.clone(),
+                field_type,
+                required,
+                unique,
+                default_value,
+                description: None,
+                choices: vec![],
+            };
+            let version = engine.add_column(table, &col).map_err(|e| e.to_string())?;
+            Ok(text_result(format!(
+                "Column '{}' added to '{}' (schema version {})",
+                name, table, version
+            )))
+        }
+
+        "remove_column" => {
+            let table = args
+                .get("table_name")
+                .and_then(|v| v.as_str())
+                .ok_or("table_name required")?;
+            let col = args
+                .get("column_name")
+                .and_then(|v| v.as_str())
+                .ok_or("column_name required")?;
+            let version = engine
+                .remove_column(table, col)
+                .map_err(|e| e.to_string())?;
+            Ok(text_result(format!(
+                "Column '{}' removed from '{}' (schema version {})",
+                col, table, version
+            )))
+        }
+
+        "drop_table" => {
+            let name = args
+                .get("table_name")
+                .and_then(|v| v.as_str())
+                .ok_or("table_name required")?;
+            let confirm = args
+                .get("confirm")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !confirm {
+                return Err("Set confirm=true to confirm table deletion".to_string());
+            }
+            let version = engine.drop_table(name).map_err(|e| e.to_string())?;
+            Ok(text_result(format!(
+                "Table '{}' dropped (schema version {})",
+                name, version
+            )))
+        }
+
+        "query_data" => {
+            let table = args
+                .get("table_name")
+                .and_then(|v| v.as_str())
+                .ok_or("table_name required")?;
+            let filters: Vec<Filter> = args
+                .get("filters")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            let pagination = Pagination {
+                limit: args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(100),
+                offset: args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0),
+                order_by: args
+                    .get("order_by")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                order_desc: args
+                    .get("order_desc")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            };
+            let rows = query_rows(engine.connection(), table, &filters, &pagination)
+                .map_err(|e| e.to_string())?;
+            Ok(text_result(serde_json::to_string_pretty(&rows).unwrap()))
+        }
+
+        "insert_data" => {
+            let table = args
+                .get("table_name")
+                .and_then(|v| v.as_str())
+                .ok_or("table_name required")?;
+            let rows: Vec<Value> = args
+                .get("rows")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .ok_or("rows required (array)")?;
+            let count =
+                insert_rows(engine.connection(), table, &rows).map_err(|e| e.to_string())?;
+            Ok(text_result(format!(
+                "{} row(s) inserted into '{}'",
+                count, table
+            )))
+        }
+
+        "update_data" => {
+            let table = args
+                .get("table_name")
+                .and_then(|v| v.as_str())
+                .ok_or("table_name required")?;
+            let updates = args.get("updates").ok_or("updates required")?;
+            let filters: Vec<Filter> = args
+                .get("filters")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            let count = update_rows(engine.connection(), table, updates, &filters)
+                .map_err(|e| e.to_string())?;
+            Ok(text_result(format!(
+                "{} row(s) updated in '{}'",
+                count, table
+            )))
+        }
+
+        "delete_data" => {
+            let table = args
+                .get("table_name")
+                .and_then(|v| v.as_str())
+                .ok_or("table_name required")?;
+            let filters: Vec<Filter> = args
+                .get("filters")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            let count = delete_rows(engine.connection(), table, &filters)
+                .map_err(|e| e.to_string())?;
+            Ok(text_result(format!(
+                "{} row(s) deleted from '{}'",
+                count, table
+            )))
+        }
+
+        "get_schema" => {
+            let schema = engine.get_schema().map_err(|e| e.to_string())?;
+            Ok(text_result(serde_json::to_string_pretty(&schema).unwrap()))
+        }
+
+        "get_db_info" => {
+            let schema = engine.get_schema().map_err(|e| e.to_string())?;
+            let mut total_rows: u64 = 0;
+            for t in &schema.tables {
+                total_rows += engine.count_rows(&t.name).unwrap_or(0);
+            }
+            let info = json!({
+                "tables": schema.tables.len(),
+                "relations": schema.relations.len(),
+                "total_rows": total_rows,
+                "schema_version": schema.version,
+            });
+            Ok(text_result(serde_json::to_string_pretty(&info).unwrap()))
+        }
+
+        "create_relation" => {
+            let rel = RelationDefinition {
+                from_table: args
+                    .get("from_table")
+                    .and_then(|v| v.as_str())
+                    .ok_or("from_table required")?
+                    .to_string(),
+                from_column: args
+                    .get("from_column")
+                    .and_then(|v| v.as_str())
+                    .ok_or("from_column required")?
+                    .to_string(),
+                to_table: args
+                    .get("to_table")
+                    .and_then(|v| v.as_str())
+                    .ok_or("to_table required")?
+                    .to_string(),
+                to_column: args
+                    .get("to_column")
+                    .and_then(|v| v.as_str())
+                    .ok_or("to_column required")?
+                    .to_string(),
+                relation_type: serde_json::from_str(&format!(
+                    "\"{}\"",
+                    args.get("relation_type")
+                        .and_then(|v| v.as_str())
+                        .ok_or("relation_type required")?
+                ))
+                .map_err(|e| format!("Invalid relation_type: {}", e))?,
+                cascade: CascadeRules {
+                    on_delete: args
+                        .get("on_delete")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| serde_json::from_str(&format!("\"{}\"", s)).ok())
+                        .unwrap_or_default(),
+                    on_update: args
+                        .get("on_update")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| serde_json::from_str(&format!("\"{}\"", s)).ok())
+                        .unwrap_or_default(),
+                },
+            };
+            let version = engine
+                .create_relation(&rel)
+                .map_err(|e| e.to_string())?;
+            Ok(text_result(format!(
+                "Relation created: {}.{} -> {}.{} (schema version {})",
+                rel.from_table, rel.from_column, rel.to_table, rel.to_column, version
+            )))
+        }
+
+        "count_rows" => {
+            let table = args
+                .get("table_name")
+                .and_then(|v| v.as_str())
+                .ok_or("table_name required")?;
+            let count = engine.count_rows(table).map_err(|e| e.to_string())?;
+            Ok(text_result(format!("{}", count)))
+        }
+
+        _ => Err(format!("Unknown tool: {}", tool)),
+    }
+}

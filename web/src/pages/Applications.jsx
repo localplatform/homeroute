@@ -24,7 +24,6 @@ import {
   Loader2,
   Play,
   Square,
-  Database,
   ArrowRightLeft,
 } from 'lucide-react';
 import Card from '../components/Card';
@@ -125,7 +124,6 @@ function Applications() {
               memoryBytes: app.metrics.memory_bytes,
               cpuPercent: app.metrics.cpu_percent,
               codeServerIdleSecs: app.metrics.code_server_idle_secs,
-              appIdleSecs: app.metrics.app_idle_secs,
             };
           }
         }
@@ -200,10 +198,10 @@ function Applications() {
           });
         } else if (msg.type === 'agent:metrics') {
           // Update agent metrics for an application
-          const { appId, codeServerStatus, appStatus, dbStatus, memoryBytes, cpuPercent, codeServerIdleSecs, appIdleSecs } = msg.data;
+          const { appId, codeServerStatus, appStatus, dbStatus, memoryBytes, cpuPercent, codeServerIdleSecs } = msg.data;
           setAppMetrics(prev => ({
             ...prev,
-            [appId]: { codeServerStatus, appStatus, dbStatus, memoryBytes, cpuPercent, codeServerIdleSecs, appIdleSecs }
+            [appId]: { codeServerStatus, appStatus, dbStatus, memoryBytes, cpuPercent, codeServerIdleSecs }
           }));
         } else if (msg.type === 'agent:service-command') {
           // Service state changed - update metrics immediately for instant UI feedback
@@ -217,9 +215,7 @@ function Applications() {
             setAppMetrics(prev => {
               const current = prev[appId] || {};
               const updated = { ...current };
-              if (serviceType === 'app') updated.appStatus = newStatus;
-              else if (serviceType === 'db') updated.dbStatus = newStatus;
-              else if (serviceType === 'codeserver') updated.codeServerStatus = newStatus;
+              if (serviceType === 'codeserver') updated.codeServerStatus = newStatus;
               return { ...prev, [appId]: updated };
             });
           }
@@ -342,9 +338,6 @@ function Applications() {
     if (!editForm) return;
     setSaving(true);
     try {
-      // Parse comma-separated services into arrays
-      const parseServices = (str) => str ? str.split(',').map(s => s.trim()).filter(Boolean) : [];
-
       const payload = {
         name: editForm.name,
         frontend: {
@@ -362,16 +355,9 @@ function Applications() {
         })),
         code_server_enabled: editForm.code_server_enabled,
         wake_page_enabled: editForm.wake_page_enabled,
-        services: {
-          app: parseServices(editForm.services?.app),
-          db: parseServices(editForm.services?.db),
-        },
         power_policy: {
           code_server_idle_timeout_secs: editForm.powerPolicy?.codeServerTimeoutMins
             ? editForm.powerPolicy.codeServerTimeoutMins * 60
-            : null,
-          app_idle_timeout_secs: editForm.powerPolicy?.appTimeoutMins
-            ? editForm.powerPolicy.appTimeoutMins * 60
             : null,
         },
       };
@@ -426,13 +412,8 @@ function Applications() {
       apis: (app.apis || []).map(a => ({ ...a, target_port: String(a.target_port) })),
       code_server_enabled: app.code_server_enabled !== false,
       wake_page_enabled: app.wake_page_enabled !== false,
-      services: {
-        app: (app.services?.app || []).join(', '),
-        db: (app.services?.db || []).join(', '),
-      },
       powerPolicy: {
         codeServerTimeoutMins: Math.floor((app.power_policy?.code_server_idle_timeout_secs || 0) / 60),
-        appTimeoutMins: Math.floor((app.power_policy?.app_idle_timeout_secs || 0) / 60),
       },
     });
     setShowEditModal(true);
@@ -497,45 +478,6 @@ function Applications() {
     }
   }
 
-  // Start stack: db first, then app (with delay)
-  async function handleStackStart(appId) {
-    try {
-      // Start DB first
-      await startApplicationService(appId, 'db');
-      // Wait 500ms then start app
-      setTimeout(async () => {
-        await startApplicationService(appId, 'app');
-      }, 500);
-    } catch {
-      setMessage({ type: 'error', text: 'Erreur de connexion' });
-    }
-  }
-
-  // Stop stack: app first, then db (with delay)
-  async function handleStackStop(appId) {
-    try {
-      // Stop app first
-      await stopApplicationService(appId, 'app');
-      // Wait 500ms then stop db
-      setTimeout(async () => {
-        await stopApplicationService(appId, 'db');
-      }, 500);
-    } catch {
-      setMessage({ type: 'error', text: 'Erreur de connexion' });
-    }
-  }
-
-  // Get combined stack status from app and db
-  function getStackStatus(appStatus, dbStatus) {
-    if (appStatus === 'running' && dbStatus === 'running') return 'running';
-    if (appStatus === 'stopped' && dbStatus === 'stopped') return 'stopped';
-    if (appStatus === 'starting' || dbStatus === 'starting') return 'starting';
-    if (appStatus === 'stopping' || dbStatus === 'stopping') return 'stopping';
-    // Mixed state (one running, one stopped) - show as partial
-    if (appStatus === 'running' || dbStatus === 'running') return 'partial';
-    return 'stopped';
-  }
-
   // Format bytes to human readable
   function formatBytes(bytes) {
     if (bytes === 0) return '0 B';
@@ -568,16 +510,16 @@ function Applications() {
     };
 
     return (
-      <div className="mt-2 p-3 bg-gray-700/50 rounded-lg">
+      <div className="p-2 bg-gray-700/50">
         <div className="flex items-center justify-between mb-1">
           <span className="text-xs text-gray-300">
             {phaseLabels[migration.phase] || migration.phase}
           </span>
           <span className="text-xs text-gray-400">{migration.progressPct}%</span>
         </div>
-        <div className="w-full bg-gray-600 rounded-full h-2">
+        <div className="w-full bg-gray-600 h-1.5">
           <div
-            className={`h-2 rounded-full transition-all duration-500 ${
+            className={`h-1.5 transition-all duration-500 ${
               migration.phase === 'failed' ? 'bg-red-500' :
               migration.phase === 'complete' ? 'bg-green-500' : 'bg-blue-500'
             }`}
@@ -590,7 +532,7 @@ function Applications() {
           </div>
         )}
         {migration.error && (
-          <div className="text-xs text-red-400 mt-1">{migration.error}</div>
+          <div className="text-xs text-red-400 mt-1 select-all cursor-text">{migration.error}</div>
         )}
       </div>
     );
@@ -669,6 +611,7 @@ function Applications() {
                 {applications.map(app => {
                   const isDeploying = app.status === 'deploying';
                   const metrics = appMetrics[app.id];
+                  const isMigrating = !!migrations[app.id];
                   return (
                     <tr key={app.id} className="border-b border-gray-800 hover:bg-gray-800/30">
                       {/* Application info */}
@@ -703,14 +646,15 @@ function Applications() {
                               {app.frontend.auth_required && <Key className="w-3 h-3 text-purple-400" />}
                               {app.frontend.local_only && <Shield className="w-3 h-3 text-yellow-400" />}
                             </div>
-                            <MigrationProgress migration={migrations[app.id]} />
                           </div>
                         </div>
                       </td>
 
                       {/* Status */}
                       <td className="py-3 px-3">
-                        {isDeploying ? (
+                        {isMigrating ? (
+                          <MigrationProgress migration={migrations[app.id]} />
+                        ) : isDeploying ? (
                           <div>
                             <span className="text-xs px-2 py-0.5 text-blue-400 bg-blue-900/30">Deploiement</span>
                             <p className="text-xs text-gray-500 mt-1 truncate max-w-32">{app._deployMessage}</p>
@@ -722,7 +666,9 @@ function Applications() {
 
                       {/* Services */}
                       <td className="py-3 px-3">
-                        {!metrics ? (
+                        {isMigrating ? (
+                          <span className="text-xs text-gray-600">-</span>
+                        ) : !metrics ? (
                           <span className="text-xs text-gray-600">-</span>
                         ) : (
                           <div className="flex items-center gap-2 text-xs">
@@ -746,58 +692,39 @@ function Applications() {
                                 {metrics.codeServerStatus === 'running' ? <Square className="w-2.5 h-2.5" /> : <Play className="w-2.5 h-2.5" />}
                               </button>
                             )}
-                            {/* Stack (App + DB combined) */}
-                            {(app.services?.app?.length > 0 || app.services?.db?.length > 0) && (() => {
-                              const stackStatus = getStackStatus(metrics.appStatus, metrics.dbStatus);
-                              const isRunning = stackStatus === 'running' || stackStatus === 'partial';
-                              return (
-                                <button
-                                  onClick={() => isRunning
-                                    ? handleStackStop(app.id)
-                                    : handleStackStart(app.id)
-                                  }
-                                  className={`flex items-center gap-1 px-1.5 py-0.5 transition-colors ${
-                                    stackStatus === 'running'
-                                      ? 'text-green-400 bg-green-900/30 hover:bg-green-900/50'
-                                      : stackStatus === 'partial'
-                                      ? 'text-yellow-400 bg-yellow-900/30 hover:bg-yellow-900/50'
-                                      : stackStatus === 'starting' || stackStatus === 'stopping'
-                                      ? 'text-blue-400 bg-blue-900/30'
-                                      : 'text-gray-400 bg-gray-700/30 hover:bg-gray-700/50'
-                                  }`}
-                                  title={`stack: app=${metrics.appStatus}, db=${metrics.dbStatus}`}
-                                >
-                                  <Server className="w-3 h-3" />
-                                  <Database className="w-3 h-3" />
-                                  {isRunning ? <Square className="w-2.5 h-2.5" /> : <Play className="w-2.5 h-2.5" />}
-                                </button>
-                              );
-                            })()}
                           </div>
                         )}
                       </td>
 
                       {/* CPU */}
                       <td className="py-3 px-3 text-right">
-                        <span className={`font-mono text-sm ${
-                          metrics?.cpuPercent > 80 ? 'text-red-400' :
-                          metrics?.cpuPercent > 50 ? 'text-yellow-400' :
-                          metrics?.cpuPercent > 0 ? 'text-green-400' : 'text-gray-600'
-                        }`}>
-                          {metrics?.cpuPercent !== undefined ? `${metrics.cpuPercent.toFixed(1)}%` : '-'}
-                        </span>
+                        {isMigrating ? (
+                          <span className="text-xs text-gray-600">-</span>
+                        ) : (
+                          <span className={`font-mono text-sm ${
+                            metrics?.cpuPercent > 80 ? 'text-red-400' :
+                            metrics?.cpuPercent > 50 ? 'text-yellow-400' :
+                            metrics?.cpuPercent > 0 ? 'text-green-400' : 'text-gray-600'
+                          }`}>
+                            {metrics?.cpuPercent !== undefined ? `${metrics.cpuPercent.toFixed(1)}%` : '-'}
+                          </span>
+                        )}
                       </td>
 
                       {/* RAM */}
                       <td className="py-3 px-3 text-right">
-                        <span className="font-mono text-sm text-gray-400">
-                          {metrics?.memoryBytes ? formatBytes(metrics.memoryBytes) : '-'}
-                        </span>
+                        {isMigrating ? (
+                          <span className="text-xs text-gray-600">-</span>
+                        ) : (
+                          <span className="font-mono text-sm text-gray-400">
+                            {metrics?.memoryBytes ? formatBytes(metrics.memoryBytes) : '-'}
+                          </span>
+                        )}
                       </td>
 
                       {/* Actions */}
                       <td className="py-3 px-3">
-                        <div className="flex items-center justify-end gap-1">
+                        <div className={`flex items-center justify-end gap-1 ${isMigrating ? 'opacity-50 pointer-events-none' : ''}`}>
                           {app.code_server_enabled !== false && baseDomain && (
                             <a
                               href={`https://${app.slug}.code.${baseDomain}`}
@@ -811,6 +738,7 @@ function Applications() {
                           )}
                           <button
                             onClick={() => setTerminalApp(app)}
+                            disabled={isMigrating}
                             className="p-1.5 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-900/30 transition-colors"
                             title="Terminal"
                           >
@@ -818,6 +746,7 @@ function Applications() {
                           </button>
                           <button
                             onClick={() => openMigrateModal(app)}
+                            disabled={isMigrating}
                             className="p-1.5 text-gray-400 hover:text-blue-400 hover:bg-gray-700 rounded transition-colors"
                             title="Migrer vers un autre hote"
                           >
@@ -825,6 +754,7 @@ function Applications() {
                           </button>
                           <button
                             onClick={() => handleToggle(app.id, !app.enabled)}
+                            disabled={isMigrating}
                             className={`p-1.5 transition-colors ${
                               app.enabled ? 'text-green-400 hover:bg-green-900/30' : 'text-gray-500 hover:bg-gray-700/30'
                             }`}
@@ -834,6 +764,7 @@ function Applications() {
                           </button>
                           <button
                             onClick={() => openEditModal(app)}
+                            disabled={isMigrating}
                             className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 transition-colors"
                             title="Modifier"
                           >
@@ -841,6 +772,7 @@ function Applications() {
                           </button>
                           <button
                             onClick={() => handleDelete(app.id, app.name)}
+                            disabled={isMigrating}
                             className="p-1.5 text-red-400 hover:text-red-300 hover:bg-red-900/30 transition-colors"
                             title="Supprimer"
                           >
@@ -1332,39 +1264,6 @@ function Applications() {
                 </div>
               )}
 
-              {/* Systemd Services (powersave) */}
-              <div className="border border-gray-700 p-4">
-                <div className="text-sm font-medium mb-3 flex items-center gap-2">
-                  <Server className="w-4 h-4 text-orange-400" />
-                  Services systemd (powersave)
-                </div>
-                <p className="text-xs text-gray-500 mb-3">
-                  Definir les services systemd a demarrer/arreter. Separez par des virgules.
-                </p>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">Services App</label>
-                    <input
-                      type="text"
-                      placeholder="myapp.service, myapp-worker.service"
-                      value={editForm.services?.app || ''}
-                      onChange={e => setEditForm({ ...editForm, services: { ...editForm.services, app: e.target.value } })}
-                      className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 text-sm font-mono"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">Services DB</label>
-                    <input
-                      type="text"
-                      placeholder="postgresql.service"
-                      value={editForm.services?.db || ''}
-                      onChange={e => setEditForm({ ...editForm, services: { ...editForm.services, db: e.target.value } })}
-                      className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 text-sm font-mono"
-                    />
-                  </div>
-                </div>
-              </div>
-
               {/* Power Policy - Idle Timeouts */}
               <div className="border border-gray-700 p-4">
                 <div className="text-sm font-medium mb-3 flex items-center gap-2">
@@ -1384,19 +1283,6 @@ function Applications() {
                       onChange={e => setEditForm({
                         ...editForm,
                         powerPolicy: { ...editForm.powerPolicy, codeServerTimeoutMins: parseInt(e.target.value) || 0 }
-                      })}
-                      className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">App/DB (minutes)</label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={editForm.powerPolicy?.appTimeoutMins || 0}
-                      onChange={e => setEditForm({
-                        ...editForm,
-                        powerPolicy: { ...editForm.powerPolicy, appTimeoutMins: parseInt(e.target.value) || 0 }
                       })}
                       className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 text-sm"
                     />
@@ -1443,7 +1329,7 @@ function Applications() {
       {/* Migrate Modal */}
       {migrateModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 rounded-xl p-6 w-full max-w-md border border-gray-700">
+          <div className="bg-gray-800 p-6 w-full max-w-md border border-gray-700">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold">Migrer {migrateModal.name}</h3>
               <button onClick={() => setMigrateModal(null)} className="p-1 text-gray-400 hover:text-white">
@@ -1456,7 +1342,7 @@ function Applications() {
             <select
               value={selectedHostId}
               onChange={(e) => setSelectedHostId(e.target.value)}
-              className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white mb-4"
+              className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white mb-4"
             >
               <option value="">Choisir un hote...</option>
               {hosts
@@ -1481,7 +1367,7 @@ function Applications() {
               <button
                 onClick={handleMigrate}
                 disabled={!selectedHostId || migrating}
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg transition-colors flex items-center gap-2"
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white transition-colors flex items-center gap-2"
               >
                 {migrating && <Loader2 className="w-4 h-4 animate-spin" />}
                 Migrer

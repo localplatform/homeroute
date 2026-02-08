@@ -21,6 +21,7 @@ hr-firewall = { path = "../hr-firewall" }
 hr-registry = { path = "../hr-registry" }
 hr-lxd = { path = "../hr-lxd" }
 
+uuid = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

@@ -32,26 +32,20 @@ pub struct ServiceStateChange {
 }
 
 /// Manages power-saving state and policies.
+/// Only code-server has idle tracking and auto-stop. App/Db are managed
+/// via direct service commands without idle timeout logic.
 pub struct PowersaveManager {
     /// Service manager for starting/stopping services.
     service_mgr: Arc<RwLock<ServiceManager>>,
 
     /// Last activity time for code-server.
     last_code_server_activity: RwLock<Instant>,
-    /// Last activity time for app/db.
-    last_app_activity: RwLock<Instant>,
 
     /// Idle timeout for code-server (None = disabled).
     code_server_timeout: RwLock<Option<Duration>>,
-    /// Idle timeout for app/db (None = disabled).
-    app_timeout: RwLock<Option<Duration>>,
 
     /// code-server is manually stopped (no auto-wake).
     code_server_manually_off: AtomicBool,
-    /// App is manually stopped (no auto-wake).
-    app_manually_off: AtomicBool,
-    /// DB is manually stopped (no auto-wake).
-    db_manually_off: AtomicBool,
 
     /// Current state of code-server.
     code_server_state: RwLock<ServiceState>,
@@ -61,6 +55,31 @@ pub struct PowersaveManager {
     db_state: RwLock<ServiceState>,
 }
 
+/// Check if code-server has active non-loopback TCP connections on port 13337.
+async fn has_active_code_server_connections() -> bool {
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        let output = tokio::process::Command::new("ss")
+            .args(["-tn", "state", "established", "sport", "=", ":13337"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .await?;
+        Ok::<_, std::io::Error>(output)
+    })
+    .await;
+
+    let output = match result {
+        Ok(Ok(output)) => output,
+        _ => return false,
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .skip(1)
+        .any(|line| !line.contains("127.0.0.1") && !line.contains("::1"))
+}
+
 impl PowersaveManager {
     /// Create a new powersave manager.
     pub fn new(service_mgr: Arc<RwLock<ServiceManager>>) -> Self {
@@ -68,12 +87,8 @@ impl PowersaveManager {
         Self {
             service_mgr,
             last_code_server_activity: RwLock::new(now),
-            last_app_activity: RwLock::new(now),
             code_server_timeout: RwLock::new(None),
-            app_timeout: RwLock::new(None),
             code_server_manually_off: AtomicBool::new(false),
-            app_manually_off: AtomicBool::new(false),
-            db_manually_off: AtomicBool::new(false),
             code_server_state: RwLock::new(ServiceState::Stopped),
             app_state: RwLock::new(ServiceState::Stopped),
             db_state: RwLock::new(ServiceState::Stopped),
@@ -83,34 +98,25 @@ impl PowersaveManager {
     /// Update power policy from registry.
     pub fn set_policy(&self, policy: &PowerPolicy) {
         *self.code_server_timeout.write().unwrap() = policy.code_server_idle_timeout_secs.map(Duration::from_secs);
-        *self.app_timeout.write().unwrap() = policy.app_idle_timeout_secs.map(Duration::from_secs);
         info!(
             code_server_timeout = ?policy.code_server_idle_timeout_secs,
-            app_timeout = ?policy.app_idle_timeout_secs,
             "Power policy updated"
         );
     }
 
-    /// Record activity for a service type.
+    /// Record activity for a service type (only meaningful for CodeServer).
     pub fn record_activity(&self, service_type: ServiceType) {
-        let now = Instant::now();
-        match service_type {
-            ServiceType::CodeServer => {
-                *self.last_code_server_activity.write().unwrap() = now;
-            }
-            ServiceType::App | ServiceType::Db => {
-                *self.last_app_activity.write().unwrap() = now;
-            }
+        if service_type == ServiceType::CodeServer {
+            *self.last_code_server_activity.write().unwrap() = Instant::now();
         }
     }
 
     /// Get idle seconds for a service type.
     pub fn idle_secs(&self, service_type: ServiceType) -> u64 {
-        let last_activity = match service_type {
-            ServiceType::CodeServer => *self.last_code_server_activity.read().unwrap(),
-            ServiceType::App | ServiceType::Db => *self.last_app_activity.read().unwrap(),
-        };
-        last_activity.elapsed().as_secs()
+        match service_type {
+            ServiceType::CodeServer => self.last_code_server_activity.read().unwrap().elapsed().as_secs(),
+            ServiceType::App | ServiceType::Db => 0,
+        }
     }
 
     /// Get the current state of a service type.
@@ -131,21 +137,18 @@ impl PowersaveManager {
         }
     }
 
-    /// Check if a service is manually off.
+    /// Check if a service is manually off (only applies to CodeServer).
     pub fn is_manually_off(&self, service_type: ServiceType) -> bool {
         match service_type {
             ServiceType::CodeServer => self.code_server_manually_off.load(Ordering::Relaxed),
-            ServiceType::App => self.app_manually_off.load(Ordering::Relaxed),
-            ServiceType::Db => self.db_manually_off.load(Ordering::Relaxed),
+            ServiceType::App | ServiceType::Db => false,
         }
     }
 
-    /// Set manually off flag.
+    /// Set manually off flag (only applies to CodeServer).
     fn set_manually_off(&self, service_type: ServiceType, value: bool) {
-        match service_type {
-            ServiceType::CodeServer => self.code_server_manually_off.store(value, Ordering::Relaxed),
-            ServiceType::App => self.app_manually_off.store(value, Ordering::Relaxed),
-            ServiceType::Db => self.db_manually_off.store(value, Ordering::Relaxed),
+        if service_type == ServiceType::CodeServer {
+            self.code_server_manually_off.store(value, Ordering::Relaxed);
         }
     }
 
@@ -154,7 +157,7 @@ impl PowersaveManager {
     /// Takes Arc<Self> to allow state updates from spawned tasks.
     /// `target_port` is the port to wait for before marking as running.
     pub async fn ensure_running(self: &Arc<Self>, service_type: ServiceType, target_port: u16) -> WakeResult {
-        // Check if manually off
+        // Check if manually off (only applies to CodeServer)
         if self.is_manually_off(service_type) {
             return WakeResult::ManuallyOff;
         }
@@ -176,30 +179,6 @@ impl PowersaveManager {
 
         // Clone the manager to avoid holding the lock across await
         let mgr = self.service_mgr.read().unwrap().clone();
-
-        // When starting App, ensure DB is started first (if configured and not manually off)
-        if service_type == ServiceType::App
-            && mgr.is_configured(ServiceType::Db)
-            && !self.is_manually_off(ServiceType::Db)
-        {
-            let db_state = self.get_state(ServiceType::Db);
-            if db_state != ServiceState::Running && db_state != ServiceState::Starting {
-                info!("Auto-waking DB first (dependency of App)");
-                self.set_state(ServiceType::Db, ServiceState::Starting);
-
-                let mgr_clone = mgr.clone();
-                let pm_clone = Arc::clone(self);
-                tokio::spawn(async move {
-                    if let Err(e) = mgr_clone.start(ServiceType::Db).await {
-                        error!(error = %e, "Failed to auto-start DB");
-                        pm_clone.set_state(ServiceType::Db, ServiceState::Stopped);
-                    } else {
-                        pm_clone.set_state(ServiceType::Db, ServiceState::Running);
-                    }
-                });
-                self.record_activity(ServiceType::Db);
-            }
-        }
 
         // Mark as starting
         self.set_state(service_type, ServiceState::Starting);
@@ -257,33 +236,6 @@ impl PowersaveManager {
             ServiceAction::Start => {
                 info!(service_type = ?service_type, "Manual start command");
 
-                // When starting App, ensure DB is started first (if configured)
-                if service_type == ServiceType::App && mgr.is_configured(ServiceType::Db) {
-                    let db_state = self.get_state(ServiceType::Db);
-                    if db_state != ServiceState::Running {
-                        info!("Starting DB first (dependency of App)");
-                        self.set_manually_off(ServiceType::Db, false);
-                        self.set_state(ServiceType::Db, ServiceState::Starting);
-
-                        if let Err(e) = mgr.start(ServiceType::Db).await {
-                            error!(error = %e, "Failed to start DB");
-                            self.set_state(ServiceType::Db, ServiceState::Stopped);
-                        } else {
-                            self.set_state(ServiceType::Db, ServiceState::Running);
-                            self.record_activity(ServiceType::Db);
-                            // Wait a bit for DB to be ready
-                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                        }
-
-                        let _ = state_tx
-                            .send(ServiceStateChange {
-                                service_type: ServiceType::Db,
-                                new_state: self.get_state(ServiceType::Db),
-                            })
-                            .await;
-                    }
-                }
-
                 self.set_manually_off(service_type, false);
                 self.set_state(service_type, ServiceState::Starting);
 
@@ -304,7 +256,6 @@ impl PowersaveManager {
             }
             ServiceAction::Stop => {
                 info!(service_type = ?service_type, "Manual stop command");
-                // Don't set manually_off - allow auto-wake on next request
                 self.set_state(service_type, ServiceState::Stopping);
 
                 if let Err(e) = mgr.stop(service_type).await {
@@ -323,6 +274,7 @@ impl PowersaveManager {
     }
 
     /// Background task that checks for idle services and stops them.
+    /// Only code-server has idle timeout logic.
     pub async fn run_idle_checker(self: Arc<Self>, state_tx: mpsc::Sender<ServiceStateChange>) {
         info!("Starting idle checker task");
 
@@ -332,19 +284,10 @@ impl PowersaveManager {
             // Refresh actual service states from systemd
             self.refresh_states().await;
 
-            // Read timeouts without holding the guard across await
+            // Only check code-server idle timeout
             let code_server_timeout = *self.code_server_timeout.read().unwrap();
-            let app_timeout = *self.app_timeout.read().unwrap();
-
-            // Check code-server idle
             if let Some(timeout) = code_server_timeout {
                 self.check_idle_and_stop(ServiceType::CodeServer, timeout, &state_tx).await;
-            }
-
-            // Check app/db idle (they share the same timeout)
-            if let Some(timeout) = app_timeout {
-                self.check_idle_and_stop(ServiceType::App, timeout, &state_tx).await;
-                self.check_idle_and_stop(ServiceType::Db, timeout, &state_tx).await;
             }
         }
     }
@@ -354,21 +297,18 @@ impl PowersaveManager {
         // Clone the manager to avoid holding the guard across await
         let mgr = self.service_mgr.read().unwrap().clone();
 
-        // Only refresh if not manually off
+        // Only refresh code-server if not manually off
         if !self.code_server_manually_off.load(Ordering::Relaxed) {
             let state = mgr.get_state(ServiceType::CodeServer).await;
             *self.code_server_state.write().unwrap() = state;
         }
 
-        if !self.app_manually_off.load(Ordering::Relaxed) {
-            let state = mgr.get_state(ServiceType::App).await;
-            *self.app_state.write().unwrap() = state;
-        }
+        // App/Db always refresh from systemd (no manually_off tracking)
+        let state = mgr.get_state(ServiceType::App).await;
+        *self.app_state.write().unwrap() = state;
 
-        if !self.db_manually_off.load(Ordering::Relaxed) {
-            let state = mgr.get_state(ServiceType::Db).await;
-            *self.db_state.write().unwrap() = state;
-        }
+        let state = mgr.get_state(ServiceType::Db).await;
+        *self.db_state.write().unwrap() = state;
     }
 
     /// Check if a service is idle and stop it if so.
@@ -402,6 +342,13 @@ impl PowersaveManager {
             mgr.is_configured(service_type)
         };
         if !is_configured {
+            return;
+        }
+
+        // Check for active WebSocket connections before stopping code-server
+        if service_type == ServiceType::CodeServer && has_active_code_server_connections().await {
+            debug!(service_type = ?service_type, idle_secs = idle, "Active connections detected, extending idle timer");
+            self.record_activity(service_type);
             return;
         }
 

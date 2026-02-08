@@ -60,9 +60,6 @@ pub struct PowerPolicy {
     /// Idle timeout for code-server in seconds (None = never auto-stop).
     #[serde(default)]
     pub code_server_idle_timeout_secs: Option<u64>,
-    /// Idle timeout for app/db services in seconds (None = never auto-stop).
-    #[serde(default)]
-    pub app_idle_timeout_secs: Option<u64>,
 }
 
 /// Metrics reported by the agent.
@@ -80,8 +77,6 @@ pub struct AgentMetrics {
     pub cpu_percent: f32,
     /// Seconds since last code-server activity.
     pub code_server_idle_secs: u64,
-    /// Seconds since last app/db activity.
-    pub app_idle_secs: u64,
 }
 
 // ── Messages from Agent → Registry ──────────────────────────────
@@ -125,6 +120,14 @@ pub enum AgentMessage {
     PublishRoutes {
         routes: Vec<AgentRoute>,
     },
+    /// Agent reports its Dataverse schema metadata.
+    #[serde(rename = "schema_metadata")]
+    SchemaMetadata {
+        tables: Vec<SchemaTableInfo>,
+        relations: Vec<SchemaRelationInfo>,
+        version: u64,
+        db_size_bytes: u64,
+    },
 }
 
 /// A route published by an agent for reverse proxy registration.
@@ -136,6 +139,32 @@ pub struct AgentRoute {
     pub auth_required: bool,
     #[serde(default)]
     pub allowed_groups: Vec<String>,
+}
+
+/// Schema metadata reported by agent for Dataverse live view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaTableInfo {
+    pub name: String,
+    pub slug: String,
+    pub columns: Vec<SchemaColumnInfo>,
+    pub row_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaColumnInfo {
+    pub name: String,
+    pub field_type: String,
+    pub required: bool,
+    pub unique: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaRelationInfo {
+    pub from_table: String,
+    pub from_column: String,
+    pub to_table: String,
+    pub to_column: String,
+    pub relation_type: String,
 }
 
 // ── Messages from Registry → Agent ──────────────────────────────
@@ -255,6 +284,15 @@ pub enum HostAgentMessage {
         stdout: String,
         stderr: String,
     },
+    NetworkInterfaces(Vec<NetworkInterfaceInfo>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkInterfaceInfo {
+    pub name: String,
+    pub mac: String,
+    pub ipv4: Option<String>,
+    pub is_up: bool,
 }
 
 /// Host system metrics
@@ -327,6 +365,9 @@ pub enum HostRegistryMessage {
         container_name: String,
         command: Vec<String>,
     },
+    PowerOff,
+    Reboot,
+    SuspendHost,
 }
 
 #[cfg(test)]

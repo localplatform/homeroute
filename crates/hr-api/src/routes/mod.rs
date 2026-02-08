@@ -17,3 +17,4 @@ pub mod services;
 pub mod ws;
 pub mod firewall;
 pub mod applications;
+pub mod dataverse;

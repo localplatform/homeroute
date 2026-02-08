@@ -22,6 +22,9 @@ pub fn router() -> Router<ApiState> {
         // Host CRUD
         .route("/", get(list_hosts).post(add_host))
         .route("/groups", get(list_groups))
+        // Agent routes (must be before /{id} to avoid path conflicts)
+        .route("/agents/update", post(update_host_agents))
+        .route("/agents/binary", get(serve_host_agent_binary))
         .route("/{id}", get(get_host).put(update_host).delete(delete_host))
         // Connection
         .route("/{id}/test", post(test_connection))
@@ -30,6 +33,9 @@ pub fn router() -> Router<ApiState> {
         .route("/{id}/wake", post(wake))
         .route("/{id}/shutdown", post(shutdown_host))
         .route("/{id}/reboot", post(reboot_host))
+        .route("/{id}/sleep", post(sleep_host))
+        .route("/{id}/wol-mac", post(set_wol_mac))
+        .route("/{id}/metrics", get(get_host_metrics))
         .route("/bulk/wake", post(bulk_wake))
         .route("/bulk/shutdown", post(bulk_shutdown))
         // Container management on remote hosts
@@ -129,9 +135,25 @@ pub async fn ensure_hosts_file() {
 
 // ── Host CRUD ────────────────────────────────────────────────────────────
 
-async fn list_hosts() -> Json<Value> {
+async fn list_hosts(State(state): State<ApiState>) -> Json<Value> {
     let data = load_hosts().await;
-    let hosts = data.get("hosts").cloned().unwrap_or(json!([]));
+    let mut hosts = data.get("hosts").cloned().unwrap_or(json!([]));
+
+    // Override status based on live registry connections
+    if let Some(registry) = &state.registry {
+        let conns = registry.host_connections.read().await;
+        if let Some(arr) = hosts.as_array_mut() {
+            for host in arr.iter_mut() {
+                if let Some(id) = host.get("id").and_then(|i| i.as_str()) {
+                    let connected = conns.contains_key(id);
+                    if !connected && host.get("status").and_then(|s| s.as_str()) == Some("online") {
+                        host["status"] = json!("offline");
+                    }
+                }
+            }
+        }
+    }
+
     Json(json!({"success": true, "hosts": hosts}))
 }
 
@@ -343,7 +365,8 @@ async fn wake(Path(id): Path<String>) -> Json<Value> {
         None => return Json(json!({"success": false, "error": "Hote non trouve"})),
     };
 
-    let mac = match host.get("mac").and_then(|m| m.as_str()) {
+    let mac = match host.get("wol_mac").and_then(|m| m.as_str())
+        .or_else(|| host.get("mac").and_then(|m| m.as_str())) {
         Some(m) => m,
         None => return Json(json!({"success": false, "error": "Adresse MAC non configuree"})),
     };
@@ -354,23 +377,39 @@ async fn wake(Path(id): Path<String>) -> Json<Value> {
     }
 }
 
-async fn shutdown_host(Path(id): Path<String>) -> Json<Value> {
+async fn shutdown_host(Path(id): Path<String>, State(state): State<ApiState>) -> Json<Value> {
+    // Try agent first
+    if let Some(registry) = &state.registry {
+        if registry.send_host_command(
+            &id,
+            hr_registry::protocol::HostRegistryMessage::PowerOff,
+        ).await.is_ok() {
+            return Json(json!({"success": true, "action": "poweroff", "via": "agent"}));
+        }
+    }
+    // SSH fallback
     let data = load_hosts().await;
     let host = match find_host(&data, &id) {
         Some(h) => h,
         None => return Json(json!({"success": false, "error": "Hote non trouve"})),
     };
-
     ssh_power_action(&host, "poweroff || shutdown -h now").await
 }
 
-async fn reboot_host(Path(id): Path<String>) -> Json<Value> {
+async fn reboot_host(Path(id): Path<String>, State(state): State<ApiState>) -> Json<Value> {
+    if let Some(registry) = &state.registry {
+        if registry.send_host_command(
+            &id,
+            hr_registry::protocol::HostRegistryMessage::Reboot,
+        ).await.is_ok() {
+            return Json(json!({"success": true, "action": "reboot", "via": "agent"}));
+        }
+    }
     let data = load_hosts().await;
     let host = match find_host(&data, &id) {
         Some(h) => h,
         None => return Json(json!({"success": false, "error": "Hote non trouve"})),
     };
-
     ssh_power_action(&host, "reboot").await
 }
 
@@ -410,6 +449,130 @@ async fn bulk_shutdown(Json(body): Json<BulkRequest>) -> Json<Value> {
         }
     }
     Json(json!({"success": true, "results": results}))
+}
+
+async fn sleep_host(Path(id): Path<String>, State(state): State<ApiState>) -> Json<Value> {
+    if let Some(registry) = &state.registry {
+        if registry.send_host_command(
+            &id,
+            hr_registry::protocol::HostRegistryMessage::SuspendHost,
+        ).await.is_ok() {
+            return Json(json!({"success": true, "action": "sleep", "via": "agent"}));
+        }
+    }
+    let data = load_hosts().await;
+    let host = match find_host(&data, &id) {
+        Some(h) => h,
+        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
+    };
+    ssh_power_action(&host, "systemctl suspend").await
+}
+
+#[derive(Deserialize)]
+struct SetWolMacRequest {
+    mac: String,
+}
+
+async fn set_wol_mac(Path(id): Path<String>, Json(body): Json<SetWolMacRequest>) -> Json<Value> {
+    let mut data = load_hosts().await;
+    if let Some(host) = find_host_mut(&mut data, &id) {
+        host["wol_mac"] = json!(body.mac);
+        host["updatedAt"] = json!(chrono::Utc::now().to_rfc3339());
+    } else {
+        return Json(json!({"success": false, "error": "Hote non trouve"}));
+    }
+    if let Err(e) = save_hosts(&data).await {
+        return Json(json!({"success": false, "error": e}));
+    }
+    Json(json!({"success": true}))
+}
+
+async fn get_host_metrics(Path(id): Path<String>, State(state): State<ApiState>) -> Json<Value> {
+    let registry = match &state.registry {
+        Some(r) => r,
+        None => return Json(json!({"success": false, "error": "No registry"})),
+    };
+    let conns = registry.host_connections.read().await;
+    if let Some(conn) = conns.get(&id) {
+        if let Some(ref metrics) = conn.metrics {
+            return Json(json!({
+                "success": true,
+                "metrics": {
+                    "cpuPercent": metrics.cpu_percent,
+                    "memoryUsedBytes": metrics.memory_used_bytes,
+                    "memoryTotalBytes": metrics.memory_total_bytes,
+                    "diskUsedBytes": metrics.disk_used_bytes,
+                    "diskTotalBytes": metrics.disk_total_bytes,
+                    "loadAvg": metrics.load_avg,
+                }
+            }));
+        }
+    }
+    Json(json!({"success": false, "error": "No metrics available"}))
+}
+
+async fn update_host_agents(State(state): State<ApiState>) -> Json<Value> {
+    let registry = match &state.registry {
+        Some(r) => r,
+        None => return Json(json!({"success": false, "error": "No registry"})),
+    };
+
+    let binary_path = std::path::Path::new(HOST_AGENT_BINARY);
+    if !binary_path.exists() {
+        return Json(json!({"success": false, "error": "Host agent binary not found"}));
+    }
+
+    use std::io::Read;
+    let mut file = match std::fs::File::open(binary_path) {
+        Ok(f) => f,
+        Err(e) => return Json(json!({"success": false, "error": format!("Open binary: {}", e)})),
+    };
+    use ring::digest::{Context, SHA256};
+    let mut ctx = Context::new(&SHA256);
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = file.read(&mut buf).unwrap_or(0);
+        if n == 0 { break; }
+        ctx.update(&buf[..n]);
+    }
+    let sha256 = hex::encode(ctx.finish().as_ref());
+
+    let version = std::fs::metadata(binary_path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .map(|t| {
+            let dt: chrono::DateTime<chrono::Utc> = t.into();
+            dt.format("%Y%m%d-%H%M%S").to_string()
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let download_url = format!("http://{}:{}/api/hosts/agents/binary", HOMEROUTE_LAN_IP, API_PORT);
+
+    let conns = registry.host_connections.read().await;
+    let mut notified = 0u32;
+    for (_host_id, conn) in conns.iter() {
+        let msg = hr_registry::protocol::HostRegistryMessage::PushAgentUpdate {
+            version: version.clone(),
+            download_url: download_url.clone(),
+            sha256: sha256.clone(),
+        };
+        if conn.tx.send(msg).await.is_ok() {
+            notified += 1;
+        }
+    }
+
+    Json(json!({"success": true, "notified": notified, "version": version, "sha256": sha256}))
+}
+
+async fn serve_host_agent_binary() -> impl IntoResponse {
+    match tokio::fs::read(HOST_AGENT_BINARY).await {
+        Ok(data) => (
+            axum::http::StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+            data,
+        ).into_response(),
+        Err(_) => (axum::http::StatusCode::NOT_FOUND, "Binary not found").into_response(),
+    }
 }
 
 // ── Remote container management ──────────────────────────────────────────
@@ -580,6 +743,11 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
     // Track active transfers for remote→local migration (transfer_id → file + container_name)
     let mut active_transfers: std::collections::HashMap<String, (tokio::fs::File, String)> = std::collections::HashMap::new();
 
+    // Heartbeat timeout: agent sends every 5s, detect offline within 10s
+    let heartbeat_timeout = std::time::Duration::from_secs(10);
+    let timeout_sleep = tokio::time::sleep(heartbeat_timeout);
+    tokio::pin!(timeout_sleep);
+
     // Bidirectional message loop
     loop {
         tokio::select! {
@@ -593,10 +761,17 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
                     break;
                 }
             }
+            // Heartbeat timeout — host likely asleep or unreachable
+            _ = &mut timeout_sleep => {
+                tracing::warn!("Host agent heartbeat timeout: {} ({})", host_name, host_id);
+                break;
+            }
             // Messages from host-agent → registry
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
+                        // Any message from the agent resets the heartbeat deadline
+                        timeout_sleep.as_mut().reset(tokio::time::Instant::now() + heartbeat_timeout);
                         if let Ok(agent_msg) = serde_json::from_str::<HostAgentMessage>(&text) {
                             match agent_msg {
                                 HostAgentMessage::Heartbeat { .. } => {
@@ -604,7 +779,28 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
                                     update_host_last_seen(&host_id).await;
                                 }
                                 HostAgentMessage::Metrics(metrics) => {
-                                    registry.update_host_metrics(&host_id, metrics).await;
+                                    registry.update_host_metrics(&host_id, metrics.clone()).await;
+                                    let _ = state.events.host_metrics.send(hr_common::events::HostMetricsEvent {
+                                        host_id: host_id.clone(),
+                                        cpu_percent: metrics.cpu_percent,
+                                        memory_used_bytes: metrics.memory_used_bytes,
+                                        memory_total_bytes: metrics.memory_total_bytes,
+                                    });
+                                }
+                                HostAgentMessage::NetworkInterfaces(interfaces) => {
+                                    registry.update_host_interfaces(&host_id, interfaces.clone()).await;
+                                    // Persist to hosts.json
+                                    let mut data = load_hosts().await;
+                                    if let Some(host) = find_host_mut(&mut data, &host_id) {
+                                        let ifaces: Vec<serde_json::Value> = interfaces.iter().map(|i| json!({
+                                            "ifname": i.name,
+                                            "address": i.mac,
+                                            "ipv4": i.ipv4,
+                                            "is_up": i.is_up,
+                                        })).collect();
+                                        host["interfaces"] = json!(ifaces);
+                                        let _ = save_hosts(&data).await;
+                                    }
                                 }
                                 HostAgentMessage::ContainerList(containers) => {
                                     registry.update_host_containers(&host_id, containers).await;
@@ -628,6 +824,11 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
                                     } else {
                                         container_name
                                     };
+                                    if cname.is_empty() {
+                                        tracing::error!(transfer_id = %transfer_id, "ExportReady with unknown container_name");
+                                        registry.on_host_import_failed(&host_id, &transfer_id, "Unknown container name for transfer").await;
+                                        continue;
+                                    }
                                     tracing::info!(transfer_id = %transfer_id, container = %cname, size_bytes, "Host export ready, creating local transfer file");
                                     let path = format!("/tmp/{}.tar.gz", transfer_id);
                                     match tokio::fs::File::create(&path).await {
@@ -714,6 +915,17 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
 
 // ── Local import for remote→local migration ─────────────────────────────
 
+async fn lxc_cmd(args: &[&str], timeout_secs: u64) -> Result<std::process::Output, String> {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        tokio::process::Command::new("lxc").args(args).output(),
+    ).await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(e)) => Err(format!("lxc error: {e}")),
+        Err(_) => Err(format!("lxc {} timed out after {timeout_secs}s", args.first().unwrap_or(&""))),
+    }
+}
+
 /// Import a container locally after receiving all chunks from a remote host-agent.
 /// This mirrors the host-agent's `handle_import()` but runs on the master.
 async fn handle_local_import(
@@ -742,25 +954,32 @@ async fn handle_local_import(
         }
     }
 
-    // Pre-create workspace storage volume so import doesn't fail on missing volume reference
-    if !container_name.is_empty() {
-        let vol_name = format!("{container_name}-workspace");
-        tracing::info!(volume = %vol_name, "Pre-creating workspace storage volume for import");
-        let _ = tokio::process::Command::new("lxc")
-            .args(["storage", "volume", "create", "default", &vol_name])
-            .output()
-            .await;
+    // Clean up stale container on target (e.g., from a previous failed migration)
+    let _ = lxc_cmd(&["delete", &container_name, "--force"], 30).await;
+
+    // Ensure workspace volume exists before import (container config references it as a device)
+    let vol_name = format!("{container_name}-workspace");
+    let vol_check = lxc_cmd(&["storage", "volume", "show", "default", &vol_name], 30).await;
+    if !vol_check.map(|o| o.status.success()).unwrap_or(false) {
+        tracing::info!(volume = %vol_name, "Creating workspace volume before import");
+        let _ = lxc_cmd(&["storage", "volume", "create", "default", &vol_name], 30).await;
     }
 
     // Import the container
-    let import = tokio::process::Command::new("lxc")
-        .args(["import", &import_path])
-        .output()
-        .await;
+    let import = lxc_cmd(&["import", &import_path], 300).await;
 
     match import {
         Ok(output) if output.status.success() => {
             tracing::info!(transfer_id = %transfer_id, container = %container_name, "LXC import successful");
+
+            // Check if workspace volume was restored by import
+            let vol_name = format!("{container_name}-workspace");
+            let vol_check = lxc_cmd(&["storage", "volume", "show", "default", &vol_name], 30).await;
+            let vol_exists = vol_check.map(|o| o.status.success()).unwrap_or(false);
+            if !vol_exists {
+                tracing::info!(volume = %vol_name, "Workspace volume not in export, creating fresh");
+                let _ = lxc_cmd(&["storage", "volume", "create", "default", &vol_name], 30).await;
+            }
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -781,19 +1000,28 @@ async fn handle_local_import(
     tracing::info!(transfer_id = %transfer_id, container = %container_name, "Container imported, assigning profile and starting");
 
     // Assign the homeroute-agent profile (like the host-agent does)
-    let profile_assign = tokio::process::Command::new("lxc")
-        .args(["profile", "assign", &container_name, "default,homeroute-agent"])
-        .output()
-        .await;
-    if let Err(e) = &profile_assign {
-        tracing::warn!(container = %container_name, %e, "Failed to assign profile");
+    let profile_assign = lxc_cmd(&["profile", "assign", &container_name, "default,homeroute-agent"], 30).await;
+    match profile_assign {
+        Ok(output) if output.status.success() => {
+            tracing::info!(container = %container_name, "Profile assigned successfully");
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::error!(container = %container_name, %stderr, "Profile assignment failed");
+            registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Profile assignment failed: {stderr}")).await;
+            let _ = tokio::fs::remove_file(&import_path).await;
+            return;
+        }
+        Err(e) => {
+            tracing::error!(container = %container_name, %e, "Profile assignment command failed");
+            registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Profile command error: {e}")).await;
+            let _ = tokio::fs::remove_file(&import_path).await;
+            return;
+        }
     }
 
     // Start the container
-    let start = tokio::process::Command::new("lxc")
-        .args(["start", &container_name])
-        .output()
-        .await;
+    let start = lxc_cmd(&["start", &container_name], 60).await;
 
     match start {
         Ok(output) if output.status.success() => {

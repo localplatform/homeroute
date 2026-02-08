@@ -29,6 +29,43 @@ pub struct MigrationState {
     pub error: Option<String>,
 }
 
+/// Cached Dataverse schema metadata for an application.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CachedDataverseSchema {
+    pub app_id: String,
+    pub slug: String,
+    pub tables: Vec<CachedTableInfo>,
+    pub relations: Vec<CachedRelationInfo>,
+    pub version: u64,
+    pub db_size_bytes: u64,
+    pub last_updated: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CachedTableInfo {
+    pub name: String,
+    pub slug: String,
+    pub columns: Vec<CachedColumnInfo>,
+    pub row_count: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CachedColumnInfo {
+    pub name: String,
+    pub field_type: String,
+    pub required: bool,
+    pub unique: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CachedRelationInfo {
+    pub from_table: String,
+    pub from_column: String,
+    pub to_table: String,
+    pub to_column: String,
+    pub relation_type: String,
+}
+
 /// Shared application state for all API routes.
 #[derive(Clone)]
 pub struct ApiState {
@@ -47,6 +84,9 @@ pub struct ApiState {
 
     /// Active migrations keyed by transfer_id.
     pub migrations: Arc<RwLock<HashMap<String, MigrationState>>>,
+
+    /// Cached Dataverse schemas keyed by app_id.
+    pub dataverse_schemas: Arc<RwLock<HashMap<String, CachedDataverseSchema>>>,
 
     /// Path to dns-dhcp-config.json
     pub dns_dhcp_config_path: PathBuf,
