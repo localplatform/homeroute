@@ -267,9 +267,16 @@ pub enum HostAgentMessage {
         container_name: String,
         size_bytes: u64,
     },
-    TransferChunk {
+    /// Binary chunk announcement — the actual data follows as a WebSocket Binary frame.
+    TransferChunkBinary {
         transfer_id: String,
-        data: String, // base64-encoded chunk
+        sequence: u32,
+        size: u32,
+        checksum: u32, // xxhash32
+    },
+    WorkspaceReady {
+        transfer_id: String,
+        size_bytes: u64,
     },
     TransferComplete {
         transfer_id: String,
@@ -297,6 +304,16 @@ pub enum HostAgentMessage {
     AutoOffNotify {
         mode: AutoOffMode,
     },
+    /// Nspawn container list reported by host-agent.
+    NspawnContainerList(Vec<NspawnContainerInfo>),
+}
+
+/// Nspawn container info reported by host-agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NspawnContainerInfo {
+    pub name: String,
+    pub status: String,
+    pub storage_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -357,17 +374,16 @@ pub enum HostRegistryMessage {
     Shutdown {
         drain: bool,
     },
-    StartExport {
-        container_name: String,
+    /// Binary chunk announcement — the actual data follows as a WebSocket Binary frame.
+    ReceiveChunkBinary {
         transfer_id: String,
+        sequence: u32,
+        size: u32,
+        checksum: u32, // xxhash32
     },
-    StartImport {
-        container_name: String,
+    WorkspaceReady {
         transfer_id: String,
-    },
-    ReceiveChunk {
-        transfer_id: String,
-        data: String, // base64-encoded chunk
+        size_bytes: u64,
     },
     TransferComplete {
         transfer_id: String,
@@ -383,6 +399,47 @@ pub enum HostRegistryMessage {
     SetAutoOff {
         mode: AutoOffMode,
         minutes: u32,
+    },
+    /// Cancel an in-flight migration transfer.
+    CancelTransfer {
+        transfer_id: String,
+    },
+    // ── Nspawn container management ──────────────────────────────
+    CreateNspawnContainer {
+        app_id: String,
+        slug: String,
+        container_name: String,
+        storage_path: String,
+        bridge: String,
+        agent_token: String,
+        agent_config: String,
+    },
+    DeleteNspawnContainer {
+        container_name: String,
+        storage_path: String,
+    },
+    StartNspawnContainer {
+        container_name: String,
+        storage_path: String,
+    },
+    StopNspawnContainer {
+        container_name: String,
+    },
+    ExecInNspawnContainer {
+        request_id: String,
+        container_name: String,
+        command: Vec<String>,
+    },
+    StartNspawnExport {
+        container_name: String,
+        storage_path: String,
+        transfer_id: String,
+    },
+    StartNspawnImport {
+        container_name: String,
+        storage_path: String,
+        transfer_id: String,
+        network_mode: String,
     },
 }
 

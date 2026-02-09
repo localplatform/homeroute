@@ -25,11 +25,11 @@ import {
   Loader2,
   Play,
   Square,
-  ArrowRightLeft,
 } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
 import PageHeader from '../components/PageHeader';
+import useWebSocket from '../hooks/useWebSocket';
 import {
   getApplications,
   createApplication,
@@ -40,9 +40,7 @@ import {
   getUserGroups,
   startApplicationService,
   stopApplicationService,
-  migrateApplication,
   getHosts,
-  getActiveMigrations,
 } from '../api/client';
 
 const STATUS_BADGES = {
@@ -78,11 +76,7 @@ function Applications() {
   const [editingApp, setEditingApp] = useState(null);
   const [tokenModal, setTokenModal] = useState(null); // { name, token }
   const [terminalApp, setTerminalApp] = useState(null); // app object for terminal modal
-  const [migrateModal, setMigrateModal] = useState(null); // app object or null
   const [hosts, setHosts] = useState([]);
-  const [selectedHostId, setSelectedHostId] = useState('');
-  const [migrating, setMigrating] = useState(false);
-  const [migrations, setMigrations] = useState({}); // appId → { phase, progressPct, bytesTransferred, totalBytes, error }
 
   // Create form
   const [createForm, setCreateForm] = useState({
@@ -99,9 +93,6 @@ function Applications() {
 
   // Agent metrics state: { [appId]: { codeServerStatus, appStatus, dbStatus, memoryBytes, cpuPercent, ... } }
   const [appMetrics, setAppMetrics] = useState({});
-
-  // WebSocket for real-time updates
-  const wsRef = useRef(null);
 
   const fetchData = useCallback(async () => {
     try {
@@ -136,27 +127,6 @@ function Applications() {
       if (groupsRes.data?.success) setUserGroups(groupsRes.data.groups || []);
       const hostList = hostsRes.data?.hosts || [];
       setHosts(hostList);
-
-      // Restore active migrations
-      try {
-        const migRes = await getActiveMigrations();
-        const active = migRes.data.migrations || [];
-        const migState = {};
-        for (const m of active) {
-          migState[m.app_id] = {
-            phase: m.phase,
-            progressPct: m.progress_pct,
-            bytesTransferred: m.bytes_transferred,
-            totalBytes: m.total_bytes,
-            error: m.error,
-          };
-        }
-        if (Object.keys(migState).length > 0) {
-          setMigrations(migState);
-        }
-      } catch (e) {
-        // Ignore - migrations restore is best-effort
-      }
     } catch (error) {
       console.error('Error:', error);
       setMessage({ type: 'error', text: 'Erreur de chargement' });
@@ -169,95 +139,54 @@ function Applications() {
     fetchData();
   }, [fetchData]);
 
-  // WebSocket connection for agent status updates
+  // WebSocket connection for agent status updates (with auto-reconnect)
   const fetchDataRef = useRef(fetchData);
   fetchDataRef.current = fetchData;
 
-  useEffect(() => {
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${proto}//${window.location.host}/api/ws`);
-    wsRef.current = ws;
-
-    ws.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        if (msg.type === 'agent:status') {
-          const { appId, status, message: stepMsg } = msg.data;
-          setApplications(prev => {
-            const old = prev.find(a => a.id === appId);
-            const wasDeploying = old && (old.status === 'deploying' || old._deployMessage);
-            const nowReady = status === 'connected' || (status === 'pending' && wasDeploying);
-            // If transitioning out of deploying, refresh full data to get IP, version, etc.
-            if (wasDeploying && nowReady) {
-              setTimeout(() => fetchDataRef.current(), 500);
-            }
-            return prev.map(app =>
-              app.id === appId
-                ? { ...app, status, _deployMessage: status === 'deploying' ? (stepMsg || null) : null }
-                : app
-            );
-          });
-        } else if (msg.type === 'agent:metrics') {
-          // Update agent metrics for an application
-          const { appId, codeServerStatus, appStatus, dbStatus, memoryBytes, cpuPercent, codeServerIdleSecs } = msg.data;
-          setAppMetrics(prev => ({
-            ...prev,
-            [appId]: { codeServerStatus, appStatus, dbStatus, memoryBytes, cpuPercent, codeServerIdleSecs }
-          }));
-        } else if (msg.type === 'agent:service-command') {
-          // Service state changed - update metrics immediately for instant UI feedback
-          const { appId, serviceType, action, success } = msg.data;
-          if (success && appId) {
-            // Map action to status: started->running, stopped->stopped, starting->starting, stopping->stopping
-            const statusMap = { started: 'running', stopped: 'stopped', starting: 'starting', stopping: 'stopping' };
-            const newStatus = statusMap[action] || action;
-
-            // Update the correct status field based on serviceType
-            setAppMetrics(prev => {
-              const current = prev[appId] || {};
-              const updated = { ...current };
-              if (serviceType === 'codeserver') updated.codeServerStatus = newStatus;
-              return { ...prev, [appId]: updated };
-            });
-          }
-        } else if (msg.type === 'hosts:status') {
-          const { hostId, status } = msg.data;
-          setHosts(prev => prev.map(h =>
-            h.id === hostId ? { ...h, status } : h
-          ));
-        } else if (msg.type === 'migration:progress') {
-          const m = msg.data;
-          setMigrations(prev => ({
-            ...prev,
-            [m.appId]: {
-              phase: m.phase,
-              progressPct: m.progressPct,
-              bytesTransferred: m.bytesTransferred,
-              totalBytes: m.totalBytes,
-              error: m.error,
-            }
-          }));
-          // Auto-clear after complete/failed
-          if (m.phase === 'complete' || m.phase === 'failed') {
-            setTimeout(() => {
-              setMigrations(prev => {
-                const next = { ...prev };
-                delete next[m.appId];
-                return next;
-              });
-              if (m.phase === 'complete') {
-                fetchDataRef.current(); // refresh the list
-              }
-            }, 5000);
-          }
+  useWebSocket({
+    'agent:status': (data) => {
+      const { appId, status, message: stepMsg } = data;
+      setApplications(prev => {
+        const old = prev.find(a => a.id === appId);
+        const wasDeploying = old && (old.status === 'deploying' || old._deployMessage);
+        const nowReady = status === 'connected' || (status === 'pending' && wasDeploying);
+        if (wasDeploying && nowReady) {
+          setTimeout(() => fetchDataRef.current(), 500);
         }
-      } catch {}
-    };
-
-    return () => {
-      ws.close();
-    };
-  }, []);
+        return prev.map(app =>
+          app.id === appId
+            ? { ...app, status, _deployMessage: status === 'deploying' ? (stepMsg || null) : null }
+            : app
+        );
+      });
+    },
+    'agent:metrics': (data) => {
+      const { appId, codeServerStatus, appStatus, dbStatus, memoryBytes, cpuPercent, codeServerIdleSecs } = data;
+      setAppMetrics(prev => ({
+        ...prev,
+        [appId]: { codeServerStatus, appStatus, dbStatus, memoryBytes, cpuPercent, codeServerIdleSecs }
+      }));
+    },
+    'agent:service-command': (data) => {
+      const { appId, serviceType, action, success } = data;
+      if (success && appId) {
+        const statusMap = { started: 'running', stopped: 'stopped', starting: 'starting', stopping: 'stopping' };
+        const newStatus = statusMap[action] || action;
+        setAppMetrics(prev => {
+          const current = prev[appId] || {};
+          const updated = { ...current };
+          if (serviceType === 'codeserver') updated.codeServerStatus = newStatus;
+          return { ...prev, [appId]: updated };
+        });
+      }
+    },
+    'hosts:status': (data) => {
+      const { hostId, status } = data;
+      setHosts(prev => prev.map(h =>
+        h.id === hostId ? { ...h, status } : h
+      ));
+    },
+  });
 
   // Auto-dismiss messages
   useEffect(() => {
@@ -434,32 +363,6 @@ function Applications() {
     }
   }
 
-  const openMigrateModal = async (app) => {
-    try {
-      const res = await getHosts();
-      const hostList = res.data.hosts || res.data || [];
-      setHosts(hostList);
-      setMigrateModal(app);
-      setSelectedHostId('');
-    } catch (err) {
-      console.error('Failed to fetch hosts:', err);
-    }
-  };
-
-  const handleMigrate = async () => {
-    if (!migrateModal || !selectedHostId) return;
-    setMigrating(true);
-    try {
-      await migrateApplication(migrateModal.id, selectedHostId);
-      setMigrateModal(null);
-    } catch (err) {
-      console.error('Migration failed:', err);
-      alert(err.response?.data?.error || 'Migration failed');
-    } finally {
-      setMigrating(false);
-    }
-  };
-
   async function handleServiceStart(appId, serviceType) {
     try {
       const res = await startApplicationService(appId, serviceType);
@@ -484,64 +387,12 @@ function Applications() {
     }
   }
 
-  // Format bytes to human readable
   function formatBytes(bytes) {
     if (bytes === 0) return '0 B';
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-  }
-
-  // MigrationProgress inline component
-  function MigrationProgress({ migration }) {
-    if (!migration) return null;
-
-    const phaseLabels = {
-      stopping: 'Arret du service...',
-      exporting: 'Export du container...',
-      transferring: 'Transfert en cours...',
-      importing: 'Import sur la cible...',
-      starting: 'Demarrage...',
-      complete: 'Migration terminee!',
-      failed: 'Erreur de migration',
-    };
-
-    const formatBytes = (bytes) => {
-      if (bytes === 0) return '0 B';
-      const k = 1024;
-      const sizes = ['B', 'KB', 'MB', 'GB'];
-      const i = Math.floor(Math.log(bytes) / Math.log(k));
-      return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-    };
-
-    return (
-      <div className="p-2 bg-gray-700/50">
-        <div className="flex items-center justify-between mb-1">
-          <span className="text-xs text-gray-300">
-            {phaseLabels[migration.phase] || migration.phase}
-          </span>
-          <span className="text-xs text-gray-400">{migration.progressPct}%</span>
-        </div>
-        <div className="w-full bg-gray-600 h-1.5">
-          <div
-            className={`h-1.5 transition-all duration-500 ${
-              migration.phase === 'failed' ? 'bg-red-500' :
-              migration.phase === 'complete' ? 'bg-green-500' : 'bg-blue-500'
-            }`}
-            style={{ width: `${migration.progressPct}%` }}
-          />
-        </div>
-        {migration.totalBytes > 0 && (
-          <div className="text-xs text-gray-500 mt-1">
-            {formatBytes(migration.bytesTransferred)} / {formatBytes(migration.totalBytes)}
-          </div>
-        )}
-        {migration.error && (
-          <div className="text-xs text-red-400 mt-1 select-all cursor-text">{migration.error}</div>
-        )}
-      </div>
-    );
   }
 
   if (loading) {
@@ -654,8 +505,6 @@ function Applications() {
                       ...group.apps.map(app => {
                         const isDeploying = app.status === 'deploying';
                         const metrics = appMetrics[app.id];
-                        const isMigrating = !!migrations[app.id];
-                        const disabled = isMigrating || isHostOffline;
                         return (
                           <tr key={app.id} className={`border-b border-gray-800 hover:bg-gray-800/30 ${isHostOffline ? 'opacity-60' : ''}`}>
                             {/* Application info */}
@@ -691,9 +540,7 @@ function Applications() {
 
                             {/* Status */}
                             <td className="py-3 px-3">
-                              {isMigrating ? (
-                                <MigrationProgress migration={migrations[app.id]} />
-                              ) : isHostOffline ? (
+                              {isHostOffline ? (
                                 <span className="flex items-center gap-1 text-xs px-2 py-0.5 text-gray-500 bg-gray-800/50">
                                   <WifiOff className="w-3 h-3" />
                                   Indisponible
@@ -710,7 +557,7 @@ function Applications() {
 
                             {/* Services */}
                             <td className="py-3 px-3">
-                              {disabled || !metrics ? (
+                              {isHostOffline || !metrics ? (
                                 <span className="text-xs text-gray-600">-</span>
                               ) : (
                                 <div className="flex items-center gap-2 text-xs">
@@ -739,7 +586,7 @@ function Applications() {
 
                             {/* CPU */}
                             <td className="py-3 px-3 text-right">
-                              {disabled ? (
+                              {isHostOffline ? (
                                 <span className="text-xs text-gray-600">-</span>
                               ) : (
                                 <span className={`font-mono text-sm ${
@@ -754,7 +601,7 @@ function Applications() {
 
                             {/* RAM */}
                             <td className="py-3 px-3 text-right">
-                              {disabled ? (
+                              {isHostOffline ? (
                                 <span className="text-xs text-gray-600">-</span>
                               ) : (
                                 <span className="font-mono text-sm text-gray-400">
@@ -765,7 +612,7 @@ function Applications() {
 
                             {/* Actions */}
                             <td className="py-3 px-3">
-                              <div className={`flex items-center justify-end gap-1 ${disabled ? 'opacity-50 pointer-events-none' : ''}`}>
+                              <div className={`flex items-center justify-end gap-1 ${isHostOffline ? 'opacity-50 pointer-events-none' : ''}`}>
                                 {app.code_server_enabled !== false && baseDomain && (
                                   <a
                                     href={`https://code.${app.slug}.${baseDomain}`}
@@ -779,23 +626,15 @@ function Applications() {
                                 )}
                                 <button
                                   onClick={() => setTerminalApp(app)}
-                                  disabled={disabled}
+                                  disabled={isHostOffline}
                                   className="p-1.5 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-900/30 transition-colors"
                                   title="Terminal"
                                 >
                                   <Terminal className="w-4 h-4" />
                                 </button>
                                 <button
-                                  onClick={() => openMigrateModal(app)}
-                                  disabled={disabled}
-                                  className="p-1.5 text-gray-400 hover:text-blue-400 hover:bg-gray-700 rounded transition-colors"
-                                  title="Migrer vers un autre hote"
-                                >
-                                  <ArrowRightLeft className="w-4 h-4" />
-                                </button>
-                                <button
                                   onClick={() => handleToggle(app.id, !app.enabled)}
-                                  disabled={disabled}
+                                  disabled={isHostOffline}
                                   className={`p-1.5 transition-colors ${
                                     app.enabled ? 'text-green-400 hover:bg-green-900/30' : 'text-gray-500 hover:bg-gray-700/30'
                                   }`}
@@ -805,7 +644,7 @@ function Applications() {
                                 </button>
                                 <button
                                   onClick={() => openEditModal(app)}
-                                  disabled={disabled}
+                                  disabled={isHostOffline}
                                   className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 transition-colors"
                                   title="Modifier"
                                 >
@@ -813,7 +652,7 @@ function Applications() {
                                 </button>
                                 <button
                                   onClick={() => handleDelete(app.id, app.name)}
-                                  disabled={disabled}
+                                  disabled={isHostOffline}
                                   className="p-1.5 text-red-400 hover:text-red-300 hover:bg-red-900/30 transition-colors"
                                   title="Supprimer"
                                 >
@@ -1365,57 +1204,6 @@ function Applications() {
             </div>
             <div className="flex justify-end mt-4">
               <Button onClick={() => setTokenModal(null)}>Fermer</Button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Migrate Modal */}
-      {migrateModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 p-6 w-full max-w-md border border-gray-700">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold">Migrer {migrateModal.name}</h3>
-              <button onClick={() => setMigrateModal(null)} className="p-1 text-gray-400 hover:text-white">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            <p className="text-sm text-gray-400 mb-4">
-              Selectionnez l&apos;hote de destination pour migrer cette application.
-            </p>
-            <select
-              value={selectedHostId}
-              onChange={(e) => setSelectedHostId(e.target.value)}
-              className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white mb-4"
-            >
-              <option value="">Choisir un hote...</option>
-              {hosts
-                .filter(h => h.id !== migrateModal.host_id && h.name !== 'HomeRoute')
-                .map(h => (
-                  <option key={h.id} value={h.id}>
-                    {h.name} ({h.host}) — {h.status}
-                  </option>
-                ))
-              }
-              {migrateModal.host_id !== 'local' && (
-                <option value="local">HomeRoute (local)</option>
-              )}
-            </select>
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setMigrateModal(null)}
-                className="px-4 py-2 text-gray-300 hover:text-white transition-colors"
-              >
-                Annuler
-              </button>
-              <button
-                onClick={handleMigrate}
-                disabled={!selectedHostId || migrating}
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white transition-colors flex items-center gap-2"
-              >
-                {migrating && <Loader2 className="w-4 h-4 animate-spin" />}
-                Migrer
-              </button>
             </div>
           </div>
         </div>

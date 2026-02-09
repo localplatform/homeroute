@@ -9,13 +9,15 @@ use hr_dhcp::SharedDhcpState;
 
 use hr_proxy::{ProxyState, TlsManager};
 use hr_registry::AgentRegistry;
+use crate::container_manager::ContainerManager;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::RwLock;
 
 /// In-memory state of an active migration.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 pub struct MigrationState {
     pub app_id: String,
     pub transfer_id: String,
@@ -27,6 +29,9 @@ pub struct MigrationState {
     pub total_bytes: u64,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub error: Option<String>,
+    /// Cancel flag: set by the cancel endpoint, checked by the migration task.
+    #[serde(skip)]
+    pub cancelled: Arc<AtomicBool>,
 }
 
 /// Cached Dataverse schema metadata for an application.
@@ -89,6 +94,9 @@ pub struct ApiState {
     pub service_registry: SharedServiceRegistry,
 
     pub registry: Option<Arc<AgentRegistry>>,
+
+    /// Container V2 manager (nspawn).
+    pub container_manager: Option<Arc<ContainerManager>>,
 
     /// Active migrations keyed by transfer_id.
     pub migrations: Arc<RwLock<HashMap<String, MigrationState>>>,

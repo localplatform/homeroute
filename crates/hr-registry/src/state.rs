@@ -29,9 +29,16 @@ struct AgentConnection {
     last_heartbeat: DateTime<Utc>,
 }
 
+/// Wrapper for outgoing messages to host-agents: text (JSON) or raw binary.
+#[derive(Debug)]
+pub enum OutgoingHostMessage {
+    Text(HostRegistryMessage),
+    Binary(Vec<u8>),
+}
+
 /// In-memory host-agent connection state.
 pub struct HostConnection {
-    pub tx: mpsc::Sender<HostRegistryMessage>,
+    pub tx: mpsc::Sender<OutgoingHostMessage>,
     pub host_name: String,
     pub connected_at: DateTime<Utc>,
     pub last_heartbeat: DateTime<Utc>,
@@ -66,6 +73,8 @@ pub struct AgentRegistry {
     exec_signals: Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<(bool, String, String)>>>>,
     /// Maps transfer_id → container_name for in-flight migrations (set when StartExport is sent)
     pub transfer_container_names: Arc<RwLock<HashMap<String, String>>>,
+    /// Maps transfer_id → (target_host_id, container_name) for remote→remote relay migrations
+    pub transfer_relay_targets: Arc<RwLock<HashMap<String, (String, String)>>>,
     /// Host power state machine for WOL dedup, conflict detection, and progress tracking.
     host_power_states: Arc<RwLock<HashMap<String, HostPowerInfo>>>,
     /// ACME manager for per-app wildcard certificate lifecycle.
@@ -104,6 +113,7 @@ impl AgentRegistry {
             migration_signals: Arc::new(RwLock::new(HashMap::new())),
             exec_signals: Arc::new(RwLock::new(HashMap::new())),
             transfer_container_names: Arc::new(RwLock::new(HashMap::new())),
+            transfer_relay_targets: Arc::new(RwLock::new(HashMap::new())),
             host_power_states: Arc::new(RwLock::new(HashMap::new())),
             acme: RwLock::new(None),
         }
@@ -171,6 +181,52 @@ impl AgentRegistry {
         tokio::spawn(async move {
             registry.run_deploy_background(&app_id, &slug, &container_name, &token_for_deploy).await;
         });
+
+        Ok((app, token_clear))
+    }
+
+    /// Create an application record without spawning LXD background deployment.
+    /// Used by Containers V2 which manage their own deployment lifecycle.
+    /// Returns the application (status=Deploying) and the cleartext token.
+    pub async fn create_application_headless(
+        self: &Arc<Self>,
+        req: CreateApplicationRequest,
+    ) -> Result<(Application, String)> {
+        let token_clear = generate_token();
+        let token_hash = hash_token(&token_clear)?;
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let container_name = format!("hr-v2-{}", req.slug);
+
+        let app = Application {
+            id: id.clone(),
+            name: req.name,
+            slug: req.slug,
+            host_id: req.host_id.unwrap_or_else(|| "local".to_string()),
+            enabled: true,
+            container_name: container_name.clone(),
+            token_hash,
+            ipv4_address: None,
+            status: AgentStatus::Deploying,
+            last_heartbeat: None,
+            agent_version: None,
+            created_at: Utc::now(),
+            frontend: req.frontend,
+            apis: req.apis,
+            code_server_enabled: req.code_server_enabled,
+            services: req.services,
+            power_policy: req.power_policy,
+            wake_page_enabled: req.wake_page_enabled,
+            metrics: None,
+        };
+
+        {
+            let mut state = self.state.write().await;
+            state.applications.push(app.clone());
+        }
+        self.persist().await?;
+
+        info!(app = app.slug, container = container_name, "Application created (headless, no LXD deploy)");
 
         Ok((app, token_clear))
     }
@@ -623,7 +679,7 @@ impl AgentRegistry {
         &self,
         host_id: String,
         host_name: String,
-        tx: mpsc::Sender<HostRegistryMessage>,
+        tx: mpsc::Sender<OutgoingHostMessage>,
         version: String,
     ) {
         let conn = HostConnection {
@@ -669,6 +725,11 @@ impl AgentRegistry {
 
     pub async fn is_host_connected(&self, host_id: &str) -> bool {
         self.host_connections.read().await.contains_key(host_id)
+    }
+
+    /// Check if an agent (LXC app) has an active WebSocket connection.
+    pub async fn is_agent_connected(&self, app_id: &str) -> bool {
+        self.connections.read().await.contains_key(app_id)
     }
 
     // ── Host power state machine ────────────────────────────────
@@ -945,14 +1006,46 @@ impl AgentRegistry {
         host_id: &str,
         msg: HostRegistryMessage,
     ) -> Result<(), String> {
-        let conns = self.host_connections.read().await;
-        match conns.get(host_id) {
-            Some(conn) => conn
-                .tx
-                .send(msg)
-                .await
-                .map_err(|e| format!("Failed to send to host {}: {}", host_id, e)),
-            None => Err(format!("Host {} not connected", host_id)),
+        // Clone the sender and release the lock BEFORE sending,
+        // to avoid holding host_connections read lock during channel send
+        // (which would deadlock with heartbeat/status write locks).
+        let tx = {
+            let conns = self.host_connections.read().await;
+            match conns.get(host_id) {
+                Some(conn) => conn.tx.clone(),
+                None => return Err(format!("Host {} not connected", host_id)),
+            }
+        };
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            tx.send(OutgoingHostMessage::Text(msg)),
+        ).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(format!("Failed to send to host {}: {}", host_id, e)),
+            Err(_) => Err(format!("Timeout sending to host {} (channel full for 30s)", host_id)),
+        }
+    }
+
+    /// Send raw binary data to a host-agent (for migration chunk relay).
+    pub async fn send_host_binary(
+        &self,
+        host_id: &str,
+        data: Vec<u8>,
+    ) -> Result<(), String> {
+        let tx = {
+            let conns = self.host_connections.read().await;
+            match conns.get(host_id) {
+                Some(conn) => conn.tx.clone(),
+                None => return Err(format!("Host {} not connected", host_id)),
+            }
+        };
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            tx.send(OutgoingHostMessage::Binary(data)),
+        ).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(format!("Failed to send binary to host {}: {}", host_id, e)),
+            Err(_) => Err(format!("Timeout sending binary to host {} (channel full for 30s)", host_id)),
         }
     }
 
@@ -972,6 +1065,24 @@ impl AgentRegistry {
     /// Retrieve and remove the container_name for a given transfer_id.
     pub async fn take_transfer_container_name(&self, transfer_id: &str) -> Option<String> {
         self.transfer_container_names.write().await.remove(transfer_id)
+    }
+
+    /// Store relay target for remote→remote migration (transfer_id → (target_host_id, container_name)).
+    pub async fn set_transfer_relay_target(&self, transfer_id: &str, target_host_id: &str, container_name: &str) {
+        self.transfer_relay_targets.write().await.insert(
+            transfer_id.to_string(),
+            (target_host_id.to_string(), container_name.to_string()),
+        );
+    }
+
+    /// Get relay target for a transfer (non-destructive read).
+    pub async fn get_transfer_relay_target(&self, transfer_id: &str) -> Option<(String, String)> {
+        self.transfer_relay_targets.read().await.get(transfer_id).cloned()
+    }
+
+    /// Remove relay target for a completed/failed transfer.
+    pub async fn take_transfer_relay_target(&self, transfer_id: &str) -> Option<(String, String)> {
+        self.transfer_relay_targets.write().await.remove(transfer_id)
     }
 
     pub async fn on_host_import_complete(&self, _host_id: &str, transfer_id: &str, container_name: &str) {
@@ -1676,6 +1787,16 @@ WantedBy=multi-user.target
             let removed = before - names.len();
             if removed > 0 {
                 tracing::info!("Cleaned up {} stale transfer container name mappings", removed);
+            }
+        }
+        {
+            let signal_keys: std::collections::HashSet<String> = self.migration_signals.read().await.keys().cloned().collect();
+            let mut relays = self.transfer_relay_targets.write().await;
+            let before = relays.len();
+            relays.retain(|tid, _| signal_keys.contains(tid));
+            let removed = before - relays.len();
+            if removed > 0 {
+                tracing::info!("Cleaned up {} stale transfer relay target mappings", removed);
             }
         }
     }

@@ -11,6 +11,12 @@ pub struct Config {
     /// Physical LAN interface for macvlan (e.g., "enp7s0f0"). Required for container migrations.
     #[serde(default)]
     pub lan_interface: Option<String>,
+    /// Storage path for nspawn containers (default: /var/lib/machines).
+    #[serde(default)]
+    pub container_storage_path: Option<String>,
+    /// Container runtime: "lxd" (default) or "nspawn".
+    #[serde(default)]
+    pub container_runtime: Option<String>,
 }
 
 fn default_reconnect() -> u64 {

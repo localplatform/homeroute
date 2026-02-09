@@ -63,6 +63,7 @@ crates/
 ## Cloudflare
 
 ⚠️ **JAMAIS désactiver le mode proxied Cloudflare** - il convertit IPv6 → IPv4 pour les clients externes.
+Sauf en mode Cloud Gateway
 
 Les enregistrements DNS sont synchronisés automatiquement:
 - **Cloudflare**: AAAA → IPv6 agent (proxied)

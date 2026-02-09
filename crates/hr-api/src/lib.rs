@@ -1,3 +1,5 @@
+pub mod container_manager;
+pub mod local_host;
 pub mod routes;
 pub mod state;
 
@@ -53,6 +55,7 @@ fn api_routes() -> Router<ApiState> {
         .nest("/services", routes::services::router())
 
         .nest("/applications", routes::applications::router())
+        .nest("/containers", routes::containers::router())
         .nest("/dataverse", routes::dataverse::router())
         .nest("/cloud-relay", routes::cloud_relay::router())
         .merge(routes::ws::router())

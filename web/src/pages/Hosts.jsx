@@ -30,7 +30,8 @@ export default function Hosts() {
     host: '',
     port: 22,
     username: 'root',
-    password: ''
+    password: '',
+    container_storage_path: '/var/lib/machines',
   });
   const [addingHost, setAddingHost] = useState(false);
   const [addError, setAddError] = useState('');
@@ -194,7 +195,7 @@ export default function Hosts() {
   // ── Form helpers ────────────────────────────
 
   const resetForm = () => {
-    setFormData({ name: '', host: '', port: 22, username: 'root', password: '' });
+    setFormData({ name: '', host: '', port: 22, username: 'root', password: '', container_storage_path: '/var/lib/machines' });
     setAddError('');
   };
 
@@ -513,6 +514,18 @@ export default function Hosts() {
                   required
                 />
                 <p className="text-xs text-gray-400 mt-1">Utilise une seule fois pour configurer l'authentification par cle SSH</p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1">Chemin de stockage conteneurs</label>
+                <input
+                  type="text"
+                  value={formData.container_storage_path}
+                  onChange={(e) => setFormData({ ...formData, container_storage_path: e.target.value })}
+                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white focus:ring-2 focus:ring-blue-500"
+                  placeholder="/var/lib/machines"
+                />
+                <p className="text-xs text-gray-400 mt-1">Repertoire de stockage des conteneurs nspawn sur cet hote</p>
               </div>
 
               {addError && (

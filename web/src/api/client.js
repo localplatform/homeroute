@@ -75,9 +75,6 @@ export const startApplicationService = (appId, serviceType) =>
   api.post(`/applications/${appId}/services/${serviceType}/start`);
 export const stopApplicationService = (appId, serviceType) =>
   api.post(`/applications/${appId}/services/${serviceType}/stop`);
-// Application Migration
-export const migrateApplication = (id, targetHostId) => api.post(`/applications/${id}/migrate`, { target_host_id: targetHostId });
-export const getActiveMigrations = () => api.get('/applications/active-migrations');
 
 // Rust Proxy
 export const getRustProxyStatus = () => api.get('/rust-proxy/status');
@@ -165,6 +162,19 @@ export const disableCloudRelay = () => api.post('/cloud-relay/disable');
 export const bootstrapCloudRelay = (data) => api.post('/cloud-relay/bootstrap', data, { timeout: 300000 });
 export const updateCloudRelayConfig = (config) => api.put('/cloud-relay/config', config);
 export const pushCloudRelayUpdate = () => api.post('/cloud-relay/update', {}, { timeout: 120000 });
+
+// Containers V2 (nspawn)
+export const getContainersV2 = () => api.get('/containers');
+export const createContainerV2 = (data) => api.post('/containers', data);
+export const updateContainerV2 = (id, data) => api.put(`/containers/${id}`, data);
+export const deleteContainerV2 = (id) => api.delete(`/containers/${id}`);
+export const startContainerV2 = (id) => api.post(`/containers/${id}/start`);
+export const stopContainerV2 = (id) => api.post(`/containers/${id}/stop`);
+export const migrateContainerV2 = (id, targetHostId) => api.post(`/containers/${id}/migrate`, { target_host_id: targetHostId });
+export const getMigrationStatusV2 = (id) => api.get(`/containers/${id}/migrate/status`);
+export const cancelMigrationV2 = (id) => api.post(`/containers/${id}/migrate/cancel`);
+export const getContainersV2Config = () => api.get('/containers/config');
+export const updateContainersV2Config = (data) => api.put('/containers/config', data);
 
 // Dataverse
 export const getDataverseOverview = () => api.get('/dataverse/overview');

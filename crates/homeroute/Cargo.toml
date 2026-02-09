@@ -20,6 +20,7 @@ hr-api = { path = "../hr-api" }
 
 hr-registry = { path = "../hr-registry" }
 hr-lxd = { path = "../hr-lxd" }
+hr-container = { path = "../hr-container" }
 hr-tunnel = { path = "../hr-tunnel" }
 
 uuid = { workspace = true }

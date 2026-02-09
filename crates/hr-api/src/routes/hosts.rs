@@ -664,7 +664,7 @@ async fn update_host_agents(State(state): State<ApiState>) -> Json<Value> {
             download_url: download_url.clone(),
             sha256: sha256.clone(),
         };
-        if conn.tx.send(msg).await.is_ok() {
+        if conn.tx.send(hr_registry::OutgoingHostMessage::Text(msg)).await.is_ok() {
             notified += 1;
         }
     }
@@ -775,7 +775,6 @@ async fn host_agent_ws(
 
 async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
     use hr_registry::protocol::{HostAgentMessage, HostRegistryMessage};
-    use hr_common::events::HostStatusEvent;
 
     let registry = match &state.registry {
         Some(r) => r.clone(),
@@ -842,7 +841,7 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
     tracing::info!("Host agent authenticated: {} ({})", host_name, host_id);
 
     // Register connection
-    let (tx, mut rx) = mpsc::channel::<HostRegistryMessage>(32);
+    let (tx, mut rx) = mpsc::channel::<hr_registry::OutgoingHostMessage>(512);
     registry.on_host_connected(host_id.clone(), host_name.clone(), tx, version).await;
 
     // Mark host online
@@ -873,8 +872,25 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
         }
     }
 
-    // Track active transfers for remote→local migration (transfer_id → file + container_name)
-    let mut active_transfers: std::collections::HashMap<String, (tokio::fs::File, String)> = std::collections::HashMap::new();
+    // Track which transfer_ids are being relayed (remote→remote)
+    let mut relay_transfers: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Track local nspawn imports (remote→local)
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum TransferPhase { ReceivingContainer, ReceivingWorkspace }
+    struct ActiveTransfer {
+        container_name: String,
+        storage_path: String,
+        network_mode: String,
+        file: tokio::fs::File,
+        phase: TransferPhase,
+        workspace_file: Option<tokio::fs::File>,
+    }
+    let mut active_transfers: std::collections::HashMap<String, ActiveTransfer> = std::collections::HashMap::new();
+
+    // Pending binary chunk metadata: (transfer_id, sequence, checksum)
+    // Set when TransferChunkBinary text arrives, consumed when the next Binary frame arrives.
+    let mut pending_binary_meta: Option<(String, u32, u32)> = None;
 
     // Heartbeat timeout: agent sends every 5s, detect offline within 10s
     let heartbeat_timeout = std::time::Duration::from_secs(10);
@@ -886,12 +902,27 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
         tokio::select! {
             // Messages from registry → host-agent
             Some(msg) = rx.recv() => {
-                let text = match serde_json::to_string(&msg) {
-                    Ok(t) => t,
-                    Err(_) => continue,
+                let ws_msg = match msg {
+                    hr_registry::OutgoingHostMessage::Text(m) => {
+                        match serde_json::to_string(&m) {
+                            Ok(t) => Message::Text(t.into()),
+                            Err(_) => continue,
+                        }
+                    }
+                    hr_registry::OutgoingHostMessage::Binary(data) => {
+                        Message::Binary(data.into())
+                    }
                 };
-                if socket.send(Message::Text(text.into())).await.is_err() {
-                    break;
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    socket.send(ws_msg),
+                ).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => break,    // WebSocket send error
+                    Err(_) => {             // 30s timeout
+                        tracing::warn!("WebSocket send timeout for host {host_id}, disconnecting");
+                        break;
+                    }
                 }
             }
             // Heartbeat timeout — host likely asleep or unreachable
@@ -950,72 +981,103 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
                                     tracing::info!(request_id = %request_id, success, "Host exec result");
                                     registry.on_host_exec_result(&host_id, &request_id, success, &stdout, &stderr).await;
                                 }
-                                HostAgentMessage::ExportReady { transfer_id, container_name, size_bytes } => {
-                                    // Use container_name from message, or fall back to registry lookup
-                                    let cname = if container_name.is_empty() {
-                                        registry.take_transfer_container_name(&transfer_id).await.unwrap_or_default()
-                                    } else {
-                                        container_name
-                                    };
-                                    if cname.is_empty() {
-                                        tracing::error!(transfer_id = %transfer_id, "ExportReady with unknown container_name");
-                                        registry.on_host_import_failed(&host_id, &transfer_id, "Unknown container name for transfer").await;
-                                        continue;
-                                    }
-                                    tracing::info!(transfer_id = %transfer_id, container = %cname, size_bytes, "Host export ready, creating local transfer file");
-                                    let path = format!("/tmp/{}.tar.gz", transfer_id);
-                                    match tokio::fs::File::create(&path).await {
-                                        Ok(file) => {
-                                            active_transfers.insert(transfer_id.clone(), (file, cname));
-                                        }
-                                        Err(e) => {
-                                            tracing::error!(transfer_id = %transfer_id, %e, "Failed to create transfer file");
-                                            registry.on_host_import_failed(&host_id, &transfer_id, &format!("Failed to create local file: {e}")).await;
+                                HostAgentMessage::ExportReady { transfer_id, container_name: _, size_bytes } => {
+                                    // Check if this is a remote→remote relay
+                                    if let Some((target_host_id, _cname)) = registry.get_transfer_relay_target(&transfer_id).await {
+                                        tracing::info!(transfer_id = %transfer_id, target = %target_host_id, size_bytes, "Relaying ExportReady to target host");
+                                        relay_transfers.insert(transfer_id.clone());
+                                    } else if let Some(cname) = registry.take_transfer_container_name(&transfer_id).await {
+                                        // Remote→Local nspawn import: set up file receiver
+                                        let file_path = format!("/tmp/{}.tar.gz", transfer_id);
+                                        match tokio::fs::File::create(&file_path).await {
+                                            Ok(file) => {
+                                                // Resolve storage path and network mode for local
+                                                let storage_path = if let Some(cm) = &state.container_manager {
+                                                    cm.resolve_storage_path("local").await
+                                                } else {
+                                                    "/var/lib/machines".to_string()
+                                                };
+                                                let network_mode = "bridge:br-lan".to_string();
+                                                tracing::info!(transfer_id = %transfer_id, container = %cname, size_bytes, "Setting up local nspawn import receiver");
+                                                active_transfers.insert(transfer_id.clone(), ActiveTransfer {
+                                                    container_name: cname,
+                                                    storage_path,
+                                                    network_mode,
+                                                    file,
+                                                    phase: TransferPhase::ReceivingContainer,
+                                                    workspace_file: None,
+                                                });
+                                            }
+                                            Err(e) => {
+                                                tracing::error!(transfer_id = %transfer_id, %e, "Failed to create local import file");
+                                                registry.on_host_import_failed(&host_id, &transfer_id, &format!("File creation error: {e}")).await;
+                                            }
                                         }
                                     }
                                 }
                                 HostAgentMessage::ExportFailed { transfer_id, error } => {
                                     tracing::error!(transfer_id = %transfer_id, %error, "Host export failed");
+                                    relay_transfers.remove(&transfer_id);
+                                    registry.take_transfer_relay_target(&transfer_id).await;
                                     active_transfers.remove(&transfer_id);
                                     let _ = tokio::fs::remove_file(format!("/tmp/{}.tar.gz", transfer_id)).await;
+                                    let _ = tokio::fs::remove_file(format!("/tmp/{}-workspace.tar.gz", transfer_id)).await;
                                     registry.on_host_export_failed(&host_id, &transfer_id, &error).await;
                                 }
-                                HostAgentMessage::TransferChunk { transfer_id, data } => {
-                                    use base64::Engine;
-                                    use tokio::io::AsyncWriteExt;
-                                    if let Some((file, _)) = active_transfers.get_mut(&transfer_id) {
-                                        match base64::engine::general_purpose::STANDARD.decode(&data) {
-                                            Ok(bytes) => {
-                                                if let Err(e) = file.write_all(&bytes).await {
-                                                    tracing::error!(transfer_id = %transfer_id, %e, "Failed to write chunk");
-                                                    active_transfers.remove(&transfer_id);
-                                                    let _ = tokio::fs::remove_file(format!("/tmp/{}.tar.gz", transfer_id)).await;
-                                                    registry.on_host_import_failed(&host_id, &transfer_id, &format!("Write error: {e}")).await;
-                                                }
-                                            }
-                                            Err(e) => {
-                                                tracing::error!(transfer_id = %transfer_id, %e, "Failed to decode chunk");
-                                                active_transfers.remove(&transfer_id);
-                                                let _ = tokio::fs::remove_file(format!("/tmp/{}.tar.gz", transfer_id)).await;
-                                                registry.on_host_import_failed(&host_id, &transfer_id, &format!("Base64 decode error: {e}")).await;
-                                            }
+                                HostAgentMessage::TransferChunkBinary { transfer_id, sequence, size, checksum } => {
+                                    if relay_transfers.contains(&transfer_id) {
+                                        // Relay mode: forward metadata to target host
+                                        if let Some((target_host_id, _)) = registry.get_transfer_relay_target(&transfer_id).await {
+                                            let _ = registry.send_host_command(
+                                                &target_host_id,
+                                                hr_registry::protocol::HostRegistryMessage::ReceiveChunkBinary {
+                                                    transfer_id: transfer_id.clone(),
+                                                    sequence,
+                                                    size,
+                                                    checksum,
+                                                },
+                                            ).await;
                                         }
                                     }
+                                    // Store metadata; the next Binary frame carries the actual data
+                                    pending_binary_meta = Some((transfer_id, sequence, checksum));
                                 }
                                 HostAgentMessage::TransferComplete { transfer_id } => {
-                                    tracing::info!(transfer_id = %transfer_id, "Host transfer complete, starting local import");
-                                    if let Some((file, cname)) = active_transfers.remove(&transfer_id) {
-                                        // Close the file handle
-                                        drop(file);
-                                        // Spawn import task so we don't block the WS loop
+                                    if relay_transfers.remove(&transfer_id) {
+                                        // Relay mode: forward TransferComplete to target host
+                                        tracing::info!(transfer_id = %transfer_id, "Relaying TransferComplete to target host");
+                                        if let Some((target_host_id, _)) = registry.get_transfer_relay_target(&transfer_id).await {
+                                            let _ = registry.send_host_command(
+                                                &target_host_id,
+                                                hr_registry::protocol::HostRegistryMessage::TransferComplete {
+                                                    transfer_id: transfer_id.to_string(),
+                                                },
+                                            ).await;
+                                        }
+                                        // Clean up relay target (import result will come from target host)
+                                        registry.take_transfer_relay_target(&transfer_id).await;
+                                    } else if let Some(mut transfer) = active_transfers.remove(&transfer_id) {
+                                        // Local nspawn import: finalize
+                                        use tokio::io::AsyncWriteExt;
+                                        let _ = transfer.file.flush().await;
+                                        drop(transfer.file);
+                                        let has_workspace = transfer.phase == TransferPhase::ReceivingWorkspace;
+                                        if let Some(mut ws_file) = transfer.workspace_file.take() {
+                                            let _ = ws_file.flush().await;
+                                            drop(ws_file);
+                                        }
                                         let tid = transfer_id.clone();
                                         let reg = registry.clone();
                                         let hid = host_id.clone();
                                         tokio::spawn(async move {
-                                            handle_local_import(reg, hid, tid, cname).await;
+                                            handle_local_nspawn_import(
+                                                reg, hid, tid,
+                                                transfer.container_name,
+                                                transfer.storage_path,
+                                                transfer.network_mode,
+                                                has_workspace,
+                                            ).await;
                                         });
-                                    } else {
-                                        tracing::warn!(transfer_id = %transfer_id, "TransferComplete for unknown transfer");
                                     }
                                 }
                                 HostAgentMessage::AutoOffNotify { mode } => {
@@ -1031,8 +1093,45 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
                                     };
                                     let _ = registry.request_power_action(&host_id, action).await;
                                 }
+                                HostAgentMessage::WorkspaceReady { transfer_id, size_bytes } => {
+                                    if relay_transfers.contains(&transfer_id) {
+                                        // Relay mode: forward WorkspaceReady to target host
+                                        tracing::info!(transfer_id = %transfer_id, size_bytes, "Relaying WorkspaceReady to target host");
+                                        if let Some((target_host_id, _)) = registry.get_transfer_relay_target(&transfer_id).await {
+                                            let _ = registry.send_host_command(
+                                                &target_host_id,
+                                                hr_registry::protocol::HostRegistryMessage::WorkspaceReady {
+                                                    transfer_id: transfer_id.to_string(),
+                                                    size_bytes,
+                                                },
+                                            ).await;
+                                        }
+                                    }
+                                }
                                 HostAgentMessage::Auth { .. } => {}
+                                HostAgentMessage::NspawnContainerList(_) => {
+                                    // TODO: track nspawn containers separately if needed
+                                }
                             }
+                        }
+                    }
+                    Some(Ok(Message::Binary(data))) => {
+                        // Binary frame following a TransferChunkBinary metadata message
+                        timeout_sleep.as_mut().reset(tokio::time::Instant::now() + heartbeat_timeout);
+                        if let Some((transfer_id, _sequence, _checksum)) = pending_binary_meta.take() {
+                            if relay_transfers.contains(&transfer_id) {
+                                // Relay mode: forward binary data to target host
+                                if let Some((target_host_id, _)) = registry.get_transfer_relay_target(&transfer_id).await {
+                                    if let Err(e) = registry.send_host_binary(&target_host_id, data.to_vec()).await {
+                                        tracing::error!(transfer_id = %transfer_id, %e, "Failed to relay binary chunk to target");
+                                        relay_transfers.remove(&transfer_id);
+                                        registry.take_transfer_relay_target(&transfer_id).await;
+                                        registry.on_host_import_failed(&host_id, &transfer_id, &format!("Relay binary send failed: {e}")).await;
+                                    }
+                                }
+                            }
+                        } else {
+                            tracing::warn!("Received Binary frame without pending TransferChunkBinary metadata");
                         }
                     }
                     Some(Ok(Message::Ping(data))) => {
@@ -1047,9 +1146,9 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
         }
     }
 
-    // Clean up any pending transfers
-    for (tid, _) in active_transfers {
-        let _ = tokio::fs::remove_file(format!("/tmp/{}.tar.gz", tid)).await;
+    // Clean up any pending relay transfers
+    for tid in relay_transfers {
+        registry.take_transfer_relay_target(&tid).await;
     }
 
     // Mark host offline
@@ -1059,28 +1158,20 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
     tracing::info!("Host agent disconnected: {} ({})", host_name, host_id);
 }
 
-// ── Local import for remote→local migration ─────────────────────────────
 
-async fn lxc_cmd(args: &[&str], timeout_secs: u64) -> Result<std::process::Output, String> {
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        tokio::process::Command::new("lxc").args(args).output(),
-    ).await {
-        Ok(Ok(output)) => Ok(output),
-        Ok(Err(e)) => Err(format!("lxc error: {e}")),
-        Err(_) => Err(format!("lxc {} timed out after {timeout_secs}s", args.first().unwrap_or(&""))),
-    }
-}
+// ── Local nspawn import for remote→local migration ─────────────────────
 
-/// Import a container locally after receiving all chunks from a remote host-agent.
-/// This mirrors the host-agent's `handle_import()` but runs on the master.
-async fn handle_local_import(
+async fn handle_local_nspawn_import(
     registry: std::sync::Arc<hr_registry::AgentRegistry>,
     source_host_id: String,
     transfer_id: String,
     container_name: String,
+    storage_path: String,
+    network_mode: String,
+    has_workspace: bool,
 ) {
     let import_path = format!("/tmp/{}.tar.gz", transfer_id);
+    let ws_import_path = format!("/tmp/{}-workspace.tar.gz", transfer_id);
 
     // Verify the file exists and is non-empty
     match tokio::fs::metadata(&import_path).await {
@@ -1088,106 +1179,129 @@ async fn handle_local_import(
             tracing::error!(transfer_id = %transfer_id, "Transfer file is empty");
             registry.on_host_import_failed(&source_host_id, &transfer_id, "Transfer file is empty").await;
             let _ = tokio::fs::remove_file(&import_path).await;
+            let _ = tokio::fs::remove_file(&ws_import_path).await;
             return;
         }
         Err(e) => {
             tracing::error!(transfer_id = %transfer_id, %e, "Transfer file missing");
             registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Transfer file missing: {e}")).await;
+            let _ = tokio::fs::remove_file(&ws_import_path).await;
             return;
         }
         Ok(m) => {
-            tracing::info!(transfer_id = %transfer_id, size_bytes = m.len(), "Starting local LXC import");
+            tracing::info!(transfer_id = %transfer_id, size_bytes = m.len(), "Starting local nspawn import");
         }
     }
 
-    // Clean up stale container on target (e.g., from a previous failed migration)
-    let _ = lxc_cmd(&["delete", &container_name, "--force"], 30).await;
+    let rootfs_dir = format!("{}/{}", storage_path, container_name);
+    let ws_dir = format!("{}/{}-workspace", storage_path, container_name);
 
-    // Ensure workspace volume exists before import (container config references it as a device)
-    let vol_name = format!("{container_name}-workspace");
-    let vol_check = lxc_cmd(&["storage", "volume", "show", "default", &vol_name], 30).await;
-    if !vol_check.map(|o| o.status.success()).unwrap_or(false) {
-        tracing::info!(volume = %vol_name, "Creating workspace volume before import");
-        let _ = lxc_cmd(&["storage", "volume", "create", "default", &vol_name], 30).await;
+    // Create rootfs directory
+    if let Err(e) = tokio::fs::create_dir_all(&rootfs_dir).await {
+        tracing::error!(transfer_id = %transfer_id, %e, "Failed to create rootfs directory");
+        registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Failed to create rootfs dir: {e}")).await;
+        let _ = tokio::fs::remove_file(&import_path).await;
+        let _ = tokio::fs::remove_file(&ws_import_path).await;
+        return;
     }
 
-    // Import the container
-    let import = lxc_cmd(&["import", &import_path], 300).await;
+    // Extract container tar
+    tracing::info!(transfer_id = %transfer_id, container = %container_name, dir = %rootfs_dir, "Extracting container tar");
+    let extract = tokio::process::Command::new("tar")
+        .args(["xf", &import_path, "--numeric-owner", "--xattrs", "--xattrs-include=*", "-C", &rootfs_dir])
+        .output()
+        .await;
 
-    match import {
+    match &extract {
         Ok(output) if output.status.success() => {
-            tracing::info!(transfer_id = %transfer_id, container = %container_name, "LXC import successful");
+            tracing::info!(transfer_id = %transfer_id, "Container tar extracted successfully");
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::error!(transfer_id = %transfer_id, %stderr, "Container tar extraction failed");
+            registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("tar extract failed: {stderr}")).await;
+            let _ = tokio::fs::remove_dir_all(&rootfs_dir).await;
+            let _ = tokio::fs::remove_file(&import_path).await;
+            let _ = tokio::fs::remove_file(&ws_import_path).await;
+            return;
+        }
+        Err(e) => {
+            tracing::error!(transfer_id = %transfer_id, %e, "tar command error");
+            registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("tar command error: {e}")).await;
+            let _ = tokio::fs::remove_dir_all(&rootfs_dir).await;
+            let _ = tokio::fs::remove_file(&import_path).await;
+            let _ = tokio::fs::remove_file(&ws_import_path).await;
+            return;
+        }
+    }
 
-            // Check if workspace volume was restored by import
-            let vol_name = format!("{container_name}-workspace");
-            let vol_check = lxc_cmd(&["storage", "volume", "show", "default", &vol_name], 30).await;
-            let vol_exists = vol_check.map(|o| o.status.success()).unwrap_or(false);
-            if !vol_exists {
-                tracing::info!(volume = %vol_name, "Workspace volume not in export, creating fresh");
-                let _ = lxc_cmd(&["storage", "volume", "create", "default", &vol_name], 30).await;
+    // Handle workspace
+    if has_workspace {
+        if let Err(e) = tokio::fs::create_dir_all(&ws_dir).await {
+            tracing::warn!(transfer_id = %transfer_id, %e, "Failed to create workspace dir");
+        }
+        let ws_extract = tokio::process::Command::new("tar")
+            .args(["xf", &ws_import_path, "--numeric-owner", "--xattrs", "--xattrs-include=*", "-C", &ws_dir])
+            .output()
+            .await;
+        match &ws_extract {
+            Ok(output) if output.status.success() => {
+                tracing::info!(transfer_id = %transfer_id, "Workspace tar extracted successfully");
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                tracing::warn!(transfer_id = %transfer_id, %stderr, "Workspace tar extraction failed, creating empty workspace");
+                let _ = tokio::fs::create_dir_all(&ws_dir).await;
+            }
+            Err(e) => {
+                tracing::warn!(transfer_id = %transfer_id, %e, "Workspace tar error, creating empty workspace");
+                let _ = tokio::fs::create_dir_all(&ws_dir).await;
             }
         }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::error!(transfer_id = %transfer_id, %stderr, "LXC import failed");
-            registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("lxc import failed: {stderr}")).await;
-            let _ = tokio::fs::remove_file(&import_path).await;
-            return;
-        }
-        Err(e) => {
-            tracing::error!(transfer_id = %transfer_id, %e, "LXC import command error");
-            registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Import command error: {e}")).await;
-            let _ = tokio::fs::remove_file(&import_path).await;
-            return;
-        }
+    } else {
+        // Ensure workspace dir exists
+        let _ = tokio::fs::create_dir_all(&ws_dir).await;
     }
 
-    // Assign profile and start
-    tracing::info!(transfer_id = %transfer_id, container = %container_name, "Container imported, assigning profile and starting");
+    let sp = std::path::Path::new(&storage_path);
 
-    // Assign the homeroute-agent profile (like the host-agent does)
-    let profile_assign = lxc_cmd(&["profile", "assign", &container_name, "default,homeroute-agent"], 30).await;
-    match profile_assign {
-        Ok(output) if output.status.success() => {
-            tracing::info!(container = %container_name, "Profile assigned successfully");
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::error!(container = %container_name, %stderr, "Profile assignment failed");
-            registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Profile assignment failed: {stderr}")).await;
-            let _ = tokio::fs::remove_file(&import_path).await;
-            return;
-        }
-        Err(e) => {
-            tracing::error!(container = %container_name, %e, "Profile assignment command failed");
-            registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Profile command error: {e}")).await;
-            let _ = tokio::fs::remove_file(&import_path).await;
-            return;
-        }
+    // Write .nspawn unit
+    if let Err(e) = hr_container::NspawnClient::write_nspawn_unit(&container_name, sp, &network_mode).await {
+        tracing::error!(transfer_id = %transfer_id, %e, "Failed to write nspawn unit");
+        registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Failed to write nspawn unit: {e}")).await;
+        let _ = tokio::fs::remove_dir_all(&rootfs_dir).await;
+        let _ = tokio::fs::remove_dir_all(&ws_dir).await;
+        let _ = tokio::fs::remove_file(&import_path).await;
+        let _ = tokio::fs::remove_file(&ws_import_path).await;
+        return;
+    }
+
+    // Write network config in rootfs
+    if let Err(e) = hr_container::NspawnClient::write_network_config(&container_name, sp).await {
+        tracing::error!(transfer_id = %transfer_id, %e, "Failed to write network config");
+        registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Failed to write network config: {e}")).await;
+        let _ = tokio::fs::remove_dir_all(&rootfs_dir).await;
+        let _ = tokio::fs::remove_dir_all(&ws_dir).await;
+        let _ = tokio::fs::remove_file(&import_path).await;
+        let _ = tokio::fs::remove_file(&ws_import_path).await;
+        return;
     }
 
     // Start the container
-    let start = lxc_cmd(&["start", &container_name], 60).await;
-
-    match start {
-        Ok(output) if output.status.success() => {
-            tracing::info!(transfer_id = %transfer_id, container = %container_name, "Container started successfully");
-            // Signal migration success — this unblocks the migration task in applications.rs
+    match hr_container::NspawnClient::start_container(&container_name).await {
+        Ok(()) => {
+            tracing::info!(transfer_id = %transfer_id, container = %container_name, "Nspawn container started after local import");
             registry.on_host_import_complete("local", &transfer_id, &container_name).await;
         }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::error!(transfer_id = %transfer_id, %stderr, "Container imported but start failed");
-            registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Start failed: {stderr}")).await;
-        }
         Err(e) => {
-            tracing::error!(transfer_id = %transfer_id, %e, "Start command error");
-            registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Start command error: {e}")).await;
+            tracing::error!(transfer_id = %transfer_id, %e, "Container start failed after import");
+            registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Start failed: {e}")).await;
         }
     }
 
-    // Cleanup transfer file
+    // Cleanup transfer files
     let _ = tokio::fs::remove_file(&import_path).await;
+    let _ = tokio::fs::remove_file(&ws_import_path).await;
 }
 
 // ── Agent status helpers ─────────────────────────────────────────────────
@@ -1421,7 +1535,9 @@ async fn deploy_host_agent(host: &str, port: u16, user: &str, password: Option<&
         r#"homeroute_url = "{HOMEROUTE_LAN_IP}:{API_PORT}"
 token = ""
 host_name = "{host_name}"
-{lan_line}"#,
+{lan_line}container_storage_path = "/var/lib/machines"
+container_runtime = "nspawn"
+"#,
     );
 
     let service_unit = r#"[Unit]
@@ -1447,6 +1563,7 @@ cat > /etc/hr-host-agent/config.toml << 'CONF'
 {config}CONF
 cat > /etc/systemd/system/hr-host-agent.service << 'SVC'
 {service_unit}SVC
+apt-get install -y systemd-container debootstrap && \
 systemctl daemon-reload && \
 systemctl enable --now hr-host-agent"#,
     );

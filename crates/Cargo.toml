@@ -13,6 +13,7 @@ members = [
     "hr-api",
 
     "hr-lxd",
+    "hr-container",
     "hr-registry",
     "hr-agent",
     "hr-host-agent",
@@ -113,3 +114,6 @@ quinn = "0.11"
 
 # Byte manipulation
 bytes = "1"
+
+# Checksums (for binary transfer protocol)
+xxhash-rust = { version = "0.8", features = ["xxh32"] }

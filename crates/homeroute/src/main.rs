@@ -611,6 +611,16 @@ async fn main() -> anyhow::Result<()> {
         registry.list_applications().await.len()
     );
 
+    // ── Container V2 Manager (nspawn) ────────────────────────────────
+
+    let container_v2_state_path = PathBuf::from("/var/lib/server-dashboard/containers-v2.json");
+    let container_manager = Arc::new(hr_api::container_manager::ContainerManager::new(
+        container_v2_state_path,
+        Arc::new(env.clone()),
+        events.clone(),
+        registry.clone(),
+    ));
+
     // ── Management API (Important) ────────────────────────────────────
 
     let api_state = hr_api::state::ApiState {
@@ -629,6 +639,7 @@ async fn main() -> anyhow::Result<()> {
         service_registry: service_registry.clone(),
 
         registry: Some(registry.clone()),
+        container_manager: Some(container_manager.clone()),
         migrations: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         dataverse_schemas: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         cloud_relay_status: cloud_relay_status.clone(),

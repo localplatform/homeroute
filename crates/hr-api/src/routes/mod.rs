@@ -16,5 +16,6 @@ pub mod services;
 pub mod ws;
 
 pub mod applications;
+pub mod containers;
 pub mod dataverse;
 pub mod cloud_relay;

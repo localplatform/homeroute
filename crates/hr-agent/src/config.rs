@@ -12,6 +12,13 @@ pub struct AgentConfig {
     pub token: String,
     /// Service/application name (slug)
     pub service_name: String,
+    /// Network interface to detect IPv4 address (default: "eth0", nspawn: "host0")
+    #[serde(default = "default_interface")]
+    pub interface: String,
+}
+
+fn default_interface() -> String {
+    "eth0".to_string()
 }
 
 impl AgentConfig {

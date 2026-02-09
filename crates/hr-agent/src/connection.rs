@@ -27,12 +27,12 @@ pub async fn run_connection(
 
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
-    // Detect our IPv4 address
-    let ipv4_address = detect_ipv4_address("eth0").await;
+    // Detect our IPv4 address on the configured interface
+    let ipv4_address = detect_ipv4_address(&config.interface).await;
     if let Some(ref addr) = ipv4_address {
-        info!(addr, "Detected IPv4 address");
+        info!(addr, interface = %config.interface, "Detected IPv4 address");
     } else {
-        warn!("No IPv4 address detected on eth0");
+        warn!(interface = %config.interface, "No IPv4 address detected");
     }
 
     // Send Auth message
