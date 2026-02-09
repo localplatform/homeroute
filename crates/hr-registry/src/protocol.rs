@@ -254,6 +254,10 @@ pub enum HostAgentMessage {
         token: String,
         host_name: String,
         version: String,
+        #[serde(default)]
+        lan_interface: Option<String>,
+        #[serde(default)]
+        container_storage_path: Option<String>,
     },
     Heartbeat {
         uptime_secs: u64,
@@ -424,7 +428,7 @@ pub enum HostRegistryMessage {
         slug: String,
         container_name: String,
         storage_path: String,
-        bridge: String,
+        network_mode: String,
         agent_token: String,
         agent_config: String,
     },

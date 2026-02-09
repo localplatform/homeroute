@@ -1,7 +1,7 @@
 use axum::{
     extract::{Path, State, WebSocketUpgrade, ws::{Message, WebSocket}},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use serde::Deserialize;
@@ -25,6 +25,9 @@ pub fn router() -> Router<ApiState> {
         // Agent routes (must be before /{id} to avoid path conflicts)
         .route("/agents/update", post(update_host_agents))
         .route("/agents/binary", get(serve_host_agent_binary))
+        // Local host routes (must be before /{id} to avoid path conflicts)
+        .route("/local/interfaces", get(get_local_interfaces_handler))
+        .route("/local/config", put(update_local_config))
         .route("/{id}", get(get_host).put(update_host).delete(delete_host))
         // Connection
         .route("/{id}/test", post(test_connection))
@@ -153,12 +156,51 @@ async fn list_hosts(State(state): State<ApiState>) -> Json<Value> {
                     // Include current power state from registry
                     let power_state = registry.get_host_power_state(&id).await;
                     host["power_state"] = json!(power_state);
+                    // Include latest metrics from live connection
+                    if let Some(conn) = conns.get(id.as_str()) {
+                        if let Some(ref m) = conn.metrics {
+                            host["metrics"] = json!({
+                                "cpuPercent": m.cpu_percent,
+                                "memoryUsedBytes": m.memory_used_bytes,
+                                "memoryTotalBytes": m.memory_total_bytes,
+                            });
+                        }
+                    }
                 }
             }
         }
     }
 
-    Json(json!({"success": true, "hosts": hosts}))
+    // Prepend synthetic "HomeRoute" local host entry
+    let local_host = {
+        let (lan_interface, container_storage_path) = if let Some(cm) = &state.container_manager {
+            let cfg = cm.get_config().await;
+            (cfg.lan_interface.clone(), cfg.container_storage_path.clone())
+        } else {
+            (None, "/var/lib/machines".to_string())
+        };
+        let interfaces = get_local_interfaces().await.unwrap_or_default();
+        let local_metrics = get_local_metrics().await;
+        json!({
+            "id": "local",
+            "name": "HomeRoute",
+            "is_local": true,
+            "host": "127.0.0.1",
+            "port": 4000,
+            "status": "online",
+            "lan_interface": lan_interface,
+            "container_storage_path": container_storage_path,
+            "interfaces": interfaces,
+            "metrics": local_metrics,
+        })
+    };
+
+    let mut result = vec![local_host];
+    if let Some(arr) = hosts.as_array() {
+        result.extend(arr.iter().cloned());
+    }
+
+    Json(json!({"success": true, "hosts": result}))
 }
 
 async fn list_groups() -> Json<Value> {
@@ -178,6 +220,116 @@ async fn list_groups() -> Json<Value> {
     let groups: Vec<String> = groups.into_iter().collect();
     Json(json!({"success": true, "groups": groups}))
 }
+
+// ── Local host helpers ────────────────────────────────────────────────────
+
+async fn get_local_interfaces() -> Result<Vec<Value>, String> {
+    let output = tokio::process::Command::new("ip")
+        .args(["-j", "addr", "show"])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let raw: Vec<Value> = serde_json::from_str(&stdout).map_err(|e| e.to_string())?;
+
+    // Normalize to match the format stored in hosts.json: { ifname, address, ipv4, is_up }
+    let normalized: Vec<Value> = raw.iter().filter_map(|iface| {
+        let ifname = iface.get("ifname")?.as_str()?;
+        let address = iface.get("address").and_then(|a| a.as_str()).unwrap_or("");
+        let operstate = iface.get("operstate").and_then(|o| o.as_str()).unwrap_or("unknown");
+        let ipv4 = iface.get("addr_info")
+            .and_then(|a| a.as_array())
+            .and_then(|addrs| {
+                addrs.iter().find_map(|a| {
+                    if a.get("family").and_then(|f| f.as_str()) == Some("inet") {
+                        a.get("local").and_then(|l| l.as_str()).map(String::from)
+                    } else { None }
+                })
+            });
+        Some(json!({
+            "ifname": ifname,
+            "address": address,
+            "ipv4": ipv4,
+            "is_up": operstate == "UP" || operstate == "up",
+        }))
+    }).collect();
+    Ok(normalized)
+}
+
+async fn get_local_metrics() -> Option<Value> {
+    // CPU: read /proc/stat twice with a short interval
+    let read_cpu = || -> Option<(u64, u64)> {
+        let content = std::fs::read_to_string("/proc/stat").ok()?;
+        let line = content.lines().next()?;
+        let vals: Vec<u64> = line.split_whitespace().skip(1).filter_map(|v| v.parse().ok()).collect();
+        if vals.len() < 4 { return None; }
+        let idle = vals[3];
+        let total: u64 = vals.iter().sum();
+        Some((idle, total))
+    };
+    let (idle1, total1) = read_cpu()?;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let (idle2, total2) = read_cpu()?;
+    let diff_idle = idle2.saturating_sub(idle1) as f64;
+    let diff_total = total2.saturating_sub(total1) as f64;
+    let cpu_percent = if diff_total > 0.0 { (1.0 - diff_idle / diff_total) * 100.0 } else { 0.0 };
+
+    // Memory: read /proc/meminfo
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let parse_kb = |key: &str| -> Option<u64> {
+        meminfo.lines().find(|l| l.starts_with(key))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|v| v.parse::<u64>().ok())
+    };
+    let total_kb = parse_kb("MemTotal:")?;
+    let avail_kb = parse_kb("MemAvailable:")?;
+    let used = (total_kb - avail_kb) * 1024;
+    let total = total_kb * 1024;
+
+    Some(json!({
+        "cpuPercent": (cpu_percent * 10.0).round() / 10.0,
+        "memoryUsedBytes": used,
+        "memoryTotalBytes": total,
+    }))
+}
+
+async fn get_local_interfaces_handler() -> Json<Value> {
+    match get_local_interfaces().await {
+        Ok(ifaces) => Json(json!({"success": true, "interfaces": ifaces})),
+        Err(e) => Json(json!({"success": false, "error": e})),
+    }
+}
+
+#[derive(Deserialize)]
+struct UpdateLocalConfigRequest {
+    #[serde(default)]
+    lan_interface: Option<String>,
+    #[serde(default)]
+    container_storage_path: Option<String>,
+}
+
+async fn update_local_config(
+    State(state): State<ApiState>,
+    Json(body): Json<UpdateLocalConfigRequest>,
+) -> Json<Value> {
+    let cm = match &state.container_manager {
+        Some(cm) => cm,
+        None => return Json(json!({"success": false, "error": "Container manager not available"})),
+    };
+    let mut cfg = cm.get_config().await;
+    if let Some(ref iface) = body.lan_interface {
+        cfg.lan_interface = Some(iface.clone());
+    }
+    if let Some(ref sp) = body.container_storage_path {
+        cfg.container_storage_path = sp.clone();
+    }
+    match cm.update_config(cfg).await {
+        Ok(()) => Json(json!({"success": true})),
+        Err(e) => Json(json!({"success": false, "error": e})),
+    }
+}
+
+// ── Host CRUD (continued) ────────────────────────────────────────────────
 
 async fn get_host(Path(id): Path<String>) -> Json<Value> {
     let data = load_hosts().await;
@@ -266,6 +418,7 @@ async fn add_host(Json(body): Json<AddHostRequest>) -> Json<Value> {
         "username": body.username,
         "interface": body.interface,
         "mac": mac,
+        "lan_interface": detected_lan_interface,
         "groups": body.groups,
         "interfaces": interfaces.unwrap_or_default(),
         "status": "unknown",
@@ -313,6 +466,9 @@ async fn update_host(Path(id): Path<String>, Json(updates): Json<Value>) -> Json
 }
 
 async fn delete_host(Path(id): Path<String>) -> Json<Value> {
+    if id == "local" {
+        return Json(json!({"success": false, "error": "Cannot delete local host"}));
+    }
     let mut data = load_hosts().await;
     if let Some(hosts) = data.get_mut("hosts").and_then(|s| s.as_array_mut()) {
         hosts.retain(|h| h.get("id").and_then(|i| i.as_str()) != Some(&id));
@@ -789,8 +945,8 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
     let (host_id, host_name, version) = match auth_msg {
         Ok(Some(Ok(Message::Text(text)))) => {
             match serde_json::from_str::<HostAgentMessage>(&text) {
-                Ok(HostAgentMessage::Auth { token: _, host_name, version }) => {
-                    let data = load_hosts().await;
+                Ok(HostAgentMessage::Auth { token: _, host_name, version, lan_interface, container_storage_path }) => {
+                    let mut data = load_hosts().await;
                     let host_id = data
                         .get("hosts")
                         .and_then(|h| h.as_array())
@@ -801,6 +957,29 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
                         })
                         .and_then(|h| h.get("id").and_then(|i| i.as_str()))
                         .map(|s| s.to_string());
+
+                    // Store lan_interface and container_storage_path from host agent
+                    if let Some(ref id) = host_id {
+                        if let Some(host) = find_host_mut(&mut data, id) {
+                            let mut changed = false;
+                            if let Some(ref iface) = lan_interface {
+                                if host.get("lan_interface").and_then(|v| v.as_str()) != Some(iface) {
+                                    host["lan_interface"] = json!(iface);
+                                    changed = true;
+                                }
+                            }
+                            if let Some(ref sp) = container_storage_path {
+                                if host.get("container_storage_path").and_then(|v| v.as_str()) != Some(sp) {
+                                    host["container_storage_path"] = json!(sp);
+                                    changed = true;
+                                }
+                            }
+                            if changed {
+                                let _ = save_hosts(&data).await;
+                                tracing::info!(host = %host_name, "Updated host config from agent: lan_interface={:?}, storage_path={:?}", lan_interface, container_storage_path);
+                            }
+                        }
+                    }
 
                     match host_id {
                         Some(id) => (id, host_name, version),
@@ -885,6 +1064,11 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
         file: tokio::fs::File,
         phase: TransferPhase,
         workspace_file: Option<tokio::fs::File>,
+        total_bytes: u64,
+        bytes_received: u64,
+        chunk_count: u32,
+        app_id: String,
+        transfer_id: String,
     }
     let mut active_transfers: std::collections::HashMap<String, ActiveTransfer> = std::collections::HashMap::new();
 
@@ -992,12 +1176,19 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
                                         match tokio::fs::File::create(&file_path).await {
                                             Ok(file) => {
                                                 // Resolve storage path and network mode for local
-                                                let storage_path = if let Some(cm) = &state.container_manager {
-                                                    cm.resolve_storage_path("local").await
+                                                let (storage_path, network_mode) = if let Some(cm) = &state.container_manager {
+                                                    let sp = cm.resolve_storage_path("local").await;
+                                                    let nm = cm.resolve_network_mode("local").await
+                                                        .unwrap_or_else(|_| "bridge:br-lan".to_string());
+                                                    (sp, nm)
                                                 } else {
-                                                    "/var/lib/machines".to_string()
+                                                    ("/var/lib/machines".to_string(), "bridge:br-lan".to_string())
                                                 };
-                                                let network_mode = "bridge:br-lan".to_string();
+                                                // Look up app_id from migration state
+                                                let app_id = {
+                                                    let m = state.migrations.read().await;
+                                                    m.get(&transfer_id).map(|s| s.app_id.clone()).unwrap_or_default()
+                                                };
                                                 tracing::info!(transfer_id = %transfer_id, container = %cname, size_bytes, "Setting up local nspawn import receiver");
                                                 active_transfers.insert(transfer_id.clone(), ActiveTransfer {
                                                     container_name: cname,
@@ -1006,6 +1197,11 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
                                                     file,
                                                     phase: TransferPhase::ReceivingContainer,
                                                     workspace_file: None,
+                                                    total_bytes: size_bytes,
+                                                    bytes_received: 0,
+                                                    chunk_count: 0,
+                                                    app_id,
+                                                    transfer_id: transfer_id.clone(),
                                                 });
                                             }
                                             Err(e) => {
@@ -1106,6 +1302,23 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
                                                 },
                                             ).await;
                                         }
+                                    } else if let Some(transfer) = active_transfers.get_mut(&transfer_id) {
+                                        // Local import: transition to workspace phase
+                                        tracing::info!(transfer_id = %transfer_id, size_bytes, "Receiving workspace for local import");
+                                        let ws_path = format!("/tmp/{}-workspace.tar.gz", transfer_id);
+                                        match tokio::fs::File::create(&ws_path).await {
+                                            Ok(ws_file) => {
+                                                transfer.phase = TransferPhase::ReceivingWorkspace;
+                                                transfer.workspace_file = Some(ws_file);
+                                                // Reset byte counters for workspace phase
+                                                transfer.total_bytes = size_bytes;
+                                                transfer.bytes_received = 0;
+                                                transfer.chunk_count = 0;
+                                            }
+                                            Err(e) => {
+                                                tracing::error!(transfer_id = %transfer_id, %e, "Failed to create workspace file for local import");
+                                            }
+                                        }
                                     }
                                 }
                                 HostAgentMessage::TerminalData { session_id, data } => {
@@ -1138,6 +1351,45 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
                                         relay_transfers.remove(&transfer_id);
                                         registry.take_transfer_relay_target(&transfer_id).await;
                                         registry.on_host_import_failed(&host_id, &transfer_id, &format!("Relay binary send failed: {e}")).await;
+                                    }
+                                }
+                            } else if let Some(transfer) = active_transfers.get_mut(&transfer_id) {
+                                // Local import mode: write binary data to file
+                                use tokio::io::AsyncWriteExt;
+                                let data_len = data.len() as u64;
+                                let target_file = match transfer.phase {
+                                    TransferPhase::ReceivingWorkspace => transfer.workspace_file.as_mut(),
+                                    _ => Some(&mut transfer.file),
+                                };
+                                if let Some(file) = target_file {
+                                    if let Err(e) = file.write_all(&data).await {
+                                        tracing::error!(transfer_id = %transfer_id, %e, "Failed to write binary chunk to local file");
+                                        active_transfers.remove(&transfer_id);
+                                        registry.on_host_import_failed(&host_id, &transfer_id, &format!("File write error: {e}")).await;
+                                    } else {
+                                        // Update progress tracking
+                                        transfer.bytes_received += data_len;
+                                        transfer.chunk_count += 1;
+                                        if transfer.chunk_count % 4 == 0 && transfer.total_bytes > 0 && !transfer.app_id.is_empty() {
+                                            // Container data: 10% → 85%, workspace: 85% → 92%
+                                            let (pct_start, pct_end) = match transfer.phase {
+                                                TransferPhase::ReceivingContainer => (10u8, 85u8),
+                                                TransferPhase::ReceivingWorkspace => (85u8, 92u8),
+                                            };
+                                            let ratio = (transfer.bytes_received as f64 / transfer.total_bytes as f64).min(1.0);
+                                            let pct = pct_start + (ratio * (pct_end - pct_start) as f64) as u8;
+                                            crate::routes::applications::update_migration_phase(
+                                                &state.migrations,
+                                                &state.events,
+                                                &transfer.app_id,
+                                                &transfer.transfer_id,
+                                                hr_common::events::MigrationPhase::Importing,
+                                                pct,
+                                                transfer.bytes_received,
+                                                transfer.total_bytes,
+                                                None,
+                                            ).await;
+                                        }
                                     }
                                 }
                             }

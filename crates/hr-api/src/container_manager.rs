@@ -35,6 +35,8 @@ pub enum ContainerV2Status {
 pub struct ContainerV2Config {
     #[serde(default = "default_storage_path")]
     pub container_storage_path: String,
+    #[serde(default)]
+    pub lan_interface: Option<String>,
 }
 
 fn default_storage_path() -> String {
@@ -385,7 +387,7 @@ impl ContainerManager {
         } else {
             // Try to read from hosts.json
             if let Ok(content) =
-                tokio::fs::read_to_string("/opt/homeroute/data/hosts.json").await
+                tokio::fs::read_to_string("/data/hosts.json").await
             {
                 if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
                     if let Some(hosts) = data.get("hosts").and_then(|h| h.as_array()) {
@@ -407,25 +409,51 @@ impl ContainerManager {
         }
     }
 
-    async fn resolve_network_mode(&self, host_id: &str) -> String {
+    pub async fn resolve_network_mode(&self, host_id: &str) -> Result<String, String> {
         if host_id == "local" {
-            return "bridge:br-lan".to_string();
+            // Local host MUST use bridge mode: macvlan isolation prevents
+            // the container from reaching the host's own IP (10.0.0.254),
+            // which the agent needs to connect to the HomeRoute API.
+            let cfg = self.state.read().await.config.clone();
+            if let Some(ref iface) = cfg.lan_interface {
+                if !iface.is_empty() {
+                    // Check if the interface is enslaved to a bridge
+                    let master_path = format!("/sys/class/net/{}/master", iface);
+                    if let Ok(link) = tokio::fs::read_link(&master_path).await {
+                        if let Some(bridge_name) = link.file_name().and_then(|n| n.to_str()) {
+                            return Ok(format!("bridge:{}", bridge_name));
+                        }
+                    }
+                    // Check if the interface itself is a bridge
+                    let bridge_path = format!("/sys/class/net/{}/bridge", iface);
+                    if tokio::fs::metadata(&bridge_path).await.is_ok() {
+                        return Ok(format!("bridge:{}", iface));
+                    }
+                    // Interface is neither a bridge slave nor a bridge — macvlan
+                    // won't work for local containers (host isolation), suggest bridge
+                    return Err(format!(
+                        "Interface '{}' is not part of a bridge. Local containers require bridge networking to reach the HomeRoute API.",
+                        iface
+                    ));
+                }
+            }
+            return Err("No lan_interface configured for local host. Please configure a network interface in host settings.".to_string());
         }
         // Check hosts.json for lan_interface
-        if let Ok(content) = tokio::fs::read_to_string("/opt/homeroute/data/hosts.json").await {
+        if let Ok(content) = tokio::fs::read_to_string("/data/hosts.json").await {
             if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
                 if let Some(hosts) = data.get("hosts").and_then(|h| h.as_array()) {
                     if let Some(host) = hosts.iter().find(|h| h.get("id").and_then(|i| i.as_str()) == Some(host_id)) {
                         if let Some(iface) = host.get("lan_interface").and_then(|v| v.as_str()) {
                             if !iface.is_empty() {
-                                return format!("macvlan:{}", iface);
+                                return Ok(format!("macvlan:{}", iface));
                             }
                         }
                     }
                 }
             }
         }
-        "bridge:br-lan".to_string()
+        Err(format!("No lan_interface configured for host '{}'. Please configure a macvlan interface in host settings.", host_id))
     }
 
     // ── Background deploy ────────────────────────────────────────
@@ -450,9 +478,20 @@ impl ContainerManager {
         let storage_path = self.resolve_storage_path(host_id).await;
         let storage = Path::new(&storage_path);
 
+        let network_mode = match self.resolve_network_mode(host_id).await {
+            Ok(nm) => nm,
+            Err(e) => {
+                error!(container = container_name, "Network mode resolution failed: {e}");
+                emit(&format!("Erreur: {e}"));
+                self.set_container_status(app_id, ContainerV2Status::Error)
+                    .await;
+                return;
+            }
+        };
+
         // Phase 1: Create the nspawn container
         emit("Creation du conteneur nspawn...");
-        if let Err(e) = NspawnClient::create_container(container_name, storage).await {
+        if let Err(e) = NspawnClient::create_container(container_name, storage, &network_mode).await {
             error!(container = container_name, "Nspawn creation failed: {e}");
             emit(&format!("Erreur: {e}"));
             self.set_container_status(app_id, ContainerV2Status::Error)
@@ -495,15 +534,21 @@ impl ContainerManager {
             return;
         }
 
-        // Phase 3: Generate and push agent config (interface = "host0" for nspawn)
+        // Phase 3: Generate and push agent config
         emit("Configuration de l'agent...");
         let api_port = self.env.api_port;
+        // Derive container-internal interface name from network_mode
+        let agent_interface = if let Some(parent) = network_mode.strip_prefix("macvlan:") {
+            format!("mv-{parent}")
+        } else {
+            "host0".to_string()
+        };
         let config_content = format!(
             r#"homeroute_address = "10.0.0.254"
 homeroute_port = {api_port}
 token = "{token}"
 service_name = "{slug}"
-interface = "host0"
+interface = "{agent_interface}"
 "#
         );
 
@@ -1039,6 +1084,7 @@ WantedBy=multi-user.target
                 // Local → Remote: stream rootfs tar to target
                 let import_rx = registry.register_migration_signal(transfer_id).await;
 
+                let target_network_mode = self.resolve_network_mode(target_host_id).await?;
                 let _ = registry
                     .send_host_command(
                         target_host_id,
@@ -1046,7 +1092,7 @@ WantedBy=multi-user.target
                             container_name: container_name.to_string(),
                             storage_path: target_storage.clone(),
                             transfer_id: transfer_id.to_string(),
-                            network_mode: self.resolve_network_mode(target_host_id).await,
+                            network_mode: target_network_mode,
                         },
                     )
                     .await
@@ -1185,6 +1231,7 @@ WantedBy=multi-user.target
                     .set_transfer_relay_target(transfer_id, target_host_id, container_name)
                     .await;
 
+                let target_network_mode = self.resolve_network_mode(target_host_id).await?;
                 let _ = registry
                     .send_host_command(
                         target_host_id,
@@ -1192,7 +1239,7 @@ WantedBy=multi-user.target
                             container_name: container_name.to_string(),
                             storage_path: target_storage.clone(),
                             transfer_id: transfer_id.to_string(),
-                            network_mode: self.resolve_network_mode(target_host_id).await,
+                            network_mode: target_network_mode,
                         },
                     )
                     .await
@@ -1219,7 +1266,7 @@ WantedBy=multi-user.target
                 app_id,
                 transfer_id,
                 MigrationPhase::Exporting,
-                30,
+                10,
                 0,
                 0,
                 None,
@@ -1354,14 +1401,34 @@ WantedBy=multi-user.target
             )
             .await;
         } else {
-            let _ = registry
-                .send_host_command(
-                    source_host_id,
-                    HostRegistryMessage::DeleteContainer {
-                        container_name: container_name.to_string(),
-                    },
-                )
-                .await;
+            // Retry cleanup with reconnection wait — the source host may have
+            // temporarily disconnected during the migration (heartbeat timeout).
+            let mut cleanup_ok = false;
+            for attempt in 1..=5 {
+                match registry
+                    .send_host_command(
+                        source_host_id,
+                        HostRegistryMessage::DeleteNspawnContainer {
+                            container_name: container_name.to_string(),
+                            storage_path: source_storage.clone(),
+                        },
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        info!(transfer_id, attempt, "Source cleanup command sent to {}", source_host_id);
+                        cleanup_ok = true;
+                        break;
+                    }
+                    Err(e) => {
+                        warn!(transfer_id, attempt, "Source cleanup failed: {e} — retrying in 3s");
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    }
+                }
+            }
+            if !cleanup_ok {
+                error!(transfer_id, "Failed to send cleanup to source host {} after 5 attempts", source_host_id);
+            }
         }
 
         // Update container status

@@ -21,8 +21,8 @@ pub struct NspawnClient;
 impl NspawnClient {
     /// Create and start a container: debootstrap rootfs, write .nspawn unit,
     /// write network config, machinectl start, wait for readiness.
-    pub async fn create_container(name: &str, storage_path: &Path) -> Result<()> {
-        info!(container = name, storage = %storage_path.display(), "Creating nspawn container");
+    pub async fn create_container(name: &str, storage_path: &Path, network_mode: &str) -> Result<()> {
+        info!(container = name, storage = %storage_path.display(), network_mode, "Creating nspawn container");
 
         // Bootstrap Ubuntu rootfs
         crate::rootfs::bootstrap_ubuntu(name, storage_path).await?;
@@ -31,7 +31,7 @@ impl NspawnClient {
         Self::create_workspace(name, storage_path).await?;
 
         // Write .nspawn unit
-        Self::write_nspawn_unit(name, storage_path, "bridge:br-lan").await?;
+        Self::write_nspawn_unit(name, storage_path, network_mode).await?;
 
         // Write network config inside rootfs
         Self::write_network_config(name, storage_path).await?;
@@ -183,6 +183,12 @@ impl NspawnClient {
         let unit_path = format!("{NSPAWN_UNIT_DIR}/{name}.nspawn");
         let _ = tokio::fs::remove_file(&unit_path).await;
 
+        // Remove symlink from /var/lib/machines/ if it's a symlink (custom storage path)
+        let machine_link = Path::new(DEFAULT_STORAGE).join(name);
+        if machine_link.is_symlink() {
+            let _ = tokio::fs::remove_file(&machine_link).await;
+        }
+
         info!(container = name, "Nspawn container deleted");
         Ok(())
     }
@@ -255,8 +261,11 @@ impl NspawnClient {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            // Don't fail if already stopped
-            if !stderr.contains("not running") && !stderr.contains("not known") {
+            // Don't fail if already stopped or machine not registered
+            let is_benign = stderr.contains("not running")
+                || stderr.contains("not known")
+                || stderr.contains("No machine");
+            if !is_benign {
                 anyhow::bail!("machinectl terminate {name} failed: {stderr}");
             }
         }
@@ -279,9 +288,25 @@ impl NspawnClient {
             format!("Bridge={network_mode}")
         };
 
-        // If storage_path is not the default, add Directory= to [Exec]
+        // If storage_path is not the default, create a symlink in /var/lib/machines/
+        // so that machinectl can discover the image, and add Directory= to [Exec]
         let directory_line = if storage_path != Path::new(DEFAULT_STORAGE) {
             let rootfs = storage_path.join(name);
+            let symlink_path = Path::new(DEFAULT_STORAGE).join(name);
+
+            // Remove existing symlink/entry if present
+            if symlink_path.is_symlink() {
+                let _ = tokio::fs::remove_file(&symlink_path).await;
+            }
+
+            // Create symlink: /var/lib/machines/<name> -> <storage_path>/<name>
+            tokio::fs::symlink(&rootfs, &symlink_path).await
+                .with_context(|| format!(
+                    "failed to create symlink {} -> {}",
+                    symlink_path.display(), rootfs.display()
+                ))?;
+            info!(container = name, "Created machine symlink: {} -> {}", symlink_path.display(), rootfs.display());
+
             format!("\nDirectory={}", rootfs.display())
         } else {
             String::new()
@@ -309,17 +334,17 @@ impl NspawnClient {
     }
 
     /// Write network configuration inside the container rootfs.
-    /// Sets up systemd-networkd for DHCP on host0 and resolv.conf pointing to HomeRoute DNS.
+    /// Sets up systemd-networkd for DHCP on host0/mv-* and resolv.conf pointing to HomeRoute DNS.
     pub async fn write_network_config(name: &str, storage_path: &Path) -> Result<()> {
         let rootfs = storage_path.join(name);
 
-        // Write systemd-networkd config for host0
+        // Write systemd-networkd config matching both bridge (host0) and macvlan (mv-*) interfaces
         let network_dir = rootfs.join("etc/systemd/network");
         tokio::fs::create_dir_all(&network_dir).await
             .context("failed to create network config dir")?;
 
         let network_config = "[Match]\n\
-             Name=host0\n\
+             Name=host0 mv-*\n\
              \n\
              [Network]\n\
              DHCP=yes\n\

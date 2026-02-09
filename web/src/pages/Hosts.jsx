@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import {
   HardDrive, Plus, Trash2, RefreshCw, X, Check,
-  Play, Square, RotateCw, Moon, CheckCircle, XCircle
+  Play, Square, RotateCw, Moon, CheckCircle, XCircle, Settings
 } from 'lucide-react';
 import Button from '../components/Button';
 import StatusBadge from '../components/StatusBadge';
@@ -10,13 +10,16 @@ import Section from '../components/Section';
 import {
   getHosts,
   addHost,
+  updateHost,
   deleteHost,
   wakeHost,
   shutdownHost,
   rebootHost,
   sleepHost,
   setWolMac,
-  setAutoOff
+  setAutoOff,
+  updateLocalHostConfig,
+  getLocalInterfaces
 } from '../api/client';
 import useWebSocket from '../hooks/useWebSocket';
 
@@ -24,6 +27,7 @@ export default function Hosts() {
   const [hosts, setHosts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [settingsHost, setSettingsHost] = useState(null);
   // Add host form
   const [formData, setFormData] = useState({
     name: '',
@@ -36,6 +40,17 @@ export default function Hosts() {
   const [addingHost, setAddingHost] = useState(false);
   const [addError, setAddError] = useState('');
   const [message, setMessage] = useState(null);
+
+  // Settings modal state
+  const [settingsForm, setSettingsForm] = useState({
+    wol_mac: '',
+    auto_off_mode: 'off',
+    auto_off_minutes: 5,
+    lan_interface: '',
+    container_storage_path: '/var/lib/machines',
+  });
+  const [localInterfaces, setLocalInterfaces] = useState([]);
+  const [savingSettings, setSavingSettings] = useState(false);
 
   useWebSocket({
     'hosts:status': (data) => {
@@ -174,21 +189,94 @@ export default function Hosts() {
     }
   };
 
-  const handleSetWolMac = async (id, mac) => {
-    try {
-      await setWolMac(id, mac);
-      setHosts(prev => prev.map(h => h.id === id ? { ...h, wol_mac: mac } : h));
-    } catch (error) {
-      console.error('Failed to set WOL MAC:', error);
-    }
+  // ── Settings modal ─────────────────────────
+
+  const filterPhysicalInterfaces = (interfaces) => {
+    if (!interfaces) return [];
+    return interfaces.filter(i =>
+      i.ifname &&
+      i.ifname !== 'lo' &&
+      !i.ifname.startsWith('br-') &&
+      !i.ifname.startsWith('veth') &&
+      !i.ifname.startsWith('docker') &&
+      !i.ifname.startsWith('virbr')
+    );
   };
 
-  const handleSetAutoOff = async (id, mode, minutes) => {
+  const openSettings = async (host) => {
+    setSettingsForm({
+      wol_mac: host.wol_mac || host.mac || '',
+      auto_off_mode: host.auto_off_mode || 'off',
+      auto_off_minutes: host.auto_off_minutes || 5,
+      lan_interface: host.lan_interface || '',
+      container_storage_path: host.container_storage_path || '/var/lib/machines',
+    });
+
+    if (host.is_local) {
+      try {
+        const res = await getLocalInterfaces();
+        setLocalInterfaces(res.data.interfaces || []);
+      } catch (error) {
+        console.error('Failed to load local interfaces:', error);
+        setLocalInterfaces([]);
+      }
+    } else {
+      setLocalInterfaces([]);
+    }
+
+    setSettingsHost(host);
+  };
+
+  const handleSaveSettings = async () => {
+    if (!settingsHost) return;
+    setSavingSettings(true);
+
     try {
-      await setAutoOff(id, mode, minutes);
-      setHosts(prev => prev.map(h => h.id === id ? { ...h, auto_off_mode: mode, auto_off_minutes: minutes } : h));
+      if (settingsHost.is_local) {
+        await updateLocalHostConfig({
+          lan_interface: settingsForm.lan_interface || null,
+          container_storage_path: settingsForm.container_storage_path,
+        });
+        setHosts(prev => prev.map(h =>
+          h.id === settingsHost.id
+            ? { ...h, lan_interface: settingsForm.lan_interface, container_storage_path: settingsForm.container_storage_path }
+            : h
+        ));
+      } else {
+        // Save WOL MAC
+        if (settingsForm.wol_mac !== (settingsHost.wol_mac || settingsHost.mac || '')) {
+          await setWolMac(settingsHost.id, settingsForm.wol_mac);
+        }
+        // Save auto-off
+        if (settingsForm.auto_off_mode !== (settingsHost.auto_off_mode || 'off') ||
+            settingsForm.auto_off_minutes !== (settingsHost.auto_off_minutes || 5)) {
+          const mins = settingsForm.auto_off_mode === 'off' ? 0 : settingsForm.auto_off_minutes;
+          await setAutoOff(settingsHost.id, settingsForm.auto_off_mode, mins);
+        }
+        // Save macvlan + storage path
+        await updateHost(settingsHost.id, {
+          lan_interface: settingsForm.lan_interface || null,
+          container_storage_path: settingsForm.container_storage_path,
+        });
+        setHosts(prev => prev.map(h =>
+          h.id === settingsHost.id
+            ? {
+                ...h,
+                wol_mac: settingsForm.wol_mac,
+                auto_off_mode: settingsForm.auto_off_mode,
+                auto_off_minutes: settingsForm.auto_off_minutes,
+                lan_interface: settingsForm.lan_interface,
+                container_storage_path: settingsForm.container_storage_path,
+              }
+            : h
+        ));
+      }
+      setMessage({ type: 'success', text: 'Configuration sauvegardee' });
+      setSettingsHost(null);
     } catch (error) {
-      console.error('Failed to set auto-off:', error);
+      setMessage({ type: 'error', text: 'Echec sauvegarde : ' + (error.response?.data?.error || error.message) });
+    } finally {
+      setSavingSettings(false);
     }
   };
 
@@ -200,7 +288,7 @@ export default function Hosts() {
   };
 
   const getEffectiveStatus = (host) => {
-    // Power state takes precedence over simple online/offline
+    if (host.is_local) return 'online';
     if (host.power_state && host.power_state !== 'online' && host.power_state !== 'offline') {
       return host.power_state;
     }
@@ -227,8 +315,8 @@ export default function Hosts() {
       case 'suspended': return 'En veille';
       case 'suspending': return 'Mise en veille...';
       case 'shutting_down': return 'Extinction...';
-      case 'rebooting': return 'Redémarrage...';
-      case 'waking_up': return 'Réveil...';
+      case 'rebooting': return 'Redemarrage...';
+      case 'waking_up': return 'Reveil...';
       default: return status || 'Inconnu';
     }
   };
@@ -276,8 +364,7 @@ export default function Hosts() {
                   <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Adresse</th>
                   <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">CPU</th>
                   <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">RAM</th>
-                  <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">MAC (WOL)</th>
-                  <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Auto-arrêt</th>
+                  <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Macvlan</th>
                   <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Vu</th>
                   <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Actions</th>
                 </tr>
@@ -288,8 +375,8 @@ export default function Hosts() {
                     {/* Name */}
                     <td className="px-3 py-2 text-sm font-medium text-white">
                       <div className="flex items-center gap-2">
-                        <HardDrive className="w-4 h-4 text-blue-400 flex-shrink-0" />
-                        {host.name}
+                        <HardDrive className={`w-4 h-4 flex-shrink-0 ${host.is_local ? 'text-green-400' : 'text-blue-400'}`} />
+                        {host.is_local ? 'HomeRoute' : host.name}
                       </div>
                     </td>
                     {/* Status */}
@@ -305,7 +392,7 @@ export default function Hosts() {
                     </td>
                     {/* Address */}
                     <td className="px-3 py-2 text-sm font-mono text-gray-300">
-                      {host.host}:{host.port}
+                      {host.is_local ? '127.0.0.1' : host.host}
                     </td>
                     {/* CPU */}
                     <td className="px-3 py-2 text-sm">
@@ -329,63 +416,25 @@ export default function Hosts() {
                         </div>
                       ) : <span className="text-gray-600 text-xs">--</span>}
                     </td>
-                    {/* WOL MAC */}
-                    <td className="px-3 py-2 text-sm">
-                      {host.interfaces && host.interfaces.length > 0 ? (
-                        <select
-                          className="bg-gray-700 text-xs text-gray-300 border border-gray-600 px-1 py-0.5 rounded-sm"
-                          value={host.wol_mac || host.mac || ''}
-                          onChange={(e) => handleSetWolMac(host.id, e.target.value)}
-                        >
-                          {host.interfaces.filter(i => i.address && i.address !== '00:00:00:00:00:00').map((iface, idx) => (
-                            <option key={idx} value={iface.address}>
-                              {iface.ifname} ({iface.address})
-                            </option>
-                          ))}
-                        </select>
-                      ) : (
-                        <span className="text-gray-500 text-xs font-mono">{host.mac || '--'}</span>
-                      )}
-                    </td>
-                    {/* Auto-off (mode + delay) */}
-                    <td className="px-3 py-2 text-sm">
-                      <div className="flex items-center gap-1">
-                        <select
-                          className="bg-gray-700 text-xs text-gray-300 border border-gray-600 px-1 py-0.5 rounded-sm"
-                          value={host.auto_off_mode || 'off'}
-                          onChange={(e) => {
-                            const mode = e.target.value;
-                            const mins = mode === 'off' ? 0 : (host.auto_off_minutes || 5);
-                            handleSetAutoOff(host.id, mode, mins);
-                          }}
-                        >
-                          <option value="off">Off</option>
-                          <option value="sleep">Veille</option>
-                          <option value="shutdown">Extinction</option>
-                        </select>
-                        {host.auto_off_mode && host.auto_off_mode !== 'off' && (
-                          <select
-                            className="bg-gray-700 text-xs text-gray-300 border border-gray-600 px-1 py-0.5 rounded-sm"
-                            value={host.auto_off_minutes || 5}
-                            onChange={(e) => handleSetAutoOff(host.id, host.auto_off_mode, parseInt(e.target.value))}
-                          >
-                            <option value={2}>2m</option>
-                            <option value={5}>5m</option>
-                            <option value={10}>10m</option>
-                            <option value={15}>15m</option>
-                            <option value={30}>30m</option>
-                          </select>
-                        )}
-                      </div>
+                    {/* Macvlan */}
+                    <td className="px-3 py-2 text-sm text-gray-300">
+                      {host.lan_interface || '--'}
                     </td>
                     {/* Last seen */}
                     <td className="px-3 py-2 text-xs text-gray-500">
-                      {host.lastSeen ? new Date(host.lastSeen).toLocaleTimeString() : '--'}
+                      {host.is_local ? '--' : (host.lastSeen ? new Date(host.lastSeen).toLocaleTimeString() : '--')}
                     </td>
                     {/* Actions */}
                     <td className="px-3 py-2">
                       <div className="flex gap-1">
-                        {(() => {
+                        <button
+                          onClick={() => openSettings(host)}
+                          className="p-1.5 text-gray-400 hover:bg-gray-600/20 hover:text-white"
+                          title="Parametres"
+                        >
+                          <Settings className="w-3.5 h-3.5" />
+                        </button>
+                        {!host.is_local && (() => {
                           const st = getEffectiveStatus(host);
                           const isOnline = st === 'online';
                           const canWake = st === 'offline' || st === 'suspended';
@@ -423,16 +472,16 @@ export default function Hosts() {
                               >
                                 <Square className="w-3.5 h-3.5" />
                               </button>
+                              <button
+                                onClick={() => handleDeleteHost(host.id)}
+                                className="p-1.5 text-red-400 hover:bg-red-600/20"
+                                title="Supprimer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
                             </>
                           );
                         })()}
-                        <button
-                          onClick={() => handleDeleteHost(host.id)}
-                          className="p-1.5 text-red-400 hover:bg-red-600/20"
-                          title="Supprimer"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
                       </div>
                     </td>
                   </tr>
@@ -545,6 +594,142 @@ export default function Hosts() {
                 </Button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Host Settings Modal */}
+      {settingsHost && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-gray-800 p-6 w-full max-w-md">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-xl font-bold text-white">
+                {settingsHost.is_local ? 'HomeRoute' : settingsHost.name} — Parametres
+              </h2>
+              <button onClick={() => setSettingsHost(null)} className="text-gray-400 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              {/* Remote-only fields */}
+              {!settingsHost.is_local && (
+                <>
+                  {/* MAC WOL */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-1">MAC WOL</label>
+                    {settingsHost.interfaces && settingsHost.interfaces.length > 0 ? (
+                      <select
+                        className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white"
+                        value={settingsForm.wol_mac}
+                        onChange={(e) => setSettingsForm({ ...settingsForm, wol_mac: e.target.value })}
+                      >
+                        <option value="">-- Aucun --</option>
+                        {settingsHost.interfaces.filter(i => i.address && i.address !== '00:00:00:00:00:00').map((iface, idx) => (
+                          <option key={idx} value={iface.address}>
+                            {iface.ifname} ({iface.address})
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white"
+                        value={settingsForm.wol_mac}
+                        onChange={(e) => setSettingsForm({ ...settingsForm, wol_mac: e.target.value })}
+                        placeholder="AA:BB:CC:DD:EE:FF"
+                      />
+                    )}
+                  </div>
+
+                  {/* Auto-off */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-1">Auto-arret</label>
+                    <div className="flex gap-2">
+                      <select
+                        className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 text-white"
+                        value={settingsForm.auto_off_mode}
+                        onChange={(e) => setSettingsForm({ ...settingsForm, auto_off_mode: e.target.value })}
+                      >
+                        <option value="off">Off</option>
+                        <option value="sleep">Veille</option>
+                        <option value="shutdown">Extinction</option>
+                      </select>
+                      {settingsForm.auto_off_mode !== 'off' && (
+                        <select
+                          className="px-3 py-2 bg-gray-700 border border-gray-600 text-white"
+                          value={settingsForm.auto_off_minutes}
+                          onChange={(e) => setSettingsForm({ ...settingsForm, auto_off_minutes: parseInt(e.target.value) })}
+                        >
+                          <option value={2}>2m</option>
+                          <option value={5}>5m</option>
+                          <option value={10}>10m</option>
+                          <option value={15}>15m</option>
+                          <option value={30}>30m</option>
+                        </select>
+                      )}
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {/* Macvlan interface — both local and remote */}
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1">Interface Macvlan</label>
+                {settingsHost.is_local ? (
+                  <select
+                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white"
+                    value={settingsForm.lan_interface}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, lan_interface: e.target.value })}
+                  >
+                    <option value="">-- Aucune --</option>
+                    {filterPhysicalInterfaces(localInterfaces).map((iface, idx) => (
+                      <option key={idx} value={iface.ifname}>
+                        {iface.ifname}{iface.ipv4 ? ` (${iface.ipv4})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <select
+                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white"
+                    value={settingsForm.lan_interface}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, lan_interface: e.target.value })}
+                  >
+                    <option value="">-- Aucune --</option>
+                    {filterPhysicalInterfaces(settingsHost.interfaces).map((iface, idx) => (
+                      <option key={idx} value={iface.ifname}>
+                        {iface.ifname}{iface.ipv4 ? ` (${iface.ipv4})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+
+              {/* Container storage path — both local and remote */}
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1">Chemin de stockage</label>
+                <input
+                  type="text"
+                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white"
+                  value={settingsForm.container_storage_path}
+                  onChange={(e) => setSettingsForm({ ...settingsForm, container_storage_path: e.target.value })}
+                  placeholder="/var/lib/machines"
+                />
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <Button type="button" variant="secondary" onClick={() => setSettingsHost(null)} className="flex-1">
+                  Fermer
+                </Button>
+                <Button onClick={handleSaveSettings} disabled={savingSettings} className="flex-1">
+                  {savingSettings ? (
+                    <><RefreshCw className="w-4 h-4 mr-2 animate-spin" />Sauvegarde...</>
+                  ) : (
+                    <><Check className="w-4 h-4 mr-2" />Sauvegarder</>
+                  )}
+                </Button>
+              </div>
+            </div>
           </div>
         </div>
       )}

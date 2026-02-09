@@ -73,6 +73,8 @@ async fn run_connection(config: &Config) -> Result<(), String> {
         token: config.token.clone(),
         host_name: config.host_name.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        lan_interface: config.lan_interface.clone(),
+        container_storage_path: config.container_storage_path.clone(),
     };
     let auth_json = serde_json::to_string(&auth).map_err(|e| e.to_string())?;
     write
@@ -429,42 +431,65 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                             }
                             Ok(HostRegistryMessage::DeleteContainer { container_name }) => {
                                 info!(container = %container_name, "Deleting container");
-                                let _ = tokio::process::Command::new("lxc")
-                                    .args(["delete", &container_name, "--force"])
-                                    .output()
-                                    .await;
-                                // Also delete workspace storage volume
-                                let vol_name = format!("{container_name}-workspace");
-                                let _ = tokio::process::Command::new("lxc")
-                                    .args(["storage", "volume", "delete", "default", &vol_name])
-                                    .output()
-                                    .await;
+                                if container_name.starts_with("hr-v2-") {
+                                    // Nspawn container: use machinectl + cleanup
+                                    let storage = config.container_storage_path.as_deref().unwrap_or("/var/lib/machines");
+                                    let sp = std::path::Path::new(storage);
+                                    let _ = hr_container::NspawnClient::delete_container(&container_name, sp).await;
+                                } else {
+                                    let _ = tokio::process::Command::new("lxc")
+                                        .args(["delete", &container_name, "--force"])
+                                        .output()
+                                        .await;
+                                    let vol_name = format!("{container_name}-workspace");
+                                    let _ = tokio::process::Command::new("lxc")
+                                        .args(["storage", "volume", "delete", "default", &vol_name])
+                                        .output()
+                                        .await;
+                                }
                             }
                             Ok(HostRegistryMessage::StartContainer { container_name }) => {
                                 info!(container = %container_name, "Starting container");
-                                let _ = tokio::process::Command::new("lxc")
-                                    .args(["start", &container_name])
-                                    .output()
-                                    .await;
+                                if container_name.starts_with("hr-v2-") {
+                                    let _ = hr_container::NspawnClient::start_container(&container_name).await;
+                                } else {
+                                    let _ = tokio::process::Command::new("lxc")
+                                        .args(["start", &container_name])
+                                        .output()
+                                        .await;
+                                }
                             }
                             Ok(HostRegistryMessage::StopContainer { container_name }) => {
                                 info!(container = %container_name, "Stopping container");
-                                let _ = tokio::process::Command::new("lxc")
-                                    .args(["stop", &container_name, "--force"])
-                                    .output()
-                                    .await;
+                                if container_name.starts_with("hr-v2-") {
+                                    let _ = hr_container::NspawnClient::stop_container(&container_name).await;
+                                } else {
+                                    let _ = tokio::process::Command::new("lxc")
+                                        .args(["stop", &container_name, "--force"])
+                                        .output()
+                                        .await;
+                                }
                             }
                             Ok(HostRegistryMessage::ExecInContainer { request_id, container_name, command }) => {
                                 info!(container = %container_name, "Executing command in container");
                                 let tx_exec = tx.clone();
+                                let is_nspawn = container_name.starts_with("hr-v2-");
                                 tokio::spawn(async move {
-                                    let mut lxc_args = vec!["exec".to_string(), container_name, "--".to_string()];
-                                    lxc_args.extend(command);
-                                    let lxc_refs: Vec<&str> = lxc_args.iter().map(|s| s.as_str()).collect();
-                                    let result = tokio::process::Command::new("lxc")
-                                        .args(&lxc_refs)
-                                        .output()
-                                        .await;
+                                    let result = if is_nspawn {
+                                        let joined = command.join(" ");
+                                        tokio::process::Command::new("machinectl")
+                                            .args(["shell", &container_name, "/bin/bash", "-c", &joined])
+                                            .output()
+                                            .await
+                                    } else {
+                                        let mut lxc_args = vec!["exec".to_string(), container_name, "--".to_string()];
+                                        lxc_args.extend(command);
+                                        let lxc_refs: Vec<&str> = lxc_args.iter().map(|s| s.as_str()).collect();
+                                        tokio::process::Command::new("lxc")
+                                            .args(&lxc_refs)
+                                            .output()
+                                            .await
+                                    };
                                     let (success, stdout, stderr) = match result {
                                         Ok(out) => (
                                             out.status.success(),
@@ -556,14 +581,13 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                             }
                             // ── Nspawn container handlers ──────────────────
                             Ok(HostRegistryMessage::CreateNspawnContainer {
-                                app_id: _, slug: _, container_name, storage_path, bridge,
+                                app_id: _, slug: _, container_name, storage_path, network_mode,
                                 agent_token: _, agent_config: _,
                             }) => {
-                                info!(container = %container_name, storage = %storage_path, "Creating nspawn container");
+                                info!(container = %container_name, storage = %storage_path, network_mode = %network_mode, "Creating nspawn container");
                                 tokio::spawn(async move {
                                     let sp = std::path::Path::new(&storage_path);
-                                    let _network_mode = format!("bridge:{bridge}");
-                                    match hr_container::NspawnClient::create_container(&container_name, sp).await {
+                                    match hr_container::NspawnClient::create_container(&container_name, sp, &network_mode).await {
                                         Ok(()) => {
                                             info!(container = %container_name, "Nspawn container created successfully");
                                         }
@@ -624,6 +648,43 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                             }
                             Ok(HostRegistryMessage::StartNspawnImport { container_name, storage_path, transfer_id, network_mode }) => {
                                 info!(container = %container_name, transfer_id = %transfer_id, "Preparing nspawn import");
+
+                                // Pre-flight: ensure systemd-container is installed
+                                if tokio::process::Command::new("machinectl")
+                                    .arg("--version")
+                                    .stdout(std::process::Stdio::null())
+                                    .stderr(std::process::Stdio::null())
+                                    .status()
+                                    .await
+                                    .map(|s| !s.success())
+                                    .unwrap_or(true)
+                                {
+                                    info!("machinectl not found, installing systemd-container...");
+                                    let install = tokio::process::Command::new("apt-get")
+                                        .args(["install", "-y", "systemd-container"])
+                                        .output()
+                                        .await;
+                                    match install {
+                                        Ok(out) if out.status.success() => {
+                                            info!("systemd-container installed successfully");
+                                        }
+                                        Ok(out) => {
+                                            let stderr = String::from_utf8_lossy(&out.stderr);
+                                            error!("Failed to install systemd-container: {}", stderr);
+                                            let _ = tx.send(OutgoingWsMessage::Text(HostAgentMessage::ImportFailed {
+                                                transfer_id, error: format!("machinectl not available and auto-install failed: {}", stderr),
+                                            })).await;
+                                            continue;
+                                        }
+                                        Err(e) => {
+                                            error!("Failed to run apt-get: {}", e);
+                                            let _ = tx.send(OutgoingWsMessage::Text(HostAgentMessage::ImportFailed {
+                                                transfer_id, error: format!("machinectl not available: {}", e),
+                                            })).await;
+                                            continue;
+                                        }
+                                    }
+                                }
 
                                 let rootfs_dir = format!("{}/{}", storage_path, container_name);
 

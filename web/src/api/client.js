@@ -154,6 +154,8 @@ export const sleepHost = (id) => api.post(`/hosts/${id}/sleep`);
 export const setWolMac = (id, mac) => api.post(`/hosts/${id}/wol-mac`, { mac });
 export const setAutoOff = (id, mode, minutes) => api.post(`/hosts/${id}/auto-off`, { mode, minutes });
 export const updateHostAgents = () => api.post('/hosts/agents/update');
+export const updateLocalHostConfig = (data) => api.put('/hosts/local/config', data);
+export const getLocalInterfaces = () => api.get('/hosts/local/interfaces');
 
 // Cloud Relay
 export const getCloudRelayStatus = () => api.get('/cloud-relay/status');
