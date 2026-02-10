@@ -4,6 +4,7 @@ mod dataverse;
 mod mcp;
 mod metrics;
 mod powersave;
+mod proxy;
 mod services;
 mod update;
 
@@ -85,6 +86,10 @@ async fn main() -> Result<()> {
     // Shared signal map for MCP → main loop schema query responses
     let schema_signals: SchemaQuerySignals =
         Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+
+    // Agent HTTPS proxy (created once, survives reconnections)
+    let agent_proxy: Arc<proxy::AgentProxy> = Arc::new(proxy::AgentProxy::new(&cfg));
+    let mut proxy_started = false;
 
     // Reconnection loop with exponential backoff
     let mut backoff = INITIAL_BACKOFF_SECS;
@@ -208,6 +213,8 @@ async fn main() -> Result<()> {
                                 &outbound_tx,
                                 &local_dataverse,
                                 &schema_signals,
+                                &agent_proxy,
+                                &mut proxy_started,
                                 msg
                             ).await;
                         }
@@ -241,6 +248,8 @@ async fn main() -> Result<()> {
                 &outbound_tx,
                 &local_dataverse,
                 &schema_signals,
+                &agent_proxy,
+                &mut proxy_started,
                 msg
             ).await;
         }
@@ -359,6 +368,8 @@ async fn handle_registry_message(
     outbound_tx: &mpsc::Sender<AgentMessage>,
     local_dataverse: &Option<Arc<crate::dataverse::LocalDataverse>>,
     schema_signals: &SchemaQuerySignals,
+    agent_proxy: &Arc<proxy::AgentProxy>,
+    proxy_started: &mut bool,
     msg: RegistryMessage,
 ) {
     match msg {
@@ -371,40 +382,64 @@ async fn handle_registry_message(
                 mgr.update_config(&services);
             }
 
+            // Update agent proxy route table
+            agent_proxy.update_routes(
+                &base_domain,
+                &slug,
+                frontend.as_ref(),
+                &apis,
+                code_server_enabled,
+            );
+
+            // On first Config: pull certs and start the HTTPS proxy
+            if !*proxy_started {
+                match agent_proxy.update_certs().await {
+                    Ok(()) => {
+                        agent_proxy.start();
+                        *proxy_started = true;
+                        info!("Agent HTTPS proxy started");
+                    }
+                    Err(e) => {
+                        error!("Failed to pull initial certs, proxy NOT started: {e}");
+                    }
+                }
+            }
+
             // Build and publish routes using per-app subdomain scheme:
             // {slug}.{base}, {api}.{slug}.{base}, code.{slug}.{base}
+            // All routes point to port 443 (agent proxy handles internal routing)
             let mut routes = Vec::new();
-            if let Some(ref fe) = frontend {
+            if frontend.is_some() {
                 routes.push(AgentRoute {
                     domain: format!("{}.{}", slug, base_domain),
-                    target_port: fe.target_port,
+                    target_port: 443,
                     service_type: ServiceType::App,
-                    auth_required: fe.auth_required,
-                    allowed_groups: fe.allowed_groups.clone(),
+                    auth_required: false,
+                    allowed_groups: vec![],
                 });
             }
             for api in &apis {
                 routes.push(AgentRoute {
                     domain: format!("{}.{}.{}", api.slug, slug, base_domain),
-                    target_port: api.target_port,
+                    target_port: 443,
                     service_type: ServiceType::App,
-                    auth_required: api.auth_required,
-                    allowed_groups: api.allowed_groups.clone(),
+                    auth_required: false,
+                    allowed_groups: vec![],
                 });
             }
             if code_server_enabled {
                 routes.push(AgentRoute {
                     domain: format!("code.{}.{}", slug, base_domain),
-                    target_port: 13337,
+                    target_port: 443,
                     service_type: ServiceType::CodeServer,
-                    auth_required: true,
+                    auth_required: false,
                     allowed_groups: vec![],
                 });
             }
             if !routes.is_empty() {
                 let routes_count = routes.len();
                 let _ = outbound_tx.send(AgentMessage::PublishRoutes { routes }).await;
-                info!("Published {} routes to HomeRoute", routes_count);
+                info!("Published {} routes to HomeRoute (all port 443)", routes_count);
             }
         }
 
@@ -482,6 +517,16 @@ async fn handle_registry_message(
             } else {
                 tracing::debug!(request_id, "No pending signal for DataverseSchemas response");
             }
+        }
+
+        RegistryMessage::CertRenewal { slug } => {
+            info!(slug, "Certificate renewal notification, re-pulling certs");
+            let proxy = Arc::clone(agent_proxy);
+            tokio::spawn(async move {
+                if let Err(e) = proxy.update_certs().await {
+                    error!("Failed to update certs after renewal: {e}");
+                }
+            });
         }
 
         _ => {}

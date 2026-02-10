@@ -16,6 +16,8 @@ use hr_proxy::AppRoute;
 use hr_registry::protocol::{AgentMessage, HostRegistryMessage, PowerPolicy, ServiceAction, ServiceType};
 use hr_registry::types::TriggerUpdateRequest;
 use hr_common::events::{MigrationPhase, MigrationProgressEvent};
+use hr_acme::types::WildcardType;
+use hr_dns::config::StaticRecord;
 
 use crate::state::{ApiState, MigrationState};
 
@@ -27,6 +29,7 @@ pub fn router() -> Router<ApiState> {
         .route("/{id}/update/fix", post(fix_agent_update))
         .route("/agents/version", get(agent_version))
         .route("/agents/binary", get(agent_binary))
+        .route("/agents/certs", get(agent_certs))
         .route("/agents/update", post(trigger_agent_update))
         .route("/agents/update/status", get(get_update_status))
         .route("/agents/ws", get(agent_ws))
@@ -326,6 +329,99 @@ async fn agent_binary() -> impl IntoResponse {
     }
 }
 
+// ── Agent certificate distribution ───────────────────────────
+
+/// GET /api/applications/agents/certs
+/// Auth via `Authorization: Bearer {agent_token}` header.
+/// Returns cert+key PEM for the app wildcard and global wildcard.
+async fn agent_certs(
+    State(state): State<ApiState>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let Some(registry) = &state.registry else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "Registry not available"}))).into_response();
+    };
+
+    // Extract Bearer token
+    let token = match headers.get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        Some(t) => t,
+        None => {
+            return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Missing or invalid Authorization header"}))).into_response();
+        }
+    };
+
+    // Authenticate by token (tries all applications)
+    let (app_id, slug) = match registry.authenticate_by_token(token).await {
+        Some(v) => v,
+        None => {
+            return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Invalid token"}))).into_response();
+        }
+    };
+
+    info!(app_id, slug, "Agent fetching certificates");
+
+    // Get app-specific wildcard cert
+    let app_cert = match state.acme.get_cert_pem(WildcardType::App { slug: slug.clone() }).await {
+        Ok((cert_pem, key_pem)) => {
+            let wildcard_domain = WildcardType::App { slug: slug.clone() }.domain_pattern(&state.env.base_domain);
+            Some(serde_json::json!({
+                "cert_pem": cert_pem,
+                "key_pem": key_pem,
+                "wildcard_domain": wildcard_domain,
+            }))
+        }
+        Err(_) => None,
+    };
+
+    // Get global wildcard cert
+    let global_cert = match state.acme.get_cert_pem(WildcardType::Global).await {
+        Ok((cert_pem, key_pem)) => {
+            let wildcard_domain = WildcardType::Global.domain_pattern(&state.env.base_domain);
+            Some(serde_json::json!({
+                "cert_pem": cert_pem,
+                "key_pem": key_pem,
+                "wildcard_domain": wildcard_domain,
+            }))
+        }
+        Err(_) => None,
+    };
+
+    Json(serde_json::json!({
+        "app_cert": app_cert,
+        "global_cert": global_cert,
+    })).into_response()
+}
+
+// ── DNS record helpers for agent lifecycle ───────────────────
+
+/// Add local DNS A records for an agent: `{slug}.{base}` and `*.{slug}.{base}` → IPv4.
+async fn add_agent_dns_records(dns: &hr_dns::SharedDnsState, slug: &str, base_domain: &str, ipv4: &str) {
+    let mut dns_state = dns.write().await;
+    dns_state.add_static_record(StaticRecord {
+        name: format!("{}.{}", slug, base_domain),
+        record_type: "A".to_string(),
+        value: ipv4.to_string(),
+        ttl: 60,
+    });
+    dns_state.add_static_record(StaticRecord {
+        name: format!("*.{}.{}", slug, base_domain),
+        record_type: "A".to_string(),
+        value: ipv4.to_string(),
+        ttl: 60,
+    });
+    info!(slug, ipv4, "Added local DNS A records for agent");
+}
+
+/// Remove all local DNS records pointing to a specific IPv4 address.
+async fn remove_agent_dns_records(dns: &hr_dns::SharedDnsState, ipv4: &str) {
+    let mut dns_state = dns.write().await;
+    dns_state.remove_static_records_by_value(ipv4);
+    info!(ipv4, "Removed local DNS records for agent IP");
+}
+
 // ── WebSocket handler for agent connections ─────────────────
 
 async fn agent_ws(
@@ -525,7 +621,17 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
                             }
                             Ok(AgentMessage::IpUpdate { ipv4_address }) => {
                                 info!(app_id, ipv4_address, "Agent reported IP update");
+                                // Remove old DNS records for previous IP
+                                if let Some(app) = registry.get_application(&app_id).await {
+                                    if let Some(old_ip) = app.ipv4_address {
+                                        remove_agent_dns_records(&state.dns, &old_ip.to_string()).await;
+                                    }
+                                }
                                 registry.handle_ip_update(&app_id, &ipv4_address).await;
+                                // Add new DNS records for updated IP
+                                if let Some(app) = registry.get_application(&app_id).await {
+                                    add_agent_dns_records(&state.dns, &app.slug, &state.env.base_domain, &ipv4_address).await;
+                                }
                             }
                             Ok(AgentMessage::PublishRoutes { routes }) => {
                                 info!(app_id, count = routes.len(), "Agent published routes");
@@ -550,6 +656,9 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
                                                 wake_page_enabled: app.wake_page_enabled,
                                             });
                                         }
+                                        // Add local DNS A records for direct local access
+                                        let ip_str = target_ip.to_string();
+                                        add_agent_dns_records(&state.dns, &app.slug, base_domain, &ip_str).await;
                                     }
                                 }
                             }
@@ -574,8 +683,12 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
             for domain in app.domains(base_domain) {
                 state.proxy.remove_app_route(&domain);
             }
+            // Remove local DNS A records for this agent
+            if let Some(ip) = app.ipv4_address {
+                remove_agent_dns_records(&state.dns, &ip.to_string()).await;
+            }
         }
-        info!(app_id, "Agent WebSocket closed (last connection, routes removed)");
+        info!(app_id, "Agent WebSocket closed (last connection, routes + DNS removed)");
     } else {
         info!(app_id, "Agent WebSocket closed (other connections still active, routes preserved)");
     }

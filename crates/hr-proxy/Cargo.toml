@@ -23,3 +23,4 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 ipnet = { workspace = true }
 chrono = { workspace = true }
+reqwest = { workspace = true }

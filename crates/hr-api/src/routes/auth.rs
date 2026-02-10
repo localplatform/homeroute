@@ -350,27 +350,42 @@ async fn revoke_session(
     (axum::http::StatusCode::OK, Json(json!({"success": true})))
 }
 
+/// Query parameters for forward-check (used by agent proxies).
+#[derive(Deserialize, Default)]
+struct ForwardCheckQuery {
+    #[serde(default)]
+    host: Option<String>,
+    #[serde(default)]
+    uri: Option<String>,
+    #[serde(default)]
+    groups: Option<String>,
+}
+
 /// Forward-auth endpoint for agent reverse proxies.
-/// Called by hr-agent with X-Forwarded-Host, X-Forwarded-Uri, X-Forwarded-Proto, Cookie headers.
-/// Returns 200 + X-Auth-User on success, 401 + login_url on unauthenticated, 403 on forbidden.
+/// Accepts query params: host, uri, groups (comma-separated) — or X-Forwarded-* headers.
+/// Returns 200 + user/groups on success, 401 + login_url on unauthenticated, 403 on forbidden.
 async fn forward_check(
     State(state): State<ApiState>,
+    axum::extract::Query(query): axum::extract::Query<ForwardCheckQuery>,
     headers: HeaderMap,
 ) -> (axum::http::StatusCode, Json<Value>) {
     use hr_auth::forward_auth::{check_forward_auth, ForwardAuthResult};
 
-    let forwarded_host = headers
-        .get("x-forwarded-host")
-        .and_then(|v| v.to_str().ok())
+    // Query params take precedence over headers (agent use case)
+    let forwarded_host = query.host.as_deref()
+        .or_else(|| headers.get("x-forwarded-host").and_then(|v| v.to_str().ok()))
         .unwrap_or("");
-    let forwarded_uri = headers
-        .get("x-forwarded-uri")
-        .and_then(|v| v.to_str().ok())
+    let forwarded_uri = query.uri.as_deref()
+        .or_else(|| headers.get("x-forwarded-uri").and_then(|v| v.to_str().ok()))
         .unwrap_or("/");
     let forwarded_proto = headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("https");
+
+    let allowed_groups: Vec<String> = query.groups.as_deref()
+        .map(|g| g.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+        .unwrap_or_default();
 
     let cookie_value = headers
         .get("cookie")
@@ -382,15 +397,16 @@ async fn forward_check(
             })
         });
 
-    match check_forward_auth(&state.auth, cookie_value, forwarded_host, forwarded_uri, forwarded_proto, &[]) {
+    match check_forward_auth(&state.auth, cookie_value, forwarded_host, forwarded_uri, forwarded_proto, &allowed_groups) {
         ForwardAuthResult::Success { user } => {
-            (axum::http::StatusCode::OK, Json(json!({"authenticated": true, "user": user.username})))
+            let groups = user.groups.join(",");
+            (axum::http::StatusCode::OK, Json(json!({"user": user.username, "groups": groups})))
         }
         ForwardAuthResult::Unauthorized { login_url } => {
-            (axum::http::StatusCode::UNAUTHORIZED, Json(json!({"authenticated": false, "login_url": login_url})))
+            (axum::http::StatusCode::UNAUTHORIZED, Json(json!({"login_url": login_url})))
         }
         ForwardAuthResult::Forbidden { message } => {
-            (axum::http::StatusCode::FORBIDDEN, Json(json!({"authenticated": false, "error": message})))
+            (axum::http::StatusCode::FORBIDDEN, Json(json!({"message": message})))
         }
     }
 }

@@ -45,6 +45,8 @@ struct ConfigSnapshot {
 pub struct ProxyState {
     /// HTTP client for backend requests
     pub client: Client<hyper_util::client::legacy::connect::HttpConnector, Body>,
+    /// HTTPS client for re-encrypt backend requests (skips cert verification for trusted LAN)
+    pub https_client: reqwest::Client,
     /// Reloadable configuration snapshot
     snapshot: RwLock<ConfigSnapshot>,
     /// Access logger
@@ -65,6 +67,13 @@ impl ProxyState {
     pub fn new(config: ProxyConfig, management_port: u16) -> Self {
         let client = Client::builder(TokioExecutor::new()).build_http();
 
+        // HTTPS client for re-encrypt to agent backends on port 443.
+        // Skip certificate verification: agents are on a trusted LAN.
+        let https_client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .expect("Failed to build HTTPS client");
+
         let access_logger = OptionalAccessLogger::new(config.access_log_path.clone());
 
         let local_networks: Vec<IpNet> = config
@@ -75,6 +84,7 @@ impl ProxyState {
 
         Self {
             client,
+            https_client,
             snapshot: RwLock::new(ConfigSnapshot {
                 config,
                 local_networks,
@@ -278,8 +288,11 @@ async fn proxy_handler_inner(
     // Check for agent-managed application routes (before static route lookup)
     if !is_management {
         if let Some(app_route) = state.get_app_route(domain_only) {
-            // Forward-auth if required
-            if app_route.auth_required {
+            // Agent routes (target_port == 443) handle their own auth — skip forward-auth.
+            // Non-agent routes still need central forward-auth.
+            let is_agent_route = app_route.target_port == 443;
+
+            if !is_agent_route && app_route.auth_required {
                 if let Some(ref auth) = state.auth {
                     let req_uri = req
                         .uri()
@@ -329,6 +342,11 @@ async fn proxy_handler_inner(
                 return handle_wod_sse(&state, &app_route).await;
             }
 
+            // Determine scheme based on target port (re-encrypt for agent port 443)
+            let scheme = if app_route.target_port == 443 { "https" } else { "http" };
+
+            let target_host_for_url = app_route.target_ip.to_string();
+
             // Check for WebSocket upgrade
             let is_websocket = is_websocket_upgrade(&req);
 
@@ -338,7 +356,7 @@ async fn proxy_handler_inner(
                     id: app_route.app_id.clone(),
                     domain: domain_only.to_string(),
                     backend: "app".to_string(),
-                    target_host: app_route.target_ip.to_string(),
+                    target_host: target_host_for_url.clone(),
                     target_port: app_route.target_port,
                     local_only: false,
                     require_auth: false,
@@ -353,7 +371,12 @@ async fn proxy_handler_inner(
                 let path_uri: Uri = path_and_query
                     .parse()
                     .unwrap_or_else(|_| "/".parse().unwrap());
-                match handle_websocket_upgrade(req, &target_route, path_uri).await {
+                let ws_result = if is_agent_route {
+                    handle_websocket_upgrade_tls(req, &target_route, path_uri, &host).await
+                } else {
+                    handle_websocket_upgrade(req, &target_route, path_uri).await
+                };
+                match ws_result {
                     Ok(resp) => return Ok(resp),
                     Err(ProxyError::UpstreamError(ref e)) if is_connection_refused(e) => {
                         // WOD: wake host or start service on connection refused
@@ -369,13 +392,10 @@ async fn proxy_handler_inner(
                 .path_and_query()
                 .map(|pq| pq.to_string())
                 .unwrap_or_else(|| "/".to_string());
-            let target_uri = format!(
-                "http://{}:{}{}",
-                app_route.target_ip, app_route.target_port, path
+            let target_uri_str = format!(
+                "{}://{}:{}{}",
+                scheme, target_host_for_url, app_route.target_port, path
             );
-            let uri: Uri = target_uri
-                .parse()
-                .map_err(|e| ProxyError::InvalidUri(format!("{}", e)))?;
 
             // Forward headers
             let headers = req.headers_mut();
@@ -391,9 +411,39 @@ async fn proxy_handler_inner(
             headers.remove("connection");
             headers.remove("upgrade");
 
-            *req.uri_mut() = uri;
+            // For HTTPS backends (re-encrypt), use reqwest with domain URL + IP resolve.
+            // We use the original domain in the URL (for correct SNI) but resolve it
+            // to the agent's IP address to avoid DNS lookups that may return Cloudflare.
+            let proxy_result = if is_agent_route {
+                let domain_uri = format!(
+                    "https://{}:443{}",
+                    domain_only,
+                    req.uri().path_and_query().map(|pq| pq.to_string()).unwrap_or_else(|| "/".to_string())
+                );
+                let agent_addr = std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(app_route.target_ip),
+                    443,
+                );
+                let agent_client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .resolve(domain_only, agent_addr)
+                    .build()
+                    .unwrap_or_else(|_| state.https_client.clone());
+                proxy_via_reqwest(&agent_client, req, &domain_uri, &host).await
+            } else {
+                let uri: Uri = target_uri_str
+                    .parse()
+                    .map_err(|e| ProxyError::InvalidUri(format!("{}", e)))?;
+                *req.uri_mut() = uri;
+                state
+                    .client
+                    .request(req)
+                    .await
+                    .map(|r| r.into_response())
+                    .map_err(|e| e.to_string())
+            };
 
-            match state.client.request(req).await {
+            match proxy_result {
                 Ok(resp) => {
                     // ActivityPing: notify agent of activity for powersave tracking
                     if let Some(registry) = state.get_registry() {
@@ -403,15 +453,14 @@ async fn proxy_handler_inner(
                             registry.send_activity_ping(&app_id, svc).await;
                         });
                     }
-                    return Ok(resp.into_response());
+                    return Ok(resp);
                 }
-                Err(e) => {
-                    let err_str = e.to_string();
+                Err(err_str) => {
                     // Wake-on-Demand: if connection refused, wake host or start service
                     if is_connection_refused(&err_str) {
                         return Ok(handle_wod(&state, &app_route, &host).await);
                     }
-                    warn!("App route proxy error for {}: {}", host, e);
+                    warn!("App route proxy error for {}: {}", host, err_str);
                     return Err(ProxyError::UpstreamError(err_str));
                 }
             }
@@ -637,6 +686,229 @@ async fn handle_websocket_upgrade(
     });
 
     Ok(client_response)
+}
+
+/// Proxy an HTTP request via reqwest (used for HTTPS re-encrypt backends).
+/// Converts the axum Request into a reqwest Request, forwards it, and
+/// converts the reqwest Response back into an axum Response.
+async fn proxy_via_reqwest(
+    client: &reqwest::Client,
+    req: Request,
+    target_url: &str,
+    original_host: &str,
+) -> Result<Response, String> {
+    let method = req.method().clone();
+    let headers = req.headers().clone();
+
+    // Build reqwest request
+    let mut builder = client.request(
+        reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET),
+        target_url,
+    );
+
+    // Copy headers (except Host — set to original for SNI routing at agent)
+    for (name, value) in &headers {
+        if name == "host" {
+            continue;
+        }
+        if let Ok(v) = reqwest::header::HeaderValue::from_bytes(value.as_bytes()) {
+            builder = builder.header(name.as_str(), v);
+        }
+    }
+    // Set Host header to the original domain so the agent can route by SNI/Host
+    builder = builder.header("Host", original_host);
+
+    // Stream the body
+    let body_stream = req.into_body();
+    let body_bytes = axum::body::to_bytes(body_stream, 100 * 1024 * 1024)
+        .await
+        .map_err(|e| format!("Failed to read request body: {}", e))?;
+    if !body_bytes.is_empty() {
+        builder = builder.body(body_bytes);
+    }
+
+    let resp = client
+        .execute(builder.build().map_err(|e| e.to_string())?)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Convert reqwest Response → axum Response
+    let status = StatusCode::from_u16(resp.status().as_u16())
+        .unwrap_or(StatusCode::BAD_GATEWAY);
+    let mut response_builder = Response::builder().status(status);
+
+    for (name, value) in resp.headers() {
+        if let Ok(hv) = HeaderValue::from_bytes(value.as_bytes()) {
+            response_builder = response_builder.header(name.as_str(), hv);
+        }
+    }
+
+    let body_bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    response_builder
+        .body(Body::from(body_bytes))
+        .map_err(|e| e.to_string())
+}
+
+/// Handle WebSocket upgrade to a TLS backend (re-encrypt).
+/// Uses tokio-rustls to establish a TLS connection to the backend,
+/// then performs the HTTP/1.1 upgrade handshake and bridges the streams.
+async fn handle_websocket_upgrade_tls(
+    mut req: Request,
+    route: &RouteConfig,
+    target_uri: Uri,
+    original_host: &str,
+) -> Result<Response, ProxyError> {
+    use hyper::client::conn::http1::Builder;
+    use tokio::io::AsyncWriteExt;
+    use tokio_rustls::TlsConnector;
+
+    let client_upgrade = hyper::upgrade::on(&mut req);
+
+    let backend_addr = format!("{}:{}", route.target_host, route.target_port);
+    let tcp_stream = TcpStream::connect(&backend_addr)
+        .await
+        .map_err(|e| {
+            ProxyError::UpstreamError(format!(
+                "Failed to connect to backend {}: {}",
+                backend_addr, e
+            ))
+        })?;
+
+    // Build a TLS config that skips certificate verification (trusted LAN)
+    let tls_config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(NoVerifier))
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(tls_config));
+
+    let server_name = rustls::pki_types::ServerName::try_from(original_host.to_string())
+        .unwrap_or_else(|_| rustls::pki_types::ServerName::try_from("localhost".to_string()).unwrap());
+
+    let tls_stream = connector
+        .connect(server_name, tcp_stream)
+        .await
+        .map_err(|e| {
+            ProxyError::UpstreamError(format!(
+                "TLS handshake to backend {} failed: {}",
+                backend_addr, e
+            ))
+        })?;
+
+    let io = TokioIo::new(tls_stream);
+
+    let (mut sender, conn) = Builder::new()
+        .preserve_header_case(true)
+        .title_case_headers(true)
+        .handshake(io)
+        .await
+        .map_err(|e| ProxyError::UpstreamError(format!("Backend handshake failed: {}", e)))?;
+
+    tokio::spawn(async move {
+        if let Err(e) = conn.with_upgrades().await {
+            let msg = e.to_string();
+            if !msg.contains("connection closed") && !msg.contains("not connected") {
+                error!("WebSocket TLS backend connection error: {}", e);
+            }
+        }
+    });
+
+    *req.uri_mut() = target_uri;
+
+    let backend_response = sender
+        .send_request(req)
+        .await
+        .map_err(|e| ProxyError::UpstreamError(format!("Backend request failed: {}", e)))?;
+
+    if backend_response.status() != StatusCode::SWITCHING_PROTOCOLS {
+        warn!(
+            "TLS backend did not upgrade WebSocket, status: {}",
+            backend_response.status()
+        );
+        return Ok(backend_response.into_response());
+    }
+
+    info!("WebSocket TLS upgrade successful to {}", backend_addr);
+
+    let mut response_builder = Response::builder().status(StatusCode::SWITCHING_PROTOCOLS);
+
+    for (name, value) in backend_response.headers() {
+        response_builder = response_builder.header(name, value);
+    }
+
+    let backend_upgrade = hyper::upgrade::on(backend_response);
+
+    let client_response = response_builder.body(Body::empty()).unwrap();
+
+    tokio::spawn(async move {
+        match tokio::try_join!(client_upgrade, backend_upgrade) {
+            Ok((client_io, backend_io)) => {
+                let mut client_io = TokioIo::new(client_io);
+                let mut backend_io = TokioIo::new(backend_io);
+                match tokio::io::copy_bidirectional(&mut client_io, &mut backend_io).await {
+                    Ok((from_client, from_backend)) => {
+                        debug!(
+                            "WebSocket TLS closed: {} bytes client->backend, {} bytes backend->client",
+                            from_client, from_backend
+                        );
+                    }
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if !msg.contains("connection reset") && !msg.contains("broken pipe") {
+                            debug!("WebSocket TLS IO error: {}", e);
+                        }
+                    }
+                }
+                let _ = client_io.shutdown().await;
+                let _ = backend_io.shutdown().await;
+            }
+            Err(e) => {
+                error!("WebSocket TLS upgrade bridging failed: {}", e);
+            }
+        }
+    });
+
+    Ok(client_response)
+}
+
+/// Certificate verifier that accepts any certificate (for trusted LAN backends).
+#[derive(Debug)]
+struct NoVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for NoVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
 }
 
 /// Check if the request is a WebSocket upgrade

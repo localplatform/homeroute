@@ -742,8 +742,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // CertReady listener — dynamically load new certificates into TLS manager
+    // and notify agents of certificate renewals
     {
         let tls_mgr = tls_manager.clone();
+        let registry_cert = registry.clone();
         let mut cert_rx = events.cert_ready.subscribe();
         tokio::spawn(async move {
             while let Ok(event) = cert_rx.recv().await {
@@ -756,6 +758,48 @@ async fn main() -> anyhow::Result<()> {
                     }
                     Err(e) => {
                         warn!(domain = %event.wildcard_domain, error = %e, "Failed to load dynamic certificate");
+                    }
+                }
+
+                // Notify agents of certificate renewal so they can hot-reload
+                if event.slug.is_empty() {
+                    // Global cert — notify ALL connected agents
+                    let apps = registry_cert.list_applications().await;
+                    for app in &apps {
+                        if registry_cert.is_agent_connected(&app.id).await {
+                            if let Err(e) = registry_cert
+                                .send_to_agent(
+                                    &app.id,
+                                    hr_registry::RegistryMessage::CertRenewal {
+                                        slug: String::new(),
+                                    },
+                                )
+                                .await
+                            {
+                                warn!(app = %app.slug, error = %e, "Failed to send CertRenewal to agent");
+                            }
+                        }
+                    }
+                    info!("Sent global CertRenewal notification to all connected agents");
+                } else {
+                    // Per-app cert — notify only the matching agent
+                    let apps = registry_cert.list_applications().await;
+                    if let Some(app) = apps.iter().find(|a| a.slug == event.slug) {
+                        if registry_cert.is_agent_connected(&app.id).await {
+                            if let Err(e) = registry_cert
+                                .send_to_agent(
+                                    &app.id,
+                                    hr_registry::RegistryMessage::CertRenewal {
+                                        slug: event.slug.clone(),
+                                    },
+                                )
+                                .await
+                            {
+                                warn!(slug = %event.slug, error = %e, "Failed to send CertRenewal to agent");
+                            } else {
+                                info!(slug = %event.slug, "Sent CertRenewal notification to agent");
+                            }
+                        }
                     }
                 }
             }

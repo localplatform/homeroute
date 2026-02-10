@@ -375,6 +375,18 @@ impl AgentRegistry {
         None
     }
 
+    /// Authenticate an agent by token only (no service name).
+    /// Returns (app_id, slug) on success.
+    pub async fn authenticate_by_token(&self, token: &str) -> Option<(String, String)> {
+        let state = self.state.read().await;
+        for app in &state.applications {
+            if verify_token(token, &app.token_hash) {
+                return Some((app.id.clone(), app.slug.clone()));
+            }
+        }
+        None
+    }
+
     /// Called when an agent successfully connects and authenticates.
     /// Pushes simplified config (services + power_policy).
     pub async fn on_agent_connected(

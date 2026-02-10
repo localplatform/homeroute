@@ -249,6 +249,9 @@ pub enum RegistryMessage {
     /// Activity ping to keep powersave timer alive.
     #[serde(rename = "activity_ping")]
     ActivityPing { service_type: ServiceType },
+    /// Certificate has been renewed; agent should re-pull certs.
+    #[serde(rename = "cert_renewal")]
+    CertRenewal { slug: String },
     /// Query the agent's Dataverse database (proxy from API).
     #[serde(rename = "dataverse_query")]
     DataverseQuery {
