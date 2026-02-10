@@ -75,6 +75,8 @@ pub struct DnsQuery {
     pub questions: Vec<DnsQuestion>,
     /// Raw bytes of the question section (for building responses that copy it)
     pub raw_question_bytes: Vec<u8>,
+    /// Client's EDNS0 UDP payload size (0 = no EDNS support, use 512)
+    pub edns_udp_size: u16,
 }
 
 /// Parse a DNS name from the wire format with pointer compression support.
@@ -202,10 +204,14 @@ pub fn parse_query(buf: &[u8]) -> Result<DnsQuery, DnsParseError> {
         });
     }
 
+    // Extract EDNS0 UDP payload size from OPT record in additional section (if present)
+    let edns_udp_size = extract_edns_udp_size(buf, offset, &header);
+
     Ok(DnsQuery {
         header,
         questions,
         raw_question_bytes: buf[question_start..offset].to_vec(),
+        edns_udp_size,
     })
 }
 
@@ -376,8 +382,56 @@ fn parse_rdata(buf: &[u8], offset: usize, rdlength: usize, rtype: RecordType) ->
     }
 }
 
+/// Extract EDNS0 UDP payload size from OPT record in the additional section.
+/// Scans past answer/authority/additional sections looking for type 41 (OPT).
+/// Returns 0 if no EDNS support detected.
+fn extract_edns_udp_size(buf: &[u8], question_end: usize, header: &DnsHeader) -> u16 {
+    // Skip answer + authority sections to reach additional section
+    let mut offset = question_end;
+    let skip_count = header.an_count as usize + header.ns_count as usize;
+    for _ in 0..skip_count {
+        if let Ok((_, new_offset)) = parse_name(buf, offset) {
+            offset = new_offset;
+            if offset + 10 > buf.len() {
+                return 0;
+            }
+            let rdlength = u16::from_be_bytes([buf[offset + 8], buf[offset + 9]]) as usize;
+            offset += 10 + rdlength;
+        } else {
+            return 0;
+        }
+    }
+
+    // Parse additional section looking for OPT (type 41)
+    for _ in 0..header.ar_count {
+        if offset >= buf.len() {
+            break;
+        }
+        if let Ok((_, new_offset)) = parse_name(buf, offset) {
+            offset = new_offset;
+            if offset + 10 > buf.len() {
+                break;
+            }
+            let rtype = u16::from_be_bytes([buf[offset], buf[offset + 1]]);
+            if rtype == 41 {
+                // OPT record: CLASS field = UDP payload size
+                return u16::from_be_bytes([buf[offset + 2], buf[offset + 3]]);
+            }
+            let rdlength = u16::from_be_bytes([buf[offset + 8], buf[offset + 9]]) as usize;
+            offset += 10 + rdlength;
+        } else {
+            break;
+        }
+    }
+
+    0
+}
+
 /// Build a DNS response packet from a query and answer records.
 pub fn build_response(query: &DnsQuery, answers: &[DnsRecord], rcode: u8) -> Vec<u8> {
+    let has_edns = query.edns_udp_size > 0;
+    let ar_count: u16 = if has_edns { 1 } else { 0 };
+
     let mut buf = Vec::with_capacity(512);
 
     // Header
@@ -394,7 +448,7 @@ pub fn build_response(query: &DnsQuery, answers: &[DnsRecord], rcode: u8) -> Vec
     buf.extend_from_slice(&query.header.qd_count.to_be_bytes()); // questions
     buf.extend_from_slice(&(answers.len() as u16).to_be_bytes()); // answers
     buf.extend_from_slice(&0u16.to_be_bytes()); // authority
-    buf.extend_from_slice(&0u16.to_be_bytes()); // additional
+    buf.extend_from_slice(&ar_count.to_be_bytes()); // additional (OPT if EDNS)
 
     // Copy question section from original query
     buf.extend_from_slice(&query.raw_question_bytes);
@@ -406,6 +460,15 @@ pub fn build_response(query: &DnsQuery, answers: &[DnsRecord], rcode: u8) -> Vec
         buf.extend_from_slice(&record.class.to_u16().to_be_bytes());
         buf.extend_from_slice(&record.ttl.to_be_bytes());
         encode_rdata(&record.rdata, &mut buf);
+    }
+
+    // EDNS0 OPT record in additional section (RFC 6891)
+    if has_edns {
+        buf.push(0x00); // NAME: root
+        buf.extend_from_slice(&41u16.to_be_bytes()); // TYPE: OPT
+        buf.extend_from_slice(&1232u16.to_be_bytes()); // CLASS: our UDP payload size
+        buf.extend_from_slice(&0u32.to_be_bytes()); // TTL: extended RCODE + version + flags
+        buf.extend_from_slice(&0u16.to_be_bytes()); // RDLENGTH: 0
     }
 
     buf
@@ -481,29 +544,126 @@ fn encode_rdata(rdata: &RData, buf: &mut Vec<u8>) {
     }
 }
 
+/// Quick scan of raw query bytes to extract EDNS0 UDP payload size.
+/// Returns 0 if no OPT record found or query is malformed.
+pub fn peek_edns_udp_size(buf: &[u8]) -> u16 {
+    if buf.len() < 12 {
+        return 0;
+    }
+    let header = match parse_header(buf) {
+        Ok(h) => h,
+        Err(_) => return 0,
+    };
+    // Skip question section
+    let mut offset = 12;
+    for _ in 0..header.qd_count {
+        match parse_name(buf, offset) {
+            Ok((_, new_offset)) => {
+                offset = new_offset + 4; // QTYPE + QCLASS
+            }
+            Err(_) => return 0,
+        }
+    }
+    // Skip answer + authority sections
+    let skip_count = header.an_count as usize + header.ns_count as usize;
+    for _ in 0..skip_count {
+        match parse_name(buf, offset) {
+            Ok((_, new_offset)) => {
+                offset = new_offset;
+                if offset + 10 > buf.len() { return 0; }
+                let rdlength = u16::from_be_bytes([buf[offset + 8], buf[offset + 9]]) as usize;
+                offset += 10 + rdlength;
+            }
+            Err(_) => return 0,
+        }
+    }
+    // Scan additional section for OPT (type 41)
+    for _ in 0..header.ar_count {
+        if offset >= buf.len() { break; }
+        match parse_name(buf, offset) {
+            Ok((_, new_offset)) => {
+                offset = new_offset;
+                if offset + 10 > buf.len() { break; }
+                let rtype = u16::from_be_bytes([buf[offset], buf[offset + 1]]);
+                if rtype == 41 {
+                    return u16::from_be_bytes([buf[offset + 2], buf[offset + 3]]);
+                }
+                let rdlength = u16::from_be_bytes([buf[offset + 8], buf[offset + 9]]) as usize;
+                offset += 10 + rdlength;
+            }
+            Err(_) => break,
+        }
+    }
+    0
+}
+
 /// Truncate a DNS response to fit within the given max UDP size.
 /// Sets the TC (truncated) flag if the response exceeds the limit.
-/// For UDP without EDNS0, max_size should be 512.
+/// Keeps as many complete answer records as will fit (smart truncation)
+/// rather than dropping all records. For UDP without EDNS0, max_size should be 512.
 pub fn truncate_for_udp(response: &mut Vec<u8>, max_size: usize) {
     if response.len() <= max_size {
         return;
     }
-    // Set TC flag (bit 1 of byte 2)
-    if response.len() >= 3 {
-        response[2] |= 0x02;
+    if response.len() < 12 {
+        return;
     }
-    // Truncate to max_size — keep header + question, drop partial answers
-    response.truncate(max_size);
-    // Zero out answer/authority/additional counts since they're now incomplete
-    if response.len() >= 12 {
-        // Set AN, NS, AR counts to 0 (we can't guarantee partial records are valid)
-        response[6] = 0;
-        response[7] = 0;
-        response[8] = 0;
-        response[9] = 0;
-        response[10] = 0;
-        response[11] = 0;
+
+    // Parse header to find answer boundaries
+    let qd_count = u16::from_be_bytes([response[4], response[5]]) as usize;
+    let an_count = u16::from_be_bytes([response[6], response[7]]) as usize;
+
+    // Skip question section to find start of answers
+    let mut offset = 12;
+    for _ in 0..qd_count {
+        match parse_name(response, offset) {
+            Ok((_, new_offset)) => offset = new_offset + 4,
+            Err(_) => {
+                // Can't parse — fall back to zeroing all counts
+                response[2] |= 0x02;
+                response.truncate(max_size);
+                for i in 6..12 { response[i] = 0; }
+                return;
+            }
+        }
     }
+    let answers_start = offset;
+
+    // Walk through answer records to find how many complete records fit
+    let mut kept_records = 0u16;
+    let mut last_good_offset = answers_start;
+    for _ in 0..an_count {
+        match parse_name(response, offset) {
+            Ok((_, new_offset)) => {
+                offset = new_offset;
+                if offset + 10 > response.len() { break; }
+                let rdlength = u16::from_be_bytes([response[offset + 8], response[offset + 9]]) as usize;
+                let record_end = offset + 10 + rdlength;
+                if record_end > response.len() { break; }
+                if record_end <= max_size {
+                    kept_records += 1;
+                    last_good_offset = record_end;
+                    offset = record_end;
+                } else {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    // Set TC flag
+    response[2] |= 0x02;
+    // Truncate at the last complete record boundary
+    response.truncate(last_good_offset);
+    // Update AN count to reflect kept records
+    response[6] = (kept_records >> 8) as u8;
+    response[7] = (kept_records & 0xFF) as u8;
+    // Zero NS and AR counts (authority/additional dropped)
+    response[8] = 0;
+    response[9] = 0;
+    response[10] = 0;
+    response[11] = 0;
 }
 
 // RCODE constants

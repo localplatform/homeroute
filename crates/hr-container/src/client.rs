@@ -359,7 +359,7 @@ impl NspawnClient {
         let resolv_path = rootfs.join("etc/resolv.conf");
         // Remove symlink if present
         let _ = tokio::fs::remove_file(&resolv_path).await;
-        tokio::fs::write(&resolv_path, "nameserver 10.0.0.254\n").await
+        tokio::fs::write(&resolv_path, "nameserver 10.0.0.254\noptions edns0\n").await
             .context("failed to write resolv.conf")?;
 
         info!(container = name, "Network config written in rootfs");

@@ -381,9 +381,11 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
     // Create mpsc channel for registry → agent messages
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
 
-    // Notify registry of connection (pushes config)
+    // Notify registry of connection (pushes config, increments active count)
     if let Err(e) = registry.on_agent_connected(&app_id, tx, version, reported_ipv4).await {
         error!(app_id, "Agent provisioning failed: {e}");
+        // Decrement the count that was already incremented
+        registry.on_agent_disconnected(&app_id).await;
         let _ = socket.send(Message::Close(None)).await;
         return;
     }
@@ -563,8 +565,9 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
         }
     }
 
-    // Remove app routes for this agent's domains
-    {
+    // Decrement connection count. Only remove routes when the LAST connection closes.
+    let is_last = registry.on_agent_disconnected(&app_id).await;
+    if is_last {
         let apps = registry.list_applications().await;
         if let Some(app) = apps.iter().find(|a| a.id == app_id) {
             let base_domain = &state.env.base_domain;
@@ -572,10 +575,10 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
                 state.proxy.remove_app_route(&domain);
             }
         }
+        info!(app_id, "Agent WebSocket closed (last connection, routes removed)");
+    } else {
+        info!(app_id, "Agent WebSocket closed (other connections still active, routes preserved)");
     }
-
-    registry.on_agent_disconnected(&app_id).await;
-    info!(app_id, "Agent WebSocket closed");
 }
 
 // ── Migration orchestration ──────────────────────────────────

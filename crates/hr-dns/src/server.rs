@@ -30,13 +30,18 @@ pub async fn run_udp_server(addr: SocketAddr, state: SharedDnsState) -> Result<(
         let state = state.clone();
 
         tokio::spawn(async move {
-            let mut response = handle_dns_query(&packet, &state, src).await;
+            let (mut response, edns_udp_size) = handle_dns_query_with_edns(&packet, &state, src).await;
             // Silently drop responses for malformed packets (empty = nothing parseable)
             if response.is_empty() {
                 return;
             }
-            // RFC 1035: UDP responses must not exceed 512 bytes (without EDNS0)
-            packet::truncate_for_udp(&mut response, 512);
+            // Use client's EDNS0 UDP payload size if available, else RFC 1035 limit (512)
+            let max_udp = if edns_udp_size > 0 {
+                (edns_udp_size as usize).min(4096)
+            } else {
+                512
+            };
+            packet::truncate_for_udp(&mut response, max_udp);
             if let Err(e) = socket.send_to(&response, src).await {
                 debug!("Failed to send UDP response to {}: {}", src, e);
             }
@@ -92,6 +97,13 @@ async fn handle_tcp_connection(
     stream.write_all(&response).await?;
 
     Ok(())
+}
+
+/// Handle a DNS query and return (response, client_edns_udp_size).
+async fn handle_dns_query_with_edns(query_bytes: &[u8], state: &SharedDnsState, src: SocketAddr) -> (Vec<u8>, u16) {
+    let edns_size = packet::peek_edns_udp_size(query_bytes);
+    let response = handle_dns_query(query_bytes, state, src).await;
+    (response, edns_size)
 }
 
 async fn handle_dns_query(query_bytes: &[u8], state: &SharedDnsState, src: SocketAddr) -> Vec<u8> {

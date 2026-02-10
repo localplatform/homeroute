@@ -20,11 +20,16 @@ use crate::types::{
     UpdateBatchResult, UpdateStatusResult,
 };
 
-/// An active agent connection (in-memory only).
-struct AgentConnection {
+/// Tracks all active WebSocket connections for a single app_id.
+/// Multiple connections can coexist (e.g. main agent + MCP tool connections).
+/// Routes are only removed when the last connection closes.
+struct AppConnections {
+    /// Primary tx for sending commands to the agent (from the main agent with IPv4).
     tx: mpsc::Sender<RegistryMessage>,
     connected_at: DateTime<Utc>,
     last_heartbeat: DateTime<Utc>,
+    /// Number of active WebSocket connections for this app_id.
+    active_count: usize,
 }
 
 /// Wrapper for outgoing messages to host-agents: text (JSON) or raw binary.
@@ -81,7 +86,7 @@ fn service_type_str(t: ServiceType) -> &'static str {
 pub struct AgentRegistry {
     state: Arc<RwLock<RegistryState>>,
     state_path: PathBuf,
-    connections: Arc<RwLock<HashMap<String, AgentConnection>>>,
+    connections: Arc<RwLock<HashMap<String, AppConnections>>>,
     pub host_connections: Arc<RwLock<HashMap<String, HostConnection>>>,
     env: Arc<EnvConfig>,
     events: Arc<EventBus>,
@@ -381,17 +386,30 @@ impl AgentRegistry {
     ) -> Result<()> {
         let now = Utc::now();
 
-        // Store connection
+        // Increment connection count (or create new entry).
+        // Only overwrite the primary tx if this connection has an IPv4 (real agent).
         {
             let mut conns = self.connections.write().await;
-            conns.insert(
-                app_id.to_string(),
-                AgentConnection {
-                    tx: tx.clone(),
-                    connected_at: now,
-                    last_heartbeat: now,
-                },
-            );
+            if let Some(existing) = conns.get_mut(app_id) {
+                existing.active_count += 1;
+                existing.last_heartbeat = now;
+                // Only overwrite tx if this is the main agent (has IPv4)
+                if reported_ipv4.is_some() {
+                    existing.tx = tx.clone();
+                }
+                info!(app_id, count = existing.active_count, has_ipv4 = reported_ipv4.is_some(),
+                    "Additional agent connection registered");
+            } else {
+                conns.insert(
+                    app_id.to_string(),
+                    AppConnections {
+                        tx: tx.clone(),
+                        connected_at: now,
+                        last_heartbeat: now,
+                        active_count: 1,
+                    },
+                );
+            }
         }
 
         // Update status and IPv4 address
@@ -443,15 +461,37 @@ impl AgentRegistry {
                 .await;
         }
 
-        self.persist().await?;
+        if let Err(e) = self.persist().await {
+            warn!(app_id, "Failed to persist registry state on connect: {e}");
+        }
         Ok(())
     }
 
     /// Called when an agent WebSocket disconnects.
-    pub async fn on_agent_disconnected(&self, app_id: &str) {
-        {
+    /// Decrements the active connection count. Only performs full cleanup
+    /// (status=Disconnected, route removal) when the last connection closes.
+    /// Returns true if this was the last connection and routes should be removed.
+    pub async fn on_agent_disconnected(&self, app_id: &str) -> bool {
+        let is_last = {
             let mut conns = self.connections.write().await;
-            conns.remove(app_id);
+            if let Some(existing) = conns.get_mut(app_id) {
+                existing.active_count = existing.active_count.saturating_sub(1);
+                if existing.active_count == 0 {
+                    conns.remove(app_id);
+                    true
+                } else {
+                    info!(app_id, remaining = existing.active_count,
+                        "Agent connection closed, others still active (routes preserved)");
+                    false
+                }
+            } else {
+                // No entry — nothing to clean up
+                return false;
+            }
+        };
+
+        if !is_last {
+            return false;
         }
 
         let slug = {
@@ -475,7 +515,8 @@ impl AgentRegistry {
         }
 
         let _ = self.persist().await;
-        info!(app_id, "Agent disconnected");
+        info!(app_id, "Agent disconnected (last connection, routes will be removed)");
+        true
     }
 
     /// Update heartbeat timestamp for an agent.
