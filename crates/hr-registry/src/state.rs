@@ -97,6 +97,8 @@ pub struct AgentRegistry {
     acme: RwLock<Option<Arc<AcmeManager>>>,
     /// Terminal sessions: maps session_id → sender for data from host-agent to API WS handler.
     terminal_sessions: Arc<RwLock<HashMap<String, mpsc::Sender<Vec<u8>>>>>,
+    /// Dataverse query signals: maps request_id → oneshot sender for query results.
+    dataverse_query_signals: Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>>>>,
 }
 
 impl AgentRegistry {
@@ -135,6 +137,7 @@ impl AgentRegistry {
             host_power_states: Arc::new(RwLock::new(HashMap::new())),
             acme: RwLock::new(None),
             terminal_sessions: Arc::new(RwLock::new(HashMap::new())),
+            dataverse_query_signals: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -1208,6 +1211,66 @@ impl AgentRegistry {
         });
     }
 
+    /// Proxy a Dataverse query to an agent and wait for the result.
+    pub async fn dataverse_query(
+        &self,
+        app_id: &str,
+        query: crate::protocol::DataverseQueryRequest,
+    ) -> Result<serde_json::Value> {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.dataverse_query_signals.write().await.insert(request_id.clone(), tx);
+
+        // Send the query to the agent
+        let connections = self.connections.read().await;
+        let conn = connections.get(app_id)
+            .ok_or_else(|| anyhow::anyhow!("Agent not connected for app {}", app_id))?;
+        conn.tx.send(RegistryMessage::DataverseQuery {
+            request_id: request_id.clone(),
+            query,
+        }).await.map_err(|_| anyhow::anyhow!("Failed to send query to agent"))?;
+        drop(connections);
+
+        // Wait for response with timeout
+        match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+            Ok(Ok(Ok(data))) => Ok(data),
+            Ok(Ok(Err(e))) => anyhow::bail!("Dataverse query error: {}", e),
+            Ok(Err(_)) => {
+                self.dataverse_query_signals.write().await.remove(&request_id);
+                anyhow::bail!("Dataverse query channel closed")
+            }
+            Err(_) => {
+                self.dataverse_query_signals.write().await.remove(&request_id);
+                anyhow::bail!("Dataverse query timeout after 30s")
+            }
+        }
+    }
+
+    /// Handle a Dataverse query result from an agent.
+    pub async fn on_dataverse_query_result(
+        &self,
+        request_id: &str,
+        data: Option<serde_json::Value>,
+        error: Option<String>,
+    ) {
+        if let Some(tx) = self.dataverse_query_signals.write().await.remove(request_id) {
+            let result = match error {
+                Some(e) => Err(e),
+                None => Ok(data.unwrap_or(serde_json::Value::Null)),
+            };
+            let _ = tx.send(result);
+        }
+    }
+
+    /// Send a RegistryMessage to a connected agent by app_id.
+    pub async fn send_to_agent(&self, app_id: &str, msg: RegistryMessage) -> Result<()> {
+        let connections = self.connections.read().await;
+        let conn = connections.get(app_id)
+            .ok_or_else(|| anyhow::anyhow!("Agent not connected for app {}", app_id))?;
+        conn.tx.send(msg).await.map_err(|_| anyhow::anyhow!("Failed to send to agent"))?;
+        Ok(())
+    }
+
     /// Handle service state changed event from agent (broadcasts to WebSocket).
     pub fn handle_service_state_changed(
         &self,
@@ -1517,6 +1580,15 @@ impl AgentRegistry {
             let removed = before - relays.len();
             if removed > 0 {
                 tracing::info!("Cleaned up {} stale transfer relay target mappings", removed);
+            }
+        }
+        {
+            let mut signals = self.dataverse_query_signals.write().await;
+            let before = signals.len();
+            signals.retain(|_rid, tx| !tx.is_closed());
+            let removed = before - signals.len();
+            if removed > 0 {
+                tracing::info!("Cleaned up {} stale dataverse query signals", removed);
             }
         }
     }

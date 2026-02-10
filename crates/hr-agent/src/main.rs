@@ -15,6 +15,7 @@ use tracing::{error, info};
 
 use hr_registry::protocol::{AgentMessage, AgentMetrics, AgentRoute, RegistryMessage, ServiceConfig, ServiceState, ServiceType};
 
+use crate::mcp::SchemaQuerySignals;
 use crate::metrics::MetricsCollector;
 use crate::powersave::{PowersaveManager, ServiceStateChange};
 use crate::services::ServiceManager;
@@ -32,7 +33,16 @@ async fn main() -> Result<()> {
             .with_env_filter("warn")
             .with_writer(std::io::stderr)
             .init();
-        return mcp::run_mcp_server().await;
+
+        // Try to establish a WebSocket connection to the registry for inter-app queries.
+        // If the config or connection fails, run in standalone mode (no registry tools).
+        match start_mcp_with_registry().await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                tracing::warn!("Could not connect to registry for MCP: {e}, running standalone");
+                return mcp::run_mcp_server().await;
+            }
+        }
     }
 
     tracing_subscriber::fmt()
@@ -59,6 +69,22 @@ async fn main() -> Result<()> {
 
     // Create powersave manager
     let powersave_manager = Arc::new(PowersaveManager::new(Arc::clone(&service_manager)));
+
+    // Open Dataverse database (shared across reconnections)
+    let local_dataverse = match crate::dataverse::LocalDataverse::open() {
+        Ok(dv) => {
+            info!("Dataverse database opened");
+            Some(Arc::new(dv))
+        }
+        Err(e) => {
+            tracing::debug!("No Dataverse database available: {e}");
+            None
+        }
+    };
+
+    // Shared signal map for MCP → main loop schema query responses
+    let schema_signals: SchemaQuerySignals =
+        Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
 
     // Reconnection loop with exponential backoff
     let mut backoff = INITIAL_BACKOFF_SECS;
@@ -114,15 +140,9 @@ async fn main() -> Result<()> {
 
         // Spawn schema metadata sender task (every 60 seconds)
         let schema_tx = outbound_tx.clone();
+        let schema_dv = local_dataverse.clone();
         let schema_handle = tokio::spawn(async move {
-            // Try to open the dataverse DB
-            let dv = match crate::dataverse::LocalDataverse::open() {
-                Ok(dv) => dv,
-                Err(e) => {
-                    tracing::debug!("No Dataverse database available: {e}");
-                    return;
-                }
-            };
+            let Some(dv) = schema_dv else { return };
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 interval.tick().await;
@@ -186,6 +206,8 @@ async fn main() -> Result<()> {
                                 &powersave_manager,
                                 &state_change_tx,
                                 &outbound_tx,
+                                &local_dataverse,
+                                &schema_signals,
                                 msg
                             ).await;
                         }
@@ -217,6 +239,8 @@ async fn main() -> Result<()> {
                 &powersave_manager,
                 &state_change_tx,
                 &outbound_tx,
+                &local_dataverse,
+                &schema_signals,
                 msg
             ).await;
         }
@@ -230,11 +254,111 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Start the MCP server with a WebSocket connection to the registry.
+/// This allows the `list_other_apps_schemas` tool to query other apps' schemas.
+async fn start_mcp_with_registry() -> Result<()> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let cfg = config::AgentConfig::load(CONFIG_PATH)?;
+    let url = cfg.ws_url();
+
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await?;
+    let (mut ws_sink, mut ws_stream) = ws_stream.split();
+
+    // Authenticate
+    let auth_msg = AgentMessage::Auth {
+        token: cfg.token.clone(),
+        service_name: cfg.service_name.clone(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        ipv4_address: None,
+    };
+    ws_sink
+        .send(Message::Text(serde_json::to_string(&auth_msg)?.into()))
+        .await?;
+
+    // Wait for auth result
+    let first_msg = ws_stream
+        .next()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Connection closed before auth response"))??;
+    let auth_result: RegistryMessage = match first_msg {
+        Message::Text(text) => serde_json::from_str(&text)?,
+        other => anyhow::bail!("Unexpected message type during auth: {other:?}"),
+    };
+    match auth_result {
+        RegistryMessage::AuthResult { success: true, .. } => {}
+        RegistryMessage::AuthResult {
+            success: false,
+            error,
+            ..
+        } => {
+            anyhow::bail!(
+                "Authentication failed: {}",
+                error.unwrap_or_default()
+            );
+        }
+        _ => anyhow::bail!("Unexpected message during auth handshake"),
+    }
+
+    // Set up the channels
+    let schema_signals: mcp::SchemaQuerySignals =
+        Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+    let (outbound_tx, mut outbound_rx) = mpsc::channel::<AgentMessage>(16);
+
+    // Background task: forward outbound messages to the WebSocket
+    let ws_write_handle = tokio::spawn(async move {
+        while let Some(msg) = outbound_rx.recv().await {
+            if let Ok(json) = serde_json::to_string(&msg) {
+                if ws_sink.send(Message::Text(json.into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    // Background task: read WebSocket messages and dispatch DataverseSchemas responses
+    let signals_clone = Arc::clone(&schema_signals);
+    let ws_read_handle = tokio::spawn(async move {
+        while let Some(Ok(msg)) = ws_stream.next().await {
+            if let Message::Text(text) = msg {
+                if let Ok(registry_msg) = serde_json::from_str::<RegistryMessage>(&text) {
+                    if let RegistryMessage::DataverseSchemas {
+                        request_id,
+                        schemas,
+                    } = registry_msg
+                    {
+                        let sender = {
+                            let mut signals = signals_clone.write().await;
+                            signals.remove(&request_id)
+                        };
+                        if let Some(tx) = sender {
+                            let _ = tx.send(schemas);
+                        }
+                    }
+                    // Ignore all other messages in MCP mode
+                }
+            }
+        }
+    });
+
+    // Run the MCP stdio server with registry access
+    let result = mcp::run_mcp_server_with_registry(Some(outbound_tx), Some(schema_signals)).await;
+
+    // Clean up background tasks
+    ws_write_handle.abort();
+    ws_read_handle.abort();
+
+    result
+}
+
 async fn handle_registry_message(
     service_manager: &Arc<RwLock<ServiceManager>>,
     powersave_manager: &Arc<PowersaveManager>,
     state_change_tx: &mpsc::Sender<ServiceStateChange>,
     outbound_tx: &mpsc::Sender<AgentMessage>,
+    local_dataverse: &Option<Arc<crate::dataverse::LocalDataverse>>,
+    schema_signals: &SchemaQuerySignals,
     msg: RegistryMessage,
 ) {
     match msg {
@@ -332,6 +456,107 @@ async fn handle_registry_message(
                 .await;
         }
 
+        RegistryMessage::DataverseQuery { request_id, query } => {
+            let result = if let Some(dv) = local_dataverse {
+                handle_dataverse_query(dv, query).await
+            } else {
+                Err("Dataverse not available on this agent".to_string())
+            };
+            let (data, error) = match result {
+                Ok(v) => (Some(v), None),
+                Err(e) => (None, Some(e)),
+            };
+            let _ = outbound_tx
+                .send(AgentMessage::DataverseQueryResult { request_id, data, error })
+                .await;
+        }
+
+        RegistryMessage::DataverseSchemas { request_id, schemas } => {
+            // Resolve the pending oneshot sender for the MCP tool waiting on this response
+            let sender = {
+                let mut signals = schema_signals.write().await;
+                signals.remove(&request_id)
+            };
+            if let Some(tx) = sender {
+                let _ = tx.send(schemas);
+            } else {
+                tracing::debug!(request_id, "No pending signal for DataverseSchemas response");
+            }
+        }
+
         _ => {}
+    }
+}
+
+async fn handle_dataverse_query(
+    dv: &Arc<crate::dataverse::LocalDataverse>,
+    query: hr_registry::protocol::DataverseQueryRequest,
+) -> Result<serde_json::Value, String> {
+    use hr_dataverse::query::*;
+    use hr_registry::protocol::DataverseQueryRequest;
+
+    let engine = dv.engine().lock().await;
+
+    match query {
+        DataverseQueryRequest::QueryRows { table_name, filters, limit, offset, order_by, order_desc } => {
+            let parsed_filters: Vec<Filter> = filters.iter()
+                .filter_map(|f| serde_json::from_value(f.clone()).ok())
+                .collect();
+            let pagination = Pagination {
+                limit,
+                offset,
+                order_by,
+                order_desc,
+            };
+            let rows = query_rows(engine.connection(), &table_name, &parsed_filters, &pagination)
+                .map_err(|e| e.to_string())?;
+            let total = engine.count_rows(&table_name).unwrap_or(0);
+            Ok(serde_json::json!({ "rows": rows, "total": total }))
+        }
+        DataverseQueryRequest::InsertRows { table_name, rows } => {
+            let count = insert_rows(engine.connection(), &table_name, &rows)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({ "inserted": count }))
+        }
+        DataverseQueryRequest::UpdateRows { table_name, updates, filters } => {
+            let parsed_filters: Vec<Filter> = filters.iter()
+                .filter_map(|f| serde_json::from_value(f.clone()).ok())
+                .collect();
+            let count = update_rows(engine.connection(), &table_name, &updates, &parsed_filters)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({ "updated": count }))
+        }
+        DataverseQueryRequest::DeleteRows { table_name, filters } => {
+            let parsed_filters: Vec<Filter> = filters.iter()
+                .filter_map(|f| serde_json::from_value(f.clone()).ok())
+                .collect();
+            let count = delete_rows(engine.connection(), &table_name, &parsed_filters)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({ "deleted": count }))
+        }
+        DataverseQueryRequest::CountRows { table_name, filters } => {
+            if filters.is_empty() {
+                let count = engine.count_rows(&table_name).map_err(|e| e.to_string())?;
+                Ok(serde_json::json!({ "count": count }))
+            } else {
+                let parsed_filters: Vec<Filter> = filters.iter()
+                    .filter_map(|f| serde_json::from_value(f.clone()).ok())
+                    .collect();
+                let pagination = Pagination { limit: 0, offset: 0, order_by: None, order_desc: false };
+                // Use a COUNT query by counting filtered results
+                let rows = query_rows(engine.connection(), &table_name, &parsed_filters, &Pagination { limit: u64::MAX, ..pagination })
+                    .map_err(|e| e.to_string())?;
+                Ok(serde_json::json!({ "count": rows.len() }))
+            }
+        }
+        DataverseQueryRequest::GetMigrations => {
+            let rows = query_rows(
+                engine.connection(),
+                "_dv_migrations",
+                &[],
+                &Pagination { limit: 1000, offset: 0, order_by: Some("id".to_string()), order_desc: true },
+            ).map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({ "migrations": rows }))
+        }
     }
 }

@@ -12,6 +12,7 @@ import Users from './pages/Users';
 import Hosts from './pages/Hosts';
 import Certificates from './pages/Certificates';
 import Dataverse from './pages/Dataverse';
+import DataBrowser from './pages/DataBrowser';
 import Containers from './pages/Containers';
 import CloudRelay from './pages/CloudRelay';
 import Login from './pages/Login';
@@ -101,6 +102,7 @@ function AppRoutes() {
               <Route path="/hosts" element={<Hosts />} />
               <Route path="/containers" element={<Containers />} />
               <Route path="/dataverse" element={<Dataverse />} />
+              <Route path="/data-browser" element={<DataBrowser />} />
               <Route path="/certificates" element={<Certificates />} />
               <Route path="/cloud-relay" element={<CloudRelay />} />
             </Routes>

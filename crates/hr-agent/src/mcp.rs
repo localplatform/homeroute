@@ -1,17 +1,27 @@
 //! MCP (Model Context Protocol) stdio server for Dataverse operations.
 
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
+use std::sync::Arc;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tracing::info;
 
 use hr_dataverse::engine::DataverseEngine;
 use hr_dataverse::query::*;
 use hr_dataverse::schema::*;
+use hr_registry::protocol::{AgentMessage, AppSchemaOverview};
 
 use crate::dataverse::LocalDataverse;
+
+/// Shared map for pending schema query responses.
+/// The MCP tool registers a oneshot sender here before sending the request,
+/// and the main WebSocket loop resolves it when the response arrives.
+pub type SchemaQuerySignals =
+    Arc<RwLock<HashMap<String, oneshot::Sender<Vec<AppSchemaOverview>>>>>;
 
 #[derive(Deserialize)]
 struct JsonRpcRequest {
@@ -42,7 +52,14 @@ struct JsonRpcError {
 }
 
 /// Run the MCP stdio server.
-pub async fn run_mcp_server() -> Result<()> {
+///
+/// When `outbound_tx` and `schema_signals` are provided, the server can
+/// send requests to the registry via the WebSocket and wait for responses
+/// (used by the `list_other_apps_schemas` tool).
+pub async fn run_mcp_server_with_registry(
+    outbound_tx: Option<mpsc::Sender<AgentMessage>>,
+    schema_signals: Option<SchemaQuerySignals>,
+) -> Result<()> {
     info!("Starting MCP stdio server");
 
     let dataverse = LocalDataverse::open()?;
@@ -76,7 +93,6 @@ pub async fn run_mcp_server() -> Result<()> {
         };
 
         let id = request.id.clone().unwrap_or(Value::Null);
-        let engine_guard = engine.lock().await;
 
         let result = match request.method.as_str() {
             "initialize" => Ok(json!({
@@ -92,7 +108,6 @@ pub async fn run_mcp_server() -> Result<()> {
             })),
             "notifications/initialized" => {
                 // No response needed for notifications
-                drop(engine_guard);
                 continue;
             }
             "tools/list" => Ok(json!({
@@ -109,12 +124,24 @@ pub async fn run_mcp_server() -> Result<()> {
                     .get("arguments")
                     .cloned()
                     .unwrap_or(json!({}));
-                handle_tool_call(&engine_guard, tool_name, &arguments)
+
+                // Registry-backed tools (async, no engine lock needed)
+                if tool_name == "list_other_apps_schemas" {
+                    handle_list_other_apps_schemas(
+                        outbound_tx.as_ref(),
+                        schema_signals.as_ref(),
+                    )
+                    .await
+                } else {
+                    // Local Dataverse tools (need engine lock)
+                    let engine_guard = engine.lock().await;
+                    let res = handle_tool_call(&engine_guard, tool_name, &arguments);
+                    drop(engine_guard);
+                    res
+                }
             }
             _ => Err(format!("Method not found: {}", request.method)),
         };
-
-        drop(engine_guard);
 
         let resp = match result {
             Ok(value) => JsonRpcResponse {
@@ -140,6 +167,11 @@ pub async fn run_mcp_server() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Run the MCP stdio server without registry communication (standalone mode).
+pub async fn run_mcp_server() -> Result<()> {
+    run_mcp_server_with_registry(None, None).await
 }
 
 fn get_tool_definitions() -> Vec<Value> {
@@ -319,6 +351,11 @@ fn get_tool_definitions() -> Vec<Value> {
                 },
                 "required": ["table_name"]
             }
+        }),
+        json!({
+            "name": "list_other_apps_schemas",
+            "description": "List the database schemas (tables, columns, relations) of all other applications in the HomeRoute network. Useful for understanding what data other apps have and how to integrate with them.",
+            "inputSchema": { "type": "object", "properties": {} }
         }),
     ]
 }
@@ -638,6 +675,59 @@ fn handle_tool_call(engine: &DataverseEngine, tool: &str, args: &Value) -> Resul
             Ok(text_result(format!("{}", count)))
         }
 
+        // list_other_apps_schemas is handled separately in the async path above
         _ => Err(format!("Unknown tool: {}", tool)),
+    }
+}
+
+/// Handle the `list_other_apps_schemas` tool call by sending a request to the
+/// registry via the WebSocket and waiting for the response.
+async fn handle_list_other_apps_schemas(
+    outbound_tx: Option<&mpsc::Sender<AgentMessage>>,
+    schema_signals: Option<&SchemaQuerySignals>,
+) -> Result<Value, String> {
+    let text_result = |text: String| -> Value {
+        json!({ "content": [{ "type": "text", "text": text }] })
+    };
+
+    let outbound_tx = outbound_tx
+        .ok_or_else(|| "Registry connection not available (running in standalone MCP mode)".to_string())?;
+    let schema_signals = schema_signals
+        .ok_or_else(|| "Schema signals not available".to_string())?;
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+
+    // Register a oneshot channel to receive the response
+    let (tx, rx) = oneshot::channel();
+    {
+        let mut signals = schema_signals.write().await;
+        signals.insert(request_id.clone(), tx);
+    }
+
+    // Send the request to the registry
+    outbound_tx
+        .send(AgentMessage::GetDataverseSchemas {
+            request_id: request_id.clone(),
+        })
+        .await
+        .map_err(|_| "Failed to send request to registry (connection closed)".to_string())?;
+
+    // Wait for the response with a 10s timeout
+    match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+        Ok(Ok(schemas)) => {
+            let json_output = serde_json::to_string_pretty(&schemas)
+                .map_err(|e| format!("Failed to serialize schemas: {}", e))?;
+            Ok(text_result(json_output))
+        }
+        Ok(Err(_)) => {
+            // Oneshot sender was dropped (e.g., connection lost)
+            Err("Registry connection lost while waiting for schemas".to_string())
+        }
+        Err(_) => {
+            // Timeout — clean up the signal
+            let mut signals = schema_signals.write().await;
+            signals.remove(&request_id);
+            Err("Timeout waiting for schemas from registry (10s)".to_string())
+        }
     }
 }

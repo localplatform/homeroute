@@ -178,5 +178,18 @@ export const getDataverseTables = (appId) => api.get(`/dataverse/apps/${appId}/t
 export const getDataverseTable = (appId, tableName) => api.get(`/dataverse/apps/${appId}/tables/${tableName}`);
 export const getDataverseRelations = (appId) => api.get(`/dataverse/apps/${appId}/relations`);
 export const getDataverseStats = (appId) => api.get(`/dataverse/apps/${appId}/stats`);
-
-
+export const getDataverseRows = (appId, table, params) => api.get(`/dataverse/apps/${appId}/tables/${table}/rows`, { params });
+export const insertDataverseRows = (appId, table, rows) => api.post(`/dataverse/apps/${appId}/tables/${table}/rows`, { rows });
+export const updateDataverseRows = (appId, table, data) => api.put(`/dataverse/apps/${appId}/tables/${table}/rows`, data);
+export const deleteDataverseRows = (appId, table, filters) => api.delete(`/dataverse/apps/${appId}/tables/${table}/rows`, { data: { filters } });
+export const getDataverseRowCount = (appId, table) => api.get(`/dataverse/apps/${appId}/tables/${table}/count`);
+export const getDataverseMigrations = (appId) => api.get(`/dataverse/apps/${appId}/migrations`);
+export const downloadDataverseBackup = (appId) => {
+  const url = `/api/dataverse/apps/${appId}/backup`;
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+};

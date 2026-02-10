@@ -483,6 +483,44 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
                                 };
                                 state.dataverse_schemas.write().await.insert(app_id.clone(), cached);
                             }
+                            Ok(AgentMessage::DataverseQueryResult { request_id, data, error }) => {
+                                registry.on_dataverse_query_result(&request_id, data, error).await;
+                            }
+                            Ok(AgentMessage::GetDataverseSchemas { request_id }) => {
+                                // Build schema overviews from the cached data in ApiState
+                                use hr_registry::protocol::{AppSchemaOverview, SchemaTableInfo, SchemaColumnInfo, SchemaRelationInfo};
+                                let schemas = state.dataverse_schemas.read().await;
+                                let overviews: Vec<AppSchemaOverview> = schemas.values()
+                                    .filter(|s| s.app_id != app_id)
+                                    .map(|s| AppSchemaOverview {
+                                        app_id: s.app_id.clone(),
+                                        slug: s.slug.clone(),
+                                        tables: s.tables.iter().map(|t| SchemaTableInfo {
+                                            name: t.name.clone(),
+                                            slug: t.slug.clone(),
+                                            columns: t.columns.iter().map(|c| SchemaColumnInfo {
+                                                name: c.name.clone(),
+                                                field_type: c.field_type.clone(),
+                                                required: c.required,
+                                                unique: c.unique,
+                                            }).collect(),
+                                            row_count: t.row_count,
+                                        }).collect(),
+                                        relations: s.relations.iter().map(|r| SchemaRelationInfo {
+                                            from_table: r.from_table.clone(),
+                                            from_column: r.from_column.clone(),
+                                            to_table: r.to_table.clone(),
+                                            to_column: r.to_column.clone(),
+                                            relation_type: r.relation_type.clone(),
+                                        }).collect(),
+                                        version: s.version,
+                                    })
+                                    .collect();
+                                let _ = registry.send_to_agent(&app_id, hr_registry::protocol::RegistryMessage::DataverseSchemas {
+                                    request_id,
+                                    schemas: overviews,
+                                }).await;
+                            }
                             Ok(AgentMessage::IpUpdate { ipv4_address }) => {
                                 info!(app_id, ipv4_address, "Agent reported IP update");
                                 registry.handle_ip_update(&app_id, &ipv4_address).await;

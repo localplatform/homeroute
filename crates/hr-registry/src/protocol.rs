@@ -133,6 +133,20 @@ pub enum AgentMessage {
     IpUpdate {
         ipv4_address: String,
     },
+    /// Agent responds to a Dataverse query from the registry.
+    #[serde(rename = "dataverse_query_result")]
+    DataverseQueryResult {
+        request_id: String,
+        #[serde(default)]
+        data: Option<serde_json::Value>,
+        #[serde(default)]
+        error: Option<String>,
+    },
+    /// Agent requests schemas of all other apps.
+    #[serde(rename = "get_dataverse_schemas")]
+    GetDataverseSchemas {
+        request_id: String,
+    },
 }
 
 /// A route published by an agent for reverse proxy registration.
@@ -235,10 +249,82 @@ pub enum RegistryMessage {
     /// Activity ping to keep powersave timer alive.
     #[serde(rename = "activity_ping")]
     ActivityPing { service_type: ServiceType },
+    /// Query the agent's Dataverse database (proxy from API).
+    #[serde(rename = "dataverse_query")]
+    DataverseQuery {
+        request_id: String,
+        query: DataverseQueryRequest,
+    },
+    /// Response with schemas of all apps (in response to GetDataverseSchemas).
+    #[serde(rename = "dataverse_schemas")]
+    DataverseSchemas {
+        request_id: String,
+        schemas: Vec<AppSchemaOverview>,
+    },
 }
 
 fn default_true() -> bool {
     true
+}
+
+// ── Dataverse Query Types ────────────────────────────────────────
+
+/// A query request proxied from the API to an agent's Dataverse.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action")]
+pub enum DataverseQueryRequest {
+    #[serde(rename = "query_rows")]
+    QueryRows {
+        table_name: String,
+        #[serde(default)]
+        filters: Vec<serde_json::Value>,
+        #[serde(default = "default_query_limit")]
+        limit: u64,
+        #[serde(default)]
+        offset: u64,
+        #[serde(default)]
+        order_by: Option<String>,
+        #[serde(default)]
+        order_desc: bool,
+    },
+    #[serde(rename = "insert_rows")]
+    InsertRows {
+        table_name: String,
+        rows: Vec<serde_json::Value>,
+    },
+    #[serde(rename = "update_rows")]
+    UpdateRows {
+        table_name: String,
+        updates: serde_json::Value,
+        filters: Vec<serde_json::Value>,
+    },
+    #[serde(rename = "delete_rows")]
+    DeleteRows {
+        table_name: String,
+        filters: Vec<serde_json::Value>,
+    },
+    #[serde(rename = "count_rows")]
+    CountRows {
+        table_name: String,
+        #[serde(default)]
+        filters: Vec<serde_json::Value>,
+    },
+    #[serde(rename = "get_migrations")]
+    GetMigrations,
+}
+
+fn default_query_limit() -> u64 {
+    100
+}
+
+/// Overview of another app's schema (for inter-app visibility).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppSchemaOverview {
+    pub app_id: String,
+    pub slug: String,
+    pub tables: Vec<SchemaTableInfo>,
+    pub relations: Vec<SchemaRelationInfo>,
+    pub version: u64,
 }
 
 /// Auto-off mode for idle host power management.
