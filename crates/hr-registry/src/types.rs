@@ -54,9 +54,9 @@ pub struct Application {
 
 impl Application {
     /// Return all domains this application serves.
-    /// Uses per-app subdomain scheme: `app.{slug}.{base}`, `code.{slug}.{base}`, `{api}.{slug}.{base}`.
+    /// Uses per-app subdomain scheme: `{slug}.{base}`, `code.{slug}.{base}`, `{api}.{slug}.{base}`.
     pub fn domains(&self, base_domain: &str) -> Vec<String> {
-        let mut domains = vec![format!("app.{}.{}", self.slug, base_domain)];
+        let mut domains = vec![format!("{}.{}", self.slug, base_domain)];
         for api in &self.apis {
             domains.push(format!("{}.{}.{}", api.slug, self.slug, base_domain));
         }
@@ -67,10 +67,10 @@ impl Application {
     }
 
     /// Return all (domain, port, auth_required, allowed_groups) tuples for agent routing.
-    /// Uses per-app subdomain scheme: `app.{slug}.{base}`, `code.{slug}.{base}`, `{api}.{slug}.{base}`.
+    /// Uses per-app subdomain scheme: `{slug}.{base}`, `code.{slug}.{base}`, `{api}.{slug}.{base}`.
     pub fn routes(&self, base_domain: &str) -> Vec<RouteInfo> {
         let mut routes = vec![RouteInfo {
-            domain: format!("app.{}.{}", self.slug, base_domain),
+            domain: format!("{}.{}", self.slug, base_domain),
             target_port: self.frontend.target_port,
             auth_required: self.frontend.auth_required,
             allowed_groups: self.frontend.allowed_groups.clone(),
@@ -312,7 +312,7 @@ mod tests {
         assert_eq!(
             domains,
             vec![
-                "app.myapp.example.com",
+                "myapp.example.com",
                 "api.myapp.example.com",
                 "code.myapp.example.com",
             ]
@@ -323,7 +323,7 @@ mod tests {
     fn test_domains_no_code_server() {
         let app = make_test_app(false);
         let domains = app.domains("example.com");
-        assert_eq!(domains, vec!["app.myapp.example.com", "api.myapp.example.com"]);
+        assert_eq!(domains, vec!["myapp.example.com", "api.myapp.example.com"]);
     }
 
     #[test]

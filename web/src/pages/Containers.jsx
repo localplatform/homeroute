@@ -689,12 +689,12 @@ function Containers() {
                                   {baseDomain && (
                                     <div className="flex items-center gap-2 text-xs text-gray-500">
                                       <a
-                                        href={`https://app.${container.slug}.${baseDomain}`}
+                                        href={`https://${container.slug}.${baseDomain}`}
                                         target="_blank"
                                         rel="noopener noreferrer"
                                         className="font-mono hover:text-blue-400"
                                       >
-                                        app.{container.slug}.{baseDomain}
+                                        {container.slug}.{baseDomain}
                                       </a>
                                       {container.frontend?.auth_required && <Key className="w-3 h-3 text-purple-400" />}
                                       {container.frontend?.local_only && <Shield className="w-3 h-3 text-yellow-400" />}
@@ -869,7 +869,7 @@ function Containers() {
                     className="w-full px-3 py-2 bg-gray-900 border border-gray-600 text-sm font-mono"
                   />
                   {createForm.slug && baseDomain && (
-                    <p className="text-xs text-gray-500 mt-1 font-mono">app.{createForm.slug}.{baseDomain}</p>
+                    <p className="text-xs text-gray-500 mt-1 font-mono">{createForm.slug}.{baseDomain}</p>
                   )}
                 </div>
               </div>
@@ -1071,7 +1071,7 @@ function Containers() {
               <div className="border border-gray-700 p-4">
                 <div className="text-xs text-blue-400 mb-2 font-mono flex items-center gap-1">
                   <Globe className="w-3 h-3" />
-                  app.{editingContainer.slug}.{baseDomain}
+                  {editingContainer.slug}.{baseDomain}
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div>

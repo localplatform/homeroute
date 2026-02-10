@@ -248,11 +248,11 @@ async fn handle_registry_message(
             }
 
             // Build and publish routes using per-app subdomain scheme:
-            // app.{slug}.{base}, {api}.{slug}.{base}, code.{slug}.{base}
+            // {slug}.{base}, {api}.{slug}.{base}, code.{slug}.{base}
             let mut routes = Vec::new();
             if let Some(ref fe) = frontend {
                 routes.push(AgentRoute {
-                    domain: format!("app.{}.{}", slug, base_domain),
+                    domain: format!("{}.{}", slug, base_domain),
                     target_port: fe.target_port,
                     service_type: ServiceType::App,
                     auth_required: fe.auth_required,
