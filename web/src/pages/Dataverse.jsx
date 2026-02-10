@@ -1,14 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
-  Database, ChevronDown, ChevronRight, Table2,
-  Link2, HardDrive, Clock, Loader2
+  Database, ChevronRight, Table2, Loader2
 } from 'lucide-react';
-import Card from '../components/Card';
 import PageHeader from '../components/PageHeader';
-import useWebSocket from '../hooks/useWebSocket';
-import { getDataverseOverview } from '../api/client';
+import { getDataverseOverview, getDataverseTables, getDataverseTable } from '../api/client';
 
-// Field type color mapping
 const FIELD_TYPE_COLORS = {
   text: 'bg-blue-900/30 text-blue-400',
   number: 'bg-green-900/30 text-green-400',
@@ -34,16 +30,53 @@ function FieldTypeBadge({ type: fieldType }) {
   );
 }
 
+function ColumnHeader({ children }) {
+  return (
+    <div className="px-3 py-2 border-b border-gray-700 bg-gray-800/60 flex-shrink-0">
+      <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
+        {children}
+      </h3>
+    </div>
+  );
+}
+
+function EmptyState({ icon: Icon, text }) {
+  return (
+    <div className="flex-1 flex items-center justify-center text-center px-4">
+      <div>
+        {Icon && <Icon className="w-8 h-8 text-gray-600 mx-auto mb-2" />}
+        <p className="text-sm text-gray-500">{text}</p>
+      </div>
+    </div>
+  );
+}
+
+function Spinner() {
+  return (
+    <div className="flex-1 flex items-center justify-center">
+      <Loader2 className="w-5 h-5 text-gray-500 animate-spin" />
+    </div>
+  );
+}
+
 function Dataverse() {
-  const [overview, setOverview] = useState(null);
+  const [apps, setApps] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [expandedApps, setExpandedApps] = useState({});
-  const [expandedTables, setExpandedTables] = useState({});
+
+  // Column 2: tables fetched per click
+  const [selectedApp, setSelectedApp] = useState(null);
+  const [tables, setTables] = useState([]);
+  const [loadingTables, setLoadingTables] = useState(false);
+
+  // Column 3: columns fetched per click
+  const [selectedTableName, setSelectedTableName] = useState(null);
+  const [tableDetail, setTableDetail] = useState(null);
+  const [loadingColumns, setLoadingColumns] = useState(false);
 
   const fetchOverview = useCallback(async () => {
     try {
       const res = await getDataverseOverview();
-      setOverview(res.data);
+      setApps(res.data?.apps || []);
     } catch (err) {
       console.error('Failed to fetch dataverse overview:', err);
     } finally {
@@ -51,175 +84,194 @@ function Dataverse() {
     }
   }, []);
 
+  useEffect(() => { fetchOverview(); }, [fetchOverview]);
+
+  // Auto-select first app
   useEffect(() => {
-    fetchOverview();
-  }, [fetchOverview]);
+    if (apps.length > 0 && !selectedApp) {
+      selectApp(apps[0]);
+    }
+  }, [apps]);
 
-  // Live WebSocket updates
-  useWebSocket({
-    'dataverse:schema': (data) => {
-      setOverview(prev => {
-        if (!prev) return prev;
-        const apps = [...(prev.apps || [])];
-        const idx = apps.findIndex(a => a.appId === data.appId);
-        const updated = {
-          appId: data.appId,
-          slug: data.slug || (idx >= 0 ? apps[idx].slug : ''),
-          tables: data.tables || [],
-          relationsCount: data.relationsCount || 0,
-          version: data.version || 0,
-          lastUpdated: new Date().toISOString(),
-        };
-        if (idx >= 0) {
-          apps[idx] = { ...apps[idx], ...updated };
-        } else {
-          apps.push(updated);
-        }
-        return { ...prev, apps };
-      });
-    },
-  });
+  async function selectApp(app) {
+    setSelectedApp(app);
+    setSelectedTableName(null);
+    setTableDetail(null);
+    setLoadingTables(true);
+    try {
+      const res = await getDataverseTables(app.appId);
+      setTables(res.data?.tables || []);
+    } catch {
+      setTables([]);
+    } finally {
+      setLoadingTables(false);
+    }
+  }
 
-  const toggleApp = (appId) => {
-    setExpandedApps(prev => ({ ...prev, [appId]: !prev[appId] }));
-  };
+  async function selectTable(name) {
+    setSelectedTableName(name);
+    setLoadingColumns(true);
+    try {
+      const res = await getDataverseTable(selectedApp.appId, name);
+      setTableDetail(res.data?.table || null);
+    } catch {
+      setTableDetail(null);
+    } finally {
+      setLoadingColumns(false);
+    }
+  }
 
-  const toggleTable = (key) => {
-    setExpandedTables(prev => ({ ...prev, [key]: !prev[key] }));
-  };
+  const columns = tableDetail?.columns || [];
 
   if (loading) {
     return (
-      <div>
+      <div className="h-full flex flex-col">
         <PageHeader icon={Database} title="Dataverse" />
-        <div className="flex items-center justify-center py-20">
+        <div className="flex-1 flex items-center justify-center">
           <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
         </div>
       </div>
     );
   }
 
-  const apps = overview?.apps || [];
-
-  return (
-    <div>
-      <PageHeader icon={Database} title="Dataverse" />
-
-      {apps.length === 0 ? (
-        <Card>
-          <div className="text-center py-12">
+  if (apps.length === 0) {
+    return (
+      <div className="h-full flex flex-col">
+        <PageHeader icon={Database} title="Dataverse" />
+        <div className="flex-1 flex items-center justify-center">
+          <div className="text-center">
             <Database className="w-12 h-12 text-gray-600 mx-auto mb-3" />
             <p className="text-gray-400">Aucune application n'a encore de base de donnees Dataverse.</p>
             <p className="text-gray-500 text-sm mt-1">Les schemas apparaitront ici automatiquement.</p>
           </div>
-        </Card>
-      ) : (
-        <div className="space-y-4">
-          {apps.map(app => (
-            <Card key={app.appId}>
-              <div
-                className="flex items-center justify-between cursor-pointer"
-                onClick={() => toggleApp(app.appId)}
-              >
-                <div className="flex items-center gap-3">
-                  {expandedApps[app.appId] ? (
-                    <ChevronDown className="w-5 h-5 text-gray-400" />
-                  ) : (
-                    <ChevronRight className="w-5 h-5 text-gray-400" />
-                  )}
-                  <Database className="w-5 h-5 text-blue-400" />
-                  <div>
-                    <h3 className="text-white font-medium">{app.slug}</h3>
-                    <div className="flex items-center gap-4 text-xs text-gray-400 mt-0.5">
-                      <span className="flex items-center gap-1">
-                        <Table2 className="w-3 h-3" />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full flex flex-col">
+      <PageHeader icon={Database} title="Dataverse" />
+
+      <div className="flex-1 min-h-0 flex">
+
+        {/* Column 1: Apps */}
+        <div className="w-64 flex-shrink-0 border-r border-gray-700 flex flex-col bg-gray-800">
+          <ColumnHeader>Applications ({apps.length})</ColumnHeader>
+          <div className="flex-1 overflow-y-auto">
+            {apps.map(app => {
+              const isSelected = selectedApp?.appId === app.appId;
+              return (
+                <div
+                  key={app.appId}
+                  onClick={() => selectApp(app)}
+                  className={`flex items-center justify-between px-3 py-2 cursor-pointer border-b border-gray-700/50 transition-colors ${
+                    isSelected
+                      ? 'bg-blue-600/90 text-white'
+                      : 'text-gray-300 hover:bg-gray-700/50'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Database className={`w-4 h-4 flex-shrink-0 ${isSelected ? 'text-white' : 'text-blue-400'}`} />
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium truncate">{app.slug}</div>
+                      <div className={`text-xs ${isSelected ? 'text-blue-100' : 'text-gray-500'}`}>
                         {app.tables?.length || 0} tables
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <Link2 className="w-3 h-3" />
-                        {app.relationsCount || 0} relations
-                      </span>
-                      {app.dbSizeBytes && (
-                        <span className="flex items-center gap-1">
-                          <HardDrive className="w-3 h-3" />
-                          {formatBytes(app.dbSizeBytes)}
-                        </span>
-                      )}
+                        {app.dbSizeBytes ? ` · ${formatBytes(app.dbSizeBytes)}` : ''}
+                      </div>
                     </div>
                   </div>
+                  <ChevronRight className={`w-4 h-4 flex-shrink-0 ${isSelected ? 'text-white' : 'text-gray-600'}`} />
                 </div>
-                <div className="flex items-center gap-2 text-xs text-gray-500">
-                  <Clock className="w-3 h-3" />
-                  v{app.version || 0}
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Column 2: Tables */}
+        <div className="w-72 flex-shrink-0 border-r border-gray-700 flex flex-col bg-gray-800/80">
+          <ColumnHeader>
+            {selectedApp ? `Tables — ${selectedApp.slug} (${tables.length})` : 'Tables'}
+          </ColumnHeader>
+          {!selectedApp ? (
+            <EmptyState text="Sélectionnez une application" />
+          ) : loadingTables ? (
+            <Spinner />
+          ) : tables.length === 0 ? (
+            <EmptyState icon={Table2} text="Aucune table" />
+          ) : (
+            <div className="flex-1 overflow-y-auto">
+              {tables.map(table => {
+                const isSelected = selectedTableName === table.name;
+                return (
+                  <div
+                    key={table.name}
+                    onClick={() => selectTable(table.name)}
+                    className={`flex items-center justify-between px-3 py-2 cursor-pointer border-b border-gray-700/50 transition-colors ${
+                      isSelected
+                        ? 'bg-blue-600/90 text-white'
+                        : 'text-gray-300 hover:bg-gray-700/50'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Table2 className={`w-4 h-4 flex-shrink-0 ${isSelected ? 'text-white' : 'text-green-400'}`} />
+                      <div className="min-w-0">
+                        <div className="text-sm font-mono truncate">{table.name}</div>
+                        <div className={`text-xs ${isSelected ? 'text-blue-100' : 'text-gray-500'}`}>
+                          {table.columns?.length || 0} col · {table.row_count || 0} lignes
+                        </div>
+                      </div>
+                    </div>
+                    <ChevronRight className={`w-4 h-4 flex-shrink-0 ${isSelected ? 'text-white' : 'text-gray-600'}`} />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Column 3: Columns */}
+        <div className="flex-1 flex flex-col bg-gray-800/60">
+          <ColumnHeader>
+            {tableDetail ? `Colonnes — ${tableDetail.name} (${columns.length})` : 'Colonnes'}
+          </ColumnHeader>
+          {!selectedTableName ? (
+            <EmptyState text={selectedApp ? 'Sélectionnez une table' : 'Sélectionnez une application'} />
+          ) : loadingColumns ? (
+            <Spinner />
+          ) : columns.length === 0 ? (
+            <EmptyState text="Aucune colonne" />
+          ) : (
+            <div className="flex-1 overflow-y-auto">
+              {columns.map(col => (
+                <div
+                  key={col.name}
+                  className="flex items-center justify-between px-4 py-2 border-b border-gray-700/50 text-gray-300"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-mono">{col.name}</span>
+                    {col.required && (
+                      <span className="text-xs text-yellow-400" title="Requis">*</span>
+                    )}
+                    {col.unique && (
+                      <span className="text-xs px-1 py-0.5 rounded bg-blue-900/30 text-blue-400" title="Unique">U</span>
+                    )}
+                  </div>
+                  <FieldTypeBadge type={col.field_type} />
+                </div>
+              ))}
+              <div className="px-4 py-3 border-t border-gray-700 bg-gray-800/40 flex-shrink-0">
+                <div className="flex items-center gap-4 text-xs text-gray-500">
+                  <span>{tableDetail.row_count || 0} lignes</span>
+                  <span>{columns.length} colonnes</span>
+                  <span>v{selectedApp?.version || 0}</span>
                 </div>
               </div>
-
-              {expandedApps[app.appId] && (
-                <div className="mt-4 border-t border-gray-700 pt-4 space-y-2">
-                  {(app.tables || []).length === 0 ? (
-                    <p className="text-gray-500 text-sm">Aucune table.</p>
-                  ) : (
-                    (app.tables || []).map(table => {
-                      const tableKey = `${app.appId}:${table.name}`;
-                      return (
-                        <div key={tableKey} className="bg-gray-800/50 rounded">
-                          <div
-                            className="flex items-center justify-between p-3 cursor-pointer hover:bg-gray-700/30"
-                            onClick={() => toggleTable(tableKey)}
-                          >
-                            <div className="flex items-center gap-2">
-                              {expandedTables[tableKey] ? (
-                                <ChevronDown className="w-4 h-4 text-gray-500" />
-                              ) : (
-                                <ChevronRight className="w-4 h-4 text-gray-500" />
-                              )}
-                              <Table2 className="w-4 h-4 text-green-400" />
-                              <span className="text-gray-200 text-sm font-mono">{table.name}</span>
-                            </div>
-                            <div className="flex items-center gap-3 text-xs text-gray-500">
-                              <span>{table.columnsCount || table.columns?.length || 0} colonnes</span>
-                              <span>{table.rowsCount || 0} lignes</span>
-                            </div>
-                          </div>
-
-                          {expandedTables[tableKey] && table.columns && (
-                            <div className="px-3 pb-3">
-                              <table className="w-full text-sm">
-                                <thead>
-                                  <tr className="text-xs text-gray-500 border-b border-gray-700">
-                                    <th className="text-left py-1 font-normal">Colonne</th>
-                                    <th className="text-left py-1 font-normal">Type</th>
-                                    <th className="text-center py-1 font-normal">Requis</th>
-                                    <th className="text-center py-1 font-normal">Unique</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {table.columns.map(col => (
-                                    <tr key={col.name} className="border-b border-gray-800/50">
-                                      <td className="py-1.5 text-gray-300 font-mono text-xs">{col.name}</td>
-                                      <td className="py-1.5"><FieldTypeBadge type={col.fieldType} /></td>
-                                      <td className="py-1.5 text-center">
-                                        {col.required && <span className="text-yellow-400 text-xs">*</span>}
-                                      </td>
-                                      <td className="py-1.5 text-center">
-                                        {col.unique && <span className="text-blue-400 text-xs">U</span>}
-                                      </td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-              )}
-            </Card>
-          ))}
+            </div>
+          )}
         </div>
-      )}
+
+      </div>
     </div>
   );
 }
