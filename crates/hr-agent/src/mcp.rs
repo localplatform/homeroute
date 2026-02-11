@@ -910,6 +910,42 @@ fn get_deploy_tool_definitions() -> Vec<Value> {
     ]
 }
 
+/// Generate the `.mcp.json` content with all tools listed in `autoApprove`.
+/// When `is_dev` is true, includes the deploy MCP server.
+pub fn generate_mcp_json(is_dev: bool) -> String {
+    let dataverse_tools: Vec<String> = get_tool_definitions()
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+        .collect();
+
+    let mut servers = serde_json::Map::new();
+    servers.insert(
+        "dataverse".to_string(),
+        json!({
+            "command": "/usr/local/bin/hr-agent",
+            "args": ["mcp"],
+            "autoApprove": dataverse_tools
+        }),
+    );
+
+    if is_dev {
+        let deploy_tools: Vec<String> = get_deploy_tool_definitions()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+            .collect();
+        servers.insert(
+            "deploy".to_string(),
+            json!({
+                "command": "/usr/local/bin/hr-agent",
+                "args": ["mcp-deploy"],
+                "autoApprove": deploy_tools
+            }),
+        );
+    }
+
+    serde_json::to_string_pretty(&json!({ "mcpServers": servers })).unwrap()
+}
+
 async fn handle_deploy_tool_call(
     deploy_ctx: Option<&DeployContext>,
     tool: &str,

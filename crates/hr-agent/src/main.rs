@@ -455,6 +455,17 @@ async fn handle_registry_message(
                 mgr.update_config(&services);
             }
 
+            // Write/update .mcp.json for MCP tool discovery
+            let is_dev = matches!(environment, hr_registry::types::Environment::Development);
+            let workspace = std::path::Path::new("/root/workspace");
+            if workspace.is_dir() {
+                let content = mcp::generate_mcp_json(is_dev);
+                match std::fs::write(workspace.join(".mcp.json"), &content) {
+                    Ok(()) => info!("Updated /root/workspace/.mcp.json"),
+                    Err(e) => tracing::debug!("Could not write .mcp.json: {e}"),
+                }
+            }
+
             // Update agent proxy route table
             agent_proxy.update_routes(
                 &base_domain,
