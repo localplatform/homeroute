@@ -585,6 +585,7 @@ async fn main() -> anyhow::Result<()> {
                             allowed_groups: route.allowed_groups,
                             service_type: route.service_type,
                             wake_page_enabled: app.wake_page_enabled,
+                            local_only: app.frontend.local_only,
                         },
                     );
                 }

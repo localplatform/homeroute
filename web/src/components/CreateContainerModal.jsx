@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Globe, Key, Shield, Code2, HardDrive } from 'lucide-react';
+import { Key, Shield, Code2, HardDrive } from 'lucide-react';
 import Button from './Button';
 
 function CreateContainerModal({
@@ -20,19 +20,13 @@ function CreateContainerModal({
     name: initialName || '',
     slug: initialSlug || '',
     host_id: 'local',
-    environment: initialEnvironment || 'development',
+    environment: isPaired ? (initialEnvironment || 'development') : 'development',
     frontend: { auth_required: false, allowed_groups: [], local_only: false },
-    code_server_enabled: initialEnvironment !== 'production',
+    code_server_enabled: isPaired ? (initialEnvironment !== 'production') : true,
     linked_app_id: initialLinkedAppId || '',
   });
 
   const isDev = form.environment === 'development';
-
-  // Containers of opposite environment for linking (only when not paired)
-  const oppositeEnv = isDev ? 'production' : 'development';
-  const linkableContainers = !isPaired
-    ? containers.filter(c => (c.environment || 'development') === oppositeEnv && !c.linked_app_id)
-    : [];
 
   function handleSubmit() {
     if (!form.name || !form.slug) return;
@@ -56,7 +50,7 @@ function CreateContainerModal({
   }
 
   const previewUrl = form.slug && baseDomain
-    ? isDev ? `dev.${form.slug}.${baseDomain}` : `${form.slug}.${baseDomain}`
+    ? isDev ? `code.${form.slug}.${baseDomain}` : `${form.slug}.${baseDomain}`
     : null;
 
   return (
@@ -64,39 +58,12 @@ function CreateContainerModal({
       <div className="bg-gray-800 p-6 w-full max-w-lg border border-gray-700 max-h-[90vh] overflow-y-auto">
         <h2 className="text-xl font-bold mb-4">
           {isPaired
-            ? `Nouveau conteneur ${isDev ? 'DEV' : 'PROD'}`
-            : 'Nouveau conteneur'
+            ? `Nouvel environnement ${isDev ? 'DEV' : 'PROD'}`
+            : 'Nouvelle application'
           }
         </h2>
         <div className="space-y-4">
-          {/* Environment selector (only when creating from scratch) */}
-          {!isPaired && (
-            <div>
-              <label className="block text-sm text-gray-400 mb-1">Environnement</label>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => setForm(f => ({ ...f, environment: 'development', code_server_enabled: true }))}
-                  className={`flex-1 px-4 py-2 text-sm font-medium border transition-colors ${
-                    isDev
-                      ? 'bg-blue-600 border-blue-500 text-white'
-                      : 'bg-gray-900 border-gray-600 text-gray-400 hover:text-gray-200'
-                  }`}
-                >
-                  Development
-                </button>
-                <button
-                  onClick={() => setForm(f => ({ ...f, environment: 'production', code_server_enabled: false }))}
-                  className={`flex-1 px-4 py-2 text-sm font-medium border transition-colors ${
-                    !isDev
-                      ? 'bg-purple-600 border-purple-500 text-white'
-                      : 'bg-gray-900 border-gray-600 text-gray-400 hover:text-gray-200'
-                  }`}
-                >
-                  Production
-                </button>
-              </div>
-            </div>
-          )}
+          {/* Environment selector removed — from-scratch always creates DEV, PROD is auto-created */}
 
           {/* When paired: show environment as badge + slug as read-only info */}
           {isPaired && (
@@ -170,23 +137,9 @@ function CreateContainerModal({
             </select>
           </div>
 
-          {/* Link to existing container (only when creating from scratch) */}
-          {!isPaired && linkableContainers.length > 0 && (
-            <div>
-              <label className="block text-sm text-gray-400 mb-1">
-                Lier a un conteneur {oppositeEnv === 'development' ? 'DEV' : 'PROD'} existant
-              </label>
-              <select
-                value={form.linked_app_id}
-                onChange={e => setForm({ ...form, linked_app_id: e.target.value })}
-                className="w-full px-3 py-2 bg-gray-900 border border-gray-600 text-sm"
-              >
-                <option value="">Aucun</option>
-                {linkableContainers.map(c => (
-                  <option key={c.id} value={c.id}>{c.name} ({c.slug})</option>
-                ))}
-              </select>
-            </div>
+          {/* Auto-creation note (only when creating from scratch) */}
+          {!isPaired && (
+            <p className="text-xs text-gray-500">Un conteneur de production sera automatiquement créé</p>
           )}
 
           {/* Auth options */}

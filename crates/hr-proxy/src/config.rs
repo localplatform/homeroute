@@ -32,28 +32,12 @@ pub struct ProxyConfig {
     /// Chemin du fichier de log d'accès JSON (optionnel)
     #[serde(default)]
     pub access_log_path: Option<String>,
-
-    /// Réseaux locaux (pour localOnly)
-    #[serde(default = "default_local_networks")]
-    pub local_networks: Vec<String>,
 }
 
 fn default_http_port() -> u16 { 80 }
 fn default_https_port() -> u16 { 443 }
 fn default_tls_mode() -> String { "local-ca".to_string() }
 fn default_ca_path() -> PathBuf { PathBuf::from("/var/lib/server-dashboard/ca") }
-fn default_local_networks() -> Vec<String> {
-    vec![
-        "192.168.0.0/16".to_string(),
-        "10.0.0.0/8".to_string(),
-        "172.16.0.0/12".to_string(),
-        "127.0.0.0/8".to_string(),
-        "fd00::/8".to_string(),
-        "fe80::/10".to_string(),
-        "::1/128".to_string(),
-    ]
-}
-
 /// Configuration d'une route
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteConfig {
@@ -139,7 +123,6 @@ mod tests {
             ca_storage_path: PathBuf::from("/var/lib/server-dashboard/ca"),
             routes: vec![],
             access_log_path: None,
-            local_networks: default_local_networks(),
         };
 
         assert_eq!(config.https_port, 443);
@@ -190,7 +173,6 @@ mod tests {
                 },
             ],
             access_log_path: None,
-            local_networks: default_local_networks(),
         };
 
         let active = config.active_routes();

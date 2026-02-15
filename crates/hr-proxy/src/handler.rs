@@ -9,7 +9,6 @@ use hr_auth::AuthService;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use hyper_util::rt::TokioIo;
-use ipnet::IpNet;
 use std::net::IpAddr;
 use std::sync::{Arc, RwLock};
 use tokio::net::TcpStream;
@@ -33,12 +32,12 @@ pub struct AppRoute {
     pub allowed_groups: Vec<String>,
     pub service_type: ServiceType,
     pub wake_page_enabled: bool,
+    pub local_only: bool,
 }
 
 /// Snapshot of parsed config for fast lookups
 struct ConfigSnapshot {
     config: ProxyConfig,
-    local_networks: Vec<IpNet>,
 }
 
 /// Shared proxy state with reloadable config
@@ -76,18 +75,11 @@ impl ProxyState {
 
         let access_logger = OptionalAccessLogger::new(config.access_log_path.clone());
 
-        let local_networks: Vec<IpNet> = config
-            .local_networks
-            .iter()
-            .filter_map(|n| n.parse().ok())
-            .collect();
-
         Self {
             client,
             https_client,
             snapshot: RwLock::new(ConfigSnapshot {
                 config,
-                local_networks,
             }),
             access_logger,
             auth: None,
@@ -126,22 +118,8 @@ impl ProxyState {
 
     /// Reload the proxy config (called on SIGHUP)
     pub fn reload_config(&self, new_config: ProxyConfig) {
-        let local_networks: Vec<IpNet> = new_config
-            .local_networks
-            .iter()
-            .filter_map(|n| n.parse().ok())
-            .collect();
-
         let mut snapshot = self.snapshot.write().unwrap();
         snapshot.config = new_config;
-        snapshot.local_networks = local_networks;
-    }
-
-    /// Check if an IP address is in a local network
-    pub fn is_local_ip(&self, ip: &IpAddr) -> bool {
-        let canonical = ip.to_canonical();
-        let snapshot = self.snapshot.read().unwrap();
-        snapshot.local_networks.iter().any(|net| net.contains(&canonical))
     }
 
     /// Find the route matching a given Host header
@@ -288,6 +266,12 @@ async fn proxy_handler_inner(
     // Check for agent-managed application routes (before static route lookup)
     if !is_management {
         if let Some(app_route) = state.get_app_route(domain_only) {
+            // Block ALL traffic for local-only apps
+            if app_route.local_only {
+                warn!("Blocked request for local-only app {} from {}", domain_only, client_ip);
+                return Err(ProxyError::Forbidden);
+            }
+
             // Agent routes (target_port == 443) handle their own auth — skip forward-auth.
             // Non-agent routes still need central forward-auth.
             let is_agent_route = app_route.target_port == 443;
@@ -486,12 +470,9 @@ async fn proxy_handler_inner(
             .ok_or(ProxyError::DomainNotFound(host.clone()))?
     };
 
-    // IP filtering for localOnly routes
-    if route.local_only && !state.is_local_ip(&client_ip) {
-        warn!(
-            "Blocked non-local IP {} for local-only route {}",
-            client_ip, route.domain
-        );
+    // Block ALL traffic for local-only routes
+    if route.local_only {
+        warn!("Blocked request for local-only route {} from {}", route.domain, client_ip);
         return Err(ProxyError::Forbidden);
     }
 
@@ -1359,12 +1340,6 @@ mod tests {
                 },
             ],
             access_log_path: None,
-            local_networks: vec![
-                "192.168.0.0/16".to_string(),
-                "10.0.0.0/8".to_string(),
-                "172.16.0.0/12".to_string(),
-                "127.0.0.0/8".to_string(),
-            ],
         }
     }
 
@@ -1394,28 +1369,6 @@ mod tests {
     fn test_find_route_disabled() {
         let state = ProxyState::new(test_config(), 4000);
         assert!(state.find_route("disabled.example.com").is_none());
-    }
-
-    #[test]
-    fn test_is_local_ip_loopback() {
-        let state = ProxyState::new(test_config(), 4000);
-        let ip: IpAddr = "127.0.0.1".parse().unwrap();
-        assert!(state.is_local_ip(&ip));
-    }
-
-    #[test]
-    fn test_is_local_ip_private() {
-        let state = ProxyState::new(test_config(), 4000);
-        assert!(state.is_local_ip(&"192.168.1.100".parse().unwrap()));
-        assert!(state.is_local_ip(&"10.0.0.5".parse().unwrap()));
-        assert!(state.is_local_ip(&"172.16.5.10".parse().unwrap()));
-    }
-
-    #[test]
-    fn test_is_not_local_ip_public() {
-        let state = ProxyState::new(test_config(), 4000);
-        assert!(!state.is_local_ip(&"8.8.8.8".parse().unwrap()));
-        assert!(!state.is_local_ip(&"172.32.0.1".parse().unwrap()));
     }
 
     #[test]

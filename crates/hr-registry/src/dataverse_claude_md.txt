@@ -1,100 +1,113 @@
 <!-- DATAVERSE:START -->
 # Dataverse Database
 
-Ce workspace utilise Dataverse comme base de donnees. Le serveur MCP `dataverse` fournit toutes les operations.
+Ce workspace utilise Dataverse comme base de données. Le serveur MCP `dataverse` opère sur la **DB locale** de ce conteneur (`/root/workspace/.dataverse/app.db`).
 
-## Regles
-- TOUJOURS utiliser les outils MCP Dataverse pour interagir avec la base de donnees
+## Architecture DB
+- **DEV (ici)**: DB locale pour développer le schéma et tester les données (`/root/workspace/.dataverse/app.db`)
+- **PROD**: DB de production avec les vraies données (`/opt/app/.dataverse/app.db`)
+- Les modifications MCP affectent **uniquement la DB locale** — PROD n'est jamais modifiée directement
+- Pour déployer le schéma vers PROD: utiliser `prod_push` avec le dossier `.dataverse/`
+
+## Règles
+- TOUJOURS utiliser les outils MCP Dataverse pour interagir avec la base de données locale
 - JAMAIS modifier `/root/workspace/.dataverse/app.db` directement (pas de sqlite3 CLI, pas de scripts SQL ad-hoc)
-- Quand l'application a besoin d'acceder a la DB au runtime, utiliser une librairie SQLite connectee a `/root/workspace/.dataverse/app.db`
+- JAMAIS pousser la DB vers PROD sans que l'utilisateur l'ait explicitement demandé
+- Le code applicatif runtime (sur PROD) utilise une librairie SQLite connectée à `/opt/app/.dataverse/app.db`
 
 ## Outils disponibles
 
 ### Consultation
 - `list_tables` — Lister toutes les tables avec nombre de lignes
-- `describe_table` — Schema complet d'une table (colonnes, types, contraintes)
-- `get_schema` — Schema complet de la DB (tables, colonnes, relations)
+- `describe_table` — Schéma complet d'une table (colonnes, types, contraintes)
+- `get_schema` — Schéma complet de la DB (tables, colonnes, relations)
 - `get_db_info` — Statistiques (taille, nombre de tables, total lignes)
 - `count_rows` — Compter les lignes avec filtres optionnels
 
-### Schema (DDL)
-- `create_table` — Creer une table (id, created_at, updated_at sont automatiques)
+### Schéma (DDL)
+- `create_table` — Créer une table (id, created_at, updated_at sont automatiques)
 - `add_column` / `remove_column` — Modifier la structure d'une table
-- `create_relation` — Creer une relation entre tables (FK)
-- `drop_table` — Supprimer une table (necessite confirm=true)
+- `create_relation` — Créer une relation entre tables (FK)
+- `drop_table` — Supprimer une table (nécessite confirm=true)
 
-### Donnees (CRUD)
+### Données (CRUD)
 - `query_data` — Lire des lignes avec filtres et pagination
-- `insert_data` — Inserer des lignes
+- `insert_data` — Insérer des lignes
 - `update_data` — Modifier des lignes selon filtres
 - `delete_data` — Supprimer des lignes selon filtres
 
-## Procedure
-1. Avant toute operation, appeler `list_tables` pour voir l'etat actuel
-2. Utiliser `describe_table` pour comprendre le schema avant de le modifier
-3. Pour les changements de schema, utiliser les outils DDL
-4. Pour les operations de donnees, utiliser les outils CRUD
-5. Pour le code applicatif runtime, connecter une librairie SQLite a `/root/workspace/.dataverse/app.db`
+## Procédure
+1. Avant toute opération, appeler `list_tables` pour voir l'état actuel
+2. Utiliser `describe_table` pour comprendre le schéma avant de le modifier
+3. Pour les changements de schéma, utiliser les outils DDL
+4. Pour les opérations de données, utiliser les outils CRUD
+5. Quand le schéma est prêt et que l'utilisateur le demande, déployer vers PROD avec `prod_push` (dossier `.dataverse/`)
 <!-- DATAVERSE:END -->
 
 <!-- DEPLOY:START -->
-# Deploiement API Rust (Production)
+# Déploiement vers Production
 
-Ce workspace est un environnement de developpement lie a un conteneur de production. Le serveur MCP `deploy` permet de deployer et gerer l'application sur la production.
+Ce workspace est un **environnement de build** lié à un conteneur de production.
+Vous développez et buildez ici, puis déployez sur la production via les outils MCP `deploy`.
 
-## Regles
-- **JAMAIS deployer en production sauf si l'utilisateur l'a explicitement demande**
-- Le service Rust doit inclure le frontend: builder le binaire (`cargo build --release`) ET le front (si applicable) — le tout est servi par le meme service systemd `app.service`
-- TOUJOURS builder le binaire Rust AVANT de deployer (`cargo build --release`)
-- TOUJOURS utiliser l'outil `deploy` du serveur MCP pour pousser le binaire — JAMAIS copier manuellement
-- Verifier le statut de production avec `prod_status` apres chaque deploiement
-- Consulter les logs avec `prod_logs` en cas de probleme
-- Le binaire est deploye a `/opt/app/app` sur le conteneur de production
-- Le service systemd `app.service` est cree/redemarre automatiquement par l'outil deploy
+## Architecture
+- **Ici (DEV)**: code source, build tools, code-server IDE
+- **Production (PROD)**: binaire déployé + assets statiques + base de données
+- Pas d'endpoint public pour ce conteneur de dev — il sert uniquement à builder
+- L'IDE code-server est accessible via `code.{slug}.{domaine}`
+
+## Règles
+- **JAMAIS déployer en production sauf si l'utilisateur l'a explicitement demandé**
+- TOUJOURS builder le binaire AVANT de déployer (`cargo build --release`)
+- TOUJOURS utiliser l'outil `deploy` du serveur MCP — JAMAIS copier manuellement
+- Le binaire est déployé à `/opt/app/app` sur le conteneur de production
+- Le service systemd `app.service` est créé/redémarré automatiquement
 
 ## Outils disponibles
+- `deploy` — Déployer un binaire compilé vers la production (nécessite `binary_path`)
+- `prod_status` — Vérifier le statut du service en production
+- `prod_logs` — Consulter les logs du service en production
+- `prod_exec` — Exécuter une commande shell sur la production
+- `prod_push` — Copier un fichier ou dossier vers la production
 
-### Deploiement
-- `deploy` — Deployer un binaire Rust compile vers la production (necessite `binary_path`)
-- `prod_status` — Verifier le statut du service en production (actif, uptime, metadata binaire)
-- `prod_logs` — Consulter les logs journalctl du service en production (defaut: 50 lignes)
+## Procédure de déploiement
+1. Builder le binaire: `cargo build --release`
+2. Builder le frontend si applicable (dans le workspace)
+3. Déployer le binaire avec l'outil MCP `deploy`
+4. Pousser les assets statiques si besoin avec `prod_push`
+5. Pousser la base de données si le schéma a changé: `prod_push` avec le dossier `.dataverse/`
+6. Vérifier avec `prod_status` et `prod_logs`
 
-### Gestion production
-- `prod_exec` — Executer une commande shell sur le conteneur de production (ex: creer des dossiers, inspecter l'environnement)
-- `prod_push` — Copier un fichier ou dossier local vers la production (ex: fichiers .env, assets statiques, config)
-
-## Procedure de deploiement
-1. Developper et tester localement
-2. Builder le binaire: `cargo build --release`
-3. Deployer avec l'outil MCP `deploy` (binary_path = `/root/workspace/target/release/<nom>`)
-4. Verifier avec `prod_status` que le service est actif
-5. Consulter `prod_logs` pour confirmer le bon demarrage
-6. En cas d'erreur, utiliser `prod_logs` et `prod_exec` pour diagnostiquer
+## Applications mobiles (Flutter/Expo)
+Pour les apps avec frontend mobile:
+- Le backend tourne localement dans ce conteneur pendant le dev
+- Le mobile se connecte via l'IP locale du conteneur (ex: `http://10.0.x.y:3000`)
+- Pour la prod, déployer le backend sur PROD comme ci-dessus
 <!-- DEPLOY:END -->
 
 <!-- STORE:START -->
 # HomeRoute Store (Publication d'apps)
 
-Le serveur MCP `store` permet de publier et gerer des applications Android (APK) sur le HomeRoute Store.
+Le serveur MCP `store` permet de publier et gérer des applications Android (APK) sur le HomeRoute Store.
 
-## Regles
-- **JAMAIS publier sur le Store sauf si l'utilisateur l'a explicitement demande**
-- En developpement, les applications mobiles tournent sur Expo en mode DEV (`npx expo start`) — ne pas builder d'APK sauf pour publication
+## Règles
+- **JAMAIS publier sur le Store sauf si l'utilisateur l'a explicitement demandé**
+- En développement, les applications mobiles tournent en mode DEV (Flutter run ou Expo start) — ne pas builder d'APK sauf pour publication
 - TOUJOURS builder l'APK AVANT de publier (`eas build` ou build Gradle local)
-- Utiliser `list_store_apps` pour verifier les apps existantes avant de publier
-- Lors de la premiere publication, fournir obligatoirement: `name`, `slug`, `version`
-- Incrementer la version a chaque nouvelle release
+- Utiliser `list_store_apps` pour vérifier les apps existantes avant de publier
+- Lors de la première publication, fournir obligatoirement: `name`, `slug`, `version`
+- Incrémenter la version à chaque nouvelle release
 
 ## Outils disponibles
-- `list_store_apps` — Lister toutes les apps disponibles dans le Store (noms, slugs, categories, versions)
-- `get_app_info` — Details d'une app specifique (versions, changelogs)
-- `check_updates` — Verifier les mises a jour disponibles pour des apps installees
+- `list_store_apps` — Lister toutes les apps disponibles dans le Store (noms, slugs, catégories, versions)
+- `get_app_info` — Détails d'une app spécifique (versions, changelogs)
+- `check_updates` — Vérifier les mises à jour disponibles pour des apps installées
 - `publish_release` — Publier une nouvelle release APK sur le Store
 
-## Procedure de publication
-1. Builder l'APK (ex: `eas build --platform android --profile preview --local`)
-2. Verifier avec `list_store_apps` si l'app existe deja
+## Procédure de publication
+1. Builder l'APK (ex: `eas build --platform android --profile preview --local` ou `flutter build apk`)
+2. Vérifier avec `list_store_apps` si l'app existe déjà
 3. Publier avec `publish_release` en fournissant: `apk_path`, `slug`, `version`
-4. Pour une premiere publication, ajouter aussi: `name`, `description`, `category`
-5. Verifier avec `get_app_info` que la release apparait dans le Store
+4. Pour une première publication, ajouter aussi: `name`, `description`, `category`
+5. Vérifier avec `get_app_info` que la release apparaît dans le Store
 <!-- STORE:END -->

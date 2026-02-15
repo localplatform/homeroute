@@ -2,7 +2,6 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Container,
   Plus,
-  Trash2,
   CheckCircle,
   XCircle,
   Wifi,
@@ -346,16 +345,20 @@ function Containers() {
     }
   }
 
-  async function handleDelete(id, name) {
-    if (!confirm(`Supprimer "${name}" ?\nCeci detruira le conteneur nspawn, les enregistrements DNS et les certificats.`)) return;
+  async function handleDeleteApp(group) {
+    const name = group.name || group.slug;
+    const parts = [group.dev && 'DEV', group.prod && 'PROD'].filter(Boolean).join(' + ');
+    if (!confirm(`Supprimer l'application "${name}" (${parts}) ?\nCeci detruira les conteneurs nspawn, les enregistrements DNS et les certificats.`)) return;
     try {
-      const res = await deleteContainer(id);
-      if (res.data.success) {
-        setMessage({ type: 'success', text: 'Conteneur supprime' });
-        fetchData();
+      const ids = [group.dev?.id, group.prod?.id].filter(Boolean);
+      const results = await Promise.all(ids.map(id => deleteContainer(id)));
+      const failed = results.filter(r => !r.data.success);
+      if (failed.length === 0) {
+        setMessage({ type: 'success', text: 'Application supprimee' });
       } else {
-        setMessage({ type: 'error', text: res.data.error });
+        setMessage({ type: 'error', text: failed.map(r => r.data.error).join(', ') });
       }
+      fetchData();
     } catch {
       setMessage({ type: 'error', text: 'Erreur' });
     }
@@ -519,14 +522,14 @@ function Containers() {
 
   return (
     <div>
-      <PageHeader title="Containers" icon={Container}>
+      <PageHeader title="Applications" icon={Container}>
         <Button onClick={fetchData} variant="secondary">
           <RefreshCw className="w-4 h-4" />
           Rafraichir
         </Button>
         <Button onClick={() => { setCreateModalDefaults({}); setShowCreateModal(true); }}>
           <Plus className="w-4 h-4" />
-          Nouveau conteneur
+          Nouvelle application
         </Button>
       </PageHeader>
 
@@ -545,10 +548,10 @@ function Containers() {
         <Card title="Total" icon={Container}>
           <div className="text-2xl font-bold">{containers.length}</div>
         </Card>
-        <Card title="Dev Running" icon={Wifi}>
+        <Card title="Build Servers" icon={Wifi}>
           <div className="text-2xl font-bold text-blue-400">{devRunning}</div>
         </Card>
-        <Card title="Prod Running" icon={Wifi}>
+        <Card title="Production" icon={Wifi}>
           <div className="text-2xl font-bold text-purple-400">{prodRunning}</div>
         </Card>
       </div>
@@ -559,8 +562,8 @@ function Containers() {
           <Card>
             <div className="text-center py-8 text-gray-500">
               <Container className="w-12 h-12 mx-auto mb-2 opacity-50" />
-              <p>Aucun conteneur</p>
-              <p className="text-xs mt-2">Creez un conteneur nspawn pour deployer une application</p>
+              <p>Aucune application</p>
+              <p className="text-xs mt-2">Créez une application pour commencer</p>
             </div>
           </Card>
         ) : (
@@ -592,7 +595,7 @@ function Containers() {
               onEditApp={openAppEditModal}
               onToggleSecurity={handleToggleSecurity}
               onMigrate={openMigrateModal}
-              onDelete={handleDelete}
+              onDeleteApp={handleDeleteApp}
               onMigrationDismiss={(id) => setMigrations(prev => {
                 const next = { ...prev };
                 delete next[id];

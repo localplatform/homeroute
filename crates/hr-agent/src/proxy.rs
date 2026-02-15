@@ -158,18 +158,18 @@ impl AgentProxy {
     ) {
         let mut new_routes = HashMap::new();
         if let Some(fe) = frontend {
-            let frontend_domain = match environment {
-                hr_registry::types::Environment::Development => format!("dev.{}.{}", slug, base_domain),
-                hr_registry::types::Environment::Production => format!("{}.{}", slug, base_domain),
-            };
-            new_routes.insert(
-                frontend_domain,
-                LocalRoute {
-                    target_port: fe.target_port,
-                    auth_required: fe.auth_required,
-                    allowed_groups: fe.allowed_groups.clone(),
-                },
-            );
+            // Only production gets a frontend route; dev containers have no public endpoint
+            if environment == hr_registry::types::Environment::Production {
+                let frontend_domain = format!("{}.{}", slug, base_domain);
+                new_routes.insert(
+                    frontend_domain,
+                    LocalRoute {
+                        target_port: fe.target_port,
+                        auth_required: fe.auth_required,
+                        allowed_groups: fe.allowed_groups.clone(),
+                    },
+                );
+            }
         }
         if code_server_enabled && environment == hr_registry::types::Environment::Development {
             new_routes.insert(

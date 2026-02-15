@@ -32,7 +32,7 @@ const navGroups = [
   {
     label: 'Applications',
     items: [
-      { to: '/containers', icon: Container, label: 'Containers' },
+      { to: '/containers', icon: Container, label: 'Applications' },
       { to: '/dataverse', icon: Database, label: 'Dataverse' },
       { to: '/data-browser', icon: Table2, label: 'Data Browser' },
       { to: '/store', icon: StoreIcon, label: 'Store' },

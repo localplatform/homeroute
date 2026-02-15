@@ -553,21 +553,12 @@ async fn handle_registry_message(
             }
 
             // Build and publish routes based on environment:
-            // Dev: dev.{slug}.{base} + code.{slug}.{base} (if enabled)
+            // Dev: code.{slug}.{base} (if code_server_enabled)
             // Prod: {slug}.{base}
             // All routes point to port 443 (agent proxy handles internal routing)
             let mut routes = Vec::new();
             match environment {
                 hr_registry::types::Environment::Development => {
-                    if frontend.is_some() {
-                        routes.push(AgentRoute {
-                            domain: format!("dev.{}.{}", slug, base_domain),
-                            target_port: 443,
-                            service_type: ServiceType::App,
-                            auth_required: false,
-                            allowed_groups: vec![],
-                        });
-                    }
                     if code_server_enabled {
                         routes.push(AgentRoute {
                             domain: format!("code.{}.{}", slug, base_domain),

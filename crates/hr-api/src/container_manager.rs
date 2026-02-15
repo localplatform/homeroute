@@ -258,11 +258,25 @@ impl ContainerManager {
 
     /// Create a new nspawn container: register in AgentRegistry (headless), create V2 record,
     /// spawn background deploy.
-    pub async fn create_container(
+    pub fn create_container(
+        self: &Arc<Self>,
+        req: CreateContainerRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(ContainerV2Record, String), String>> + Send + '_>> {
+        Box::pin(self.create_container_inner(req))
+    }
+
+    async fn create_container_inner(
         self: &Arc<Self>,
         req: CreateContainerRequest,
     ) -> Result<(ContainerV2Record, String), String> {
         let host_id = req.host_id.clone().unwrap_or_else(|| "local".to_string());
+
+        // Clone fields needed for auto-PROD creation (before req is partially moved)
+        let auto_prod_name = req.name.clone();
+        let auto_prod_slug = req.slug.clone();
+        let auto_prod_frontend = req.frontend.clone();
+        let auto_prod_linked = req.linked_app_id.is_none();
+        let auto_prod_env = req.environment;
 
         // Create application in registry (headless — container deploy is managed separately)
         let create_req = CreateApplicationRequest {
@@ -323,6 +337,26 @@ impl ContainerManager {
                 }
             }
         });
+
+        // Auto-create linked PROD container when creating a DEV without an existing link
+        if auto_prod_env == Environment::Development && auto_prod_linked {
+            let prod_req = CreateContainerRequest {
+                name: auto_prod_name,
+                slug: auto_prod_slug.clone(),
+                host_id: Some("local".to_string()),
+                environment: Environment::Production,
+                linked_app_id: Some(app.id.clone()),
+                code_server_enabled: false,
+                frontend: auto_prod_frontend,
+            };
+            let mgr_prod = Arc::clone(self);
+            tokio::spawn(async move {
+                match Box::pin(mgr_prod.create_container(prod_req)).await {
+                    Ok(_) => info!(slug = %auto_prod_slug, "Auto-created PROD container"),
+                    Err(e) => warn!(slug = %auto_prod_slug, "Failed to auto-create PROD: {e}"),
+                }
+            });
+        }
 
         Ok((record, token))
     }

@@ -1,4 +1,4 @@
-import { Container, Plus, Pencil } from 'lucide-react';
+import { Container, Plus, Pencil, Trash2 } from 'lucide-react';
 import ContainerCard, { CONTAINER_GRID } from './ContainerCard';
 
 function AppGroupCard({
@@ -13,7 +13,7 @@ function AppGroupCard({
   onEditApp,
   onToggleSecurity,
   onMigrate,
-  onDelete,
+  onDeleteApp,
   onMigrationDismiss,
   onCreatePaired,
   MigrationProgress,
@@ -35,6 +35,13 @@ function AppGroupCard({
           >
             <Pencil className="w-3.5 h-3.5" />
           </button>
+          <button
+            onClick={() => onDeleteApp(group)}
+            className="p-1 text-gray-500 hover:text-red-400 hover:bg-gray-700 transition-colors"
+            title="Supprimer l'application"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
         </div>
       </div>
 
@@ -52,7 +59,6 @@ function AppGroupCard({
           onTerminal={onTerminal}
           onToggleSecurity={onToggleSecurity}
           onMigrate={onMigrate}
-          onDelete={onDelete}
           onMigrationDismiss={() => onMigrationDismiss(dev.id)}
           MigrationProgress={MigrationProgress}
         />
@@ -67,7 +73,7 @@ function AppGroupCard({
             className="flex items-center gap-1 text-xs text-gray-500 hover:text-blue-400 transition-colors col-span-9"
           >
             <Plus className="w-3.5 h-3.5" />
-            Creer conteneur DEV
+            Créer environnement DEV
           </button>
         </div>
       )}
@@ -85,7 +91,6 @@ function AppGroupCard({
           onTerminal={onTerminal}
           onToggleSecurity={onToggleSecurity}
           onMigrate={onMigrate}
-          onDelete={onDelete}
           onMigrationDismiss={() => onMigrationDismiss(prod.id)}
           MigrationProgress={MigrationProgress}
         />
@@ -100,7 +105,7 @@ function AppGroupCard({
             className="flex items-center gap-1 text-xs text-gray-500 hover:text-purple-400 transition-colors col-span-9"
           >
             <Plus className="w-3.5 h-3.5" />
-            Creer conteneur PROD
+            Créer environnement PROD
           </button>
         </div>
       )}

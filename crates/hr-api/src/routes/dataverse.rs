@@ -8,7 +8,6 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 use hr_registry::protocol::DataverseQueryRequest;
-use hr_registry::types::Environment;
 
 use crate::state::ApiState;
 
@@ -53,24 +52,15 @@ async fn proxy_query(state: &ApiState, app_id: &str, query: DataverseQueryReques
 
 // ── Existing read-only routes ─────────────────────────────────
 
-#[derive(Deserialize)]
-struct OverviewQuery {
-    #[serde(default)]
-    environment: Option<Environment>,
-}
-
 async fn overview(
     State(state): State<ApiState>,
-    Query(params): Query<OverviewQuery>,
 ) -> impl IntoResponse {
     let schemas = state.dataverse_schemas.read().await;
     let apps: Vec<serde_json::Value> = schemas.values()
-        .filter(|s| params.environment.map_or(true, |env| s.environment == env))
         .map(|s| {
             json!({
                 "appId": s.app_id,
                 "slug": s.slug,
-                "environment": s.environment,
                 "tables": s.tables.iter().map(|t| json!({
                     "name": t.name,
                     "slug": t.slug,
@@ -103,7 +93,6 @@ async fn app_schema(
             "data": schema,
             "meta": {
                 "app_id": app_id,
-                "environment": schema.environment,
                 "version": schema.version,
                 "last_updated": schema.last_updated.to_rfc3339(),
             }
@@ -173,7 +162,6 @@ async fn app_stats(
                 "relationsCount": schema.relations.len(),
                 "totalRows": total_rows,
                 "version": schema.version,
-                "environment": schema.environment,
                 "meta": { "app_id": app_id, "last_updated": schema.last_updated.to_rfc3339() }
             })).into_response()
         }

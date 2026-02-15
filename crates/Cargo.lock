@@ -894,7 +894,6 @@ dependencies = [
  "hr-registry",
  "hyper",
  "hyper-util",
- "ipnet",
  "reqwest",
  "rustls",
  "rustls-pemfile",

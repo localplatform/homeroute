@@ -58,7 +58,6 @@ export const updateReverseProxyHost = (id, updates) => api.put(`/reverseproxy/ho
 export const deleteReverseProxyHost = (id) => api.delete(`/reverseproxy/hosts/${id}`);
 export const toggleReverseProxyHost = (id, enabled) => api.post(`/reverseproxy/hosts/${id}/toggle`, { enabled });
 export const updateBaseDomain = (baseDomain) => api.put('/reverseproxy/config/domain', { baseDomain });
-export const updateLocalNetworks = (networks) => api.put('/reverseproxy/config/networks', { networks });
 export const renewCertificates = () => api.post('/reverseproxy/certificates/renew');
 export const reloadProxy = () => api.post('/reverseproxy/reload');
 export const getCertificatesStatus = () => api.get('/reverseproxy/certificates/status');

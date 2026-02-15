@@ -1311,6 +1311,7 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
                                                 allowed_groups: route.allowed_groups.clone(),
                                                 service_type: route.service_type,
                                                 wake_page_enabled: app.wake_page_enabled,
+                                                local_only: app.frontend.local_only,
                                             });
                                         }
                                         // Add local DNS A records for direct local access

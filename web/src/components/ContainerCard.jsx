@@ -7,7 +7,6 @@ import {
   Square,
   Terminal,
   ArrowRightLeft,
-  Trash2,
   Code2,
   Key,
   Shield,
@@ -61,7 +60,6 @@ function ContainerCard({
   onTerminal,
   onToggleSecurity,
   onMigrate,
-  onDelete,
   onMigrationDismiss,
   MigrationProgress,
 }) {
@@ -75,7 +73,7 @@ function ContainerCard({
 
   const appUrl = baseDomain
     ? isDev
-      ? `dev.${container.slug}.${baseDomain}`
+      ? `code.${container.slug}.${baseDomain}`
       : `${container.slug}.${baseDomain}`
     : null;
 
@@ -211,14 +209,6 @@ function ContainerCard({
             title="Migrer"
           >
             <ArrowRightLeft className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={() => onDelete(container.id, container.name)}
-            disabled={isMigrating}
-            className="p-1 text-red-400 hover:text-red-300 hover:bg-red-900/30 transition-colors"
-            title="Supprimer"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>

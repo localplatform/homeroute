@@ -71,12 +71,12 @@ pub struct Application {
 
 impl Application {
     /// Return all domains this application serves.
-    /// Dev: `dev.{slug}.{base}`, `code.{slug}.{base}` (if code_server_enabled).
+    /// Dev: `code.{slug}.{base}` (if code_server_enabled).
     /// Prod: `{slug}.{base}`.
     pub fn domains(&self, base_domain: &str) -> Vec<String> {
         match self.environment {
             Environment::Development => {
-                let mut domains = vec![format!("dev.{}.{}", self.slug, base_domain)];
+                let mut domains = vec![];
                 if self.code_server_enabled {
                     domains.push(format!("code.{}.{}", self.slug, base_domain));
                 }
@@ -89,18 +89,12 @@ impl Application {
     }
 
     /// Return all (domain, port, auth_required, allowed_groups) tuples for agent routing.
-    /// Dev: `dev.{slug}.{base}` + `code.{slug}.{base}` (if code_server_enabled).
+    /// Dev: `code.{slug}.{base}` (if code_server_enabled).
     /// Prod: `{slug}.{base}`.
     pub fn routes(&self, base_domain: &str) -> Vec<RouteInfo> {
         match self.environment {
             Environment::Development => {
-                let mut routes = vec![RouteInfo {
-                    domain: format!("dev.{}.{}", self.slug, base_domain),
-                    target_port: self.frontend.target_port,
-                    auth_required: self.frontend.auth_required,
-                    allowed_groups: self.frontend.allowed_groups.clone(),
-                    service_type: ServiceType::App,
-                }];
+                let mut routes = vec![];
                 if self.code_server_enabled {
                     routes.push(RouteInfo {
                         domain: format!("code.{}.{}", self.slug, base_domain),
@@ -322,13 +316,7 @@ mod tests {
         // Dev with code-server
         let app = make_test_app(Environment::Development, true);
         let domains = app.domains("example.com");
-        assert_eq!(
-            domains,
-            vec![
-                "dev.myapp.example.com",
-                "code.myapp.example.com",
-            ]
-        );
+        assert_eq!(domains, vec!["code.myapp.example.com"]);
 
         // Prod
         let app = make_test_app(Environment::Production, true);
@@ -340,19 +328,17 @@ mod tests {
     fn test_domains_no_code_server() {
         let app = make_test_app(Environment::Development, false);
         let domains = app.domains("example.com");
-        assert_eq!(domains, vec!["dev.myapp.example.com"]);
+        assert!(domains.is_empty());
     }
 
     #[test]
     fn test_routes_code_server() {
         let app = make_test_app(Environment::Development, true);
         let routes = app.routes("example.com");
-        assert_eq!(routes.len(), 2);
-        assert_eq!(routes[0].domain, "dev.myapp.example.com");
-        let cs_route = &routes[1];
-        assert_eq!(cs_route.domain, "code.myapp.example.com");
-        assert_eq!(cs_route.target_port, CODE_SERVER_PORT);
-        assert!(cs_route.auth_required);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].domain, "code.myapp.example.com");
+        assert_eq!(routes[0].target_port, CODE_SERVER_PORT);
+        assert!(routes[0].auth_required);
     }
 
     #[test]
