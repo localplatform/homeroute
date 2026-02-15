@@ -70,8 +70,10 @@ pub async fn resolve(query: &DnsQuery, state: &SharedDnsState) -> ResolveResult 
     }
 
     // 2. Static records (exact match)
+    let mut has_static_exact = false;
     for static_rec in &config.static_records {
         if static_rec.name.to_lowercase() == *name {
+            has_static_exact = true;
             let matching_type = match static_rec.record_type.to_uppercase().as_str() {
                 "A" => RecordType::A,
                 "AAAA" => RecordType::AAAA,
@@ -92,12 +94,26 @@ pub async fn resolve(query: &DnsQuery, state: &SharedDnsState) -> ResolveResult 
             }
         }
     }
+    // Static record exists but not for the queried type (e.g. AAAA query when
+    // only A record exists) — return NODATA to prevent wildcard/upstream from
+    // returning the server IPv6, which would bypass direct container access.
+    if has_static_exact {
+        debug!("Static record exists for {} but not type {:?} — NODATA", name, qtype);
+        return ResolveResult {
+            records: vec![],
+            rcode: RCODE_NOERROR,
+            cached: false,
+            blocked: false,
+        };
+    }
 
     // 2b. Static records (wildcard: *.example.com matches foo.example.com)
     if let Some(dot_pos) = name.find('.') {
         let wildcard = format!("*.{}", &name[dot_pos + 1..]);
+        let mut has_wildcard_record = false;
         for static_rec in &config.static_records {
             if static_rec.name.to_lowercase() == wildcard {
+                has_wildcard_record = true;
                 let matching_type = match static_rec.record_type.to_uppercase().as_str() {
                     "A" => RecordType::A,
                     "AAAA" => RecordType::AAAA,
@@ -117,6 +133,15 @@ pub async fn resolve(query: &DnsQuery, state: &SharedDnsState) -> ResolveResult 
                     }
                 }
             }
+        }
+        if has_wildcard_record {
+            debug!("Wildcard static record exists for {} but not type {:?} — NODATA", name, qtype);
+            return ResolveResult {
+                records: vec![],
+                rcode: RCODE_NOERROR,
+                cached: false,
+                blocked: false,
+            };
         }
     }
 
