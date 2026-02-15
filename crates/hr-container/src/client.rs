@@ -358,7 +358,9 @@ impl NspawnClient {
              DHCP=yes\n\
              \n\
              [DHCPv4]\n\
-             UseHostname=false\n";
+             UseHostname=false\n\
+             UseDNS=no\n\
+             UseDomains=no\n";
 
         tokio::fs::write(network_dir.join("80-container.network"), network_config).await
             .context("failed to write network config")?;
@@ -367,7 +369,7 @@ impl NspawnClient {
         let resolv_path = rootfs.join("etc/resolv.conf");
         // Remove symlink if present
         let _ = tokio::fs::remove_file(&resolv_path).await;
-        tokio::fs::write(&resolv_path, "nameserver 10.0.0.254\noptions edns0\n").await
+        tokio::fs::write(&resolv_path, "nameserver 10.0.0.254\nnameserver 8.8.8.8\noptions edns0 timeout:2 attempts:3\n").await
             .context("failed to write resolv.conf")?;
 
         info!(container = name, "Network config written in rootfs");

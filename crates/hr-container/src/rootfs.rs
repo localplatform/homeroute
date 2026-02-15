@@ -58,7 +58,12 @@ pub async fn bootstrap_ubuntu(container_name: &str, storage_path: &Path) -> Resu
         &networkd_link,
     ).await;
 
-    // 3. Disable IPv6 (containers lack IPv6 routing, causes DNS failures in Node.js)
+    // 3. Mask systemd-resolved to prevent DNS interference
+    // (containers use static resolv.conf pointing to HomeRoute DNS)
+    let resolved_mask = rootfs.join("etc/systemd/system/systemd-resolved.service");
+    let _ = tokio::fs::symlink("/dev/null", &resolved_mask).await;
+
+    // 4. Disable IPv6 (containers lack IPv6 routing, causes DNS failures in Node.js)
     let sysctl_dir = rootfs.join("etc/sysctl.d");
     tokio::fs::create_dir_all(&sysctl_dir).await.ok();
     tokio::fs::write(
@@ -66,22 +71,24 @@ pub async fn bootstrap_ubuntu(container_name: &str, storage_path: &Path) -> Resu
         "net.ipv6.conf.all.disable_ipv6 = 1\nnet.ipv6.conf.default.disable_ipv6 = 1\n",
     ).await.context("failed to write sysctl ipv6 config")?;
 
-    // 3b. Force curl to use IPv4 (sysctl alone doesn't prevent AAAA DNS queries)
+    // 4b. Force curl to use IPv4 (sysctl alone doesn't prevent AAAA DNS queries)
     tokio::fs::write(rootfs.join("root/.curlrc"), "--ipv4\n").await
         .context("failed to write .curlrc")?;
 
-    // 3c. Prefer IPv4 in getaddrinfo (affects all glibc-based DNS resolution)
+    // 4c. Prefer IPv4 in getaddrinfo (affects all glibc-based DNS resolution)
     tokio::fs::write(
         rootfs.join("etc/gai.conf"),
         "precedence ::ffff:0:0/96  100\n",
     ).await.context("failed to write gai.conf")?;
 
-    // 4. Install essential packages in the rootfs via chroot
+    // 5. Install essential packages in the rootfs via chroot
     // (dbus is needed for machinectl shell, curl for runtime installs)
     let setup_script = r#"
         apt-get update -qq 2>/dev/null
-        apt-get install -y -qq dbus systemd-sysv iproute2 curl ca-certificates 2>/dev/null
+        apt-get install -y -qq dbus systemd-sysv iproute2 curl ca-certificates e2fsprogs 2>/dev/null
         systemctl enable systemd-networkd 2>/dev/null || true
+        systemctl mask systemd-resolved 2>/dev/null || true
+        chattr +i /etc/resolv.conf 2>/dev/null || true
     "#;
 
     // Use chroot to install packages in the rootfs
