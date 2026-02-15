@@ -42,11 +42,6 @@ class _CatalogScreenState extends State<CatalogScreen> {
   }
 
   Future<void> _init() async {
-    final serverUrl = await storage.getServerUrl();
-    if (serverUrl == null || serverUrl.isEmpty) {
-      if (mounted) context.go('/settings');
-      return;
-    }
     await _fetchApps();
     _checkClientUpdate();
   }
