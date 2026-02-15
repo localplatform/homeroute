@@ -49,8 +49,18 @@ pub async fn resolve(query: &DnsQuery, state: &SharedDnsState) -> ResolveResult 
         if let Some(hostname) = hostname {
             if let Some(ip) = state_read.lease_store.read().await.find_ip_by_hostname(&hostname) {
                 debug!("Resolved {} via DHCP lease -> {}", name, ip);
+                if qtype == RecordType::A || qtype == RecordType::ANY {
+                    return ResolveResult {
+                        records: vec![DnsRecord::a(name, ip, 60)],
+                        rcode: RCODE_NOERROR,
+                        cached: false,
+                        blocked: false,
+                    };
+                }
+                // Hostname exists in DHCP leases but only has IPv4 — return NODATA
+                // (empty answer, NOERROR) to prevent wildcard fallback returning wrong IP
                 return ResolveResult {
-                    records: vec![DnsRecord::a(name, ip, 60)],
+                    records: vec![],
                     rcode: RCODE_NOERROR,
                     cached: false,
                     blocked: false,
